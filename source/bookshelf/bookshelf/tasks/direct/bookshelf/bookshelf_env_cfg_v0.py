@@ -63,9 +63,11 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     target_depth = 0.20  # [m] along +X from env origin
     target_lateral = 0.0  # [m] along +Y from env origin
 
-    # action scaling (interpreted as planar velocities)
-    forward_action_scale = 0.05  # [m/s] for +X
-    lateral_action_scale = 0.05  # [m/s] for +Y
+    # action scaling (delta-pose residual per control step)
+    # action \in [-1, 1] maps to a small delta in meters each step.
+    # With dt ~= 1/60, 0.003 m/step ~= 0.18 m/s max equivalent velocity (smooth but visible).
+    forward_delta_scale = 0.003  # [m/step] along +X
+    lateral_delta_scale = 0.003  # [m/step] along +Y
 
     # numeric safety (helps prevent PPO NaNs on long runs)
     obs_clip = 10.0
@@ -74,8 +76,8 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # reward scales
     progress_scale = 1.0
     center_scale = 0.5
-    action_penalty_scale = 0.01
-    success_bonus = 5.0
+    action_penalty_scale = 0.001
+    success_bonus = 20.0
     timeout_penalty = -1.0
 
     # success thresholds
@@ -84,5 +86,6 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     success_steps = 5  # consecutive steps inside success region
 
     # reset randomization ranges (in env frame)
-    initial_forward_offset_range = (-0.03, 0.03)  # [m]
-    initial_lateral_offset_range = (-0.03, 0.03)  # [m]
+    # start a bit behind the slot so the policy must make noticeable progress
+    initial_forward_offset_range = (-0.1, 0.1)  # [m]
+    initial_lateral_offset_range = (-0.1, 0.1)  # [m]

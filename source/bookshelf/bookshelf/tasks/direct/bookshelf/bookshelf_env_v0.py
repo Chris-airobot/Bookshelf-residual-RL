@@ -14,7 +14,7 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import sample_uniform
 
-from .bookshelf_env_cfg import BookshelfEnvCfg
+from .bookshelf_env_cfg_v0 import BookshelfEnvCfg
 
 
 class BookshelfEnv(DirectRLEnv):
@@ -84,18 +84,18 @@ class BookshelfEnv(DirectRLEnv):
         # Control: actions command planar velocities (m/s). We integrate position with dt and write pose to sim.
         # We also write velocities so observations remain consistent.
         #
-        # interpret actions as desired planar root velocities for the book
-        forward_vel = self.actions[:, 0] * self.cfg.forward_action_scale
-        lateral_vel = self.actions[:, 1] * self.cfg.lateral_action_scale
+        # interpret actions as desired planar delta-pose residuals for the book (meters per control step)
+        forward_delta = self.actions[:, 0] * self.cfg.forward_delta_scale
+        lateral_delta = self.actions[:, 1] * self.cfg.lateral_delta_scale
 
-        # commanded linear velocity in world frame (no vertical motion)
+        # commanded linear velocity in world frame (derived from delta / dt; no vertical motion)
         self._book_linvel_w.zero_()
-        self._book_linvel_w[:, 0] = forward_vel
-        self._book_linvel_w[:, 1] = lateral_vel
+        self._book_linvel_w[:, 0] = forward_delta / self.dt
+        self._book_linvel_w[:, 1] = lateral_delta / self.dt
 
         # integrate commanded position in world frame
-        self._book_pos_w[:, 0] += forward_vel * self.dt
-        self._book_pos_w[:, 1] += lateral_vel * self.dt
+        self._book_pos_w[:, 0] += forward_delta
+        self._book_pos_w[:, 1] += lateral_delta
         # keep a fixed height so the book stays on the ground
         self._book_pos_w[:, 2] = self.scene.env_origins[:, 2] + (self.cfg.book_size[1] / 2.0)
 
@@ -139,12 +139,12 @@ class BookshelfEnv(DirectRLEnv):
         forward_error = torch.abs(self.cfg.target_depth - book_pos[:, 0])
         lateral_error = torch.abs(self.cfg.target_lateral - book_pos[:, 1])
 
-        # progress rewards (only when error decreases)
-        forward_improvement = torch.clamp(self.prev_forward_error - forward_error, min=0.0)
-        lateral_improvement = torch.clamp(self.prev_lateral_error - lateral_error, min=0.0)
+        # signed progress rewards: positive if closer, negative if farther
+        forward_progress = self.prev_forward_error - forward_error
+        lateral_progress = self.prev_lateral_error - lateral_error
 
-        progress_reward = self.cfg.progress_scale * forward_improvement
-        centering_reward = self.cfg.center_scale * lateral_improvement
+        progress_reward = self.cfg.progress_scale * forward_progress
+        centering_reward = self.cfg.center_scale * lateral_progress
 
         # smoothness penalty
         action_penalty = self.cfg.action_penalty_scale * torch.sum(self.actions**2, dim=-1)
@@ -175,8 +175,8 @@ class BookshelfEnv(DirectRLEnv):
         self.extras.setdefault("log", {})
         self.extras["log"]["forward_error"] = forward_error.mean()
         self.extras["log"]["lateral_error"] = lateral_error.mean()
-        self.extras["log"]["forward_improvement"] = forward_improvement.mean()
-        self.extras["log"]["lateral_improvement"] = lateral_improvement.mean()
+        self.extras["log"]["forward_progress"] = forward_progress.mean()
+        self.extras["log"]["lateral_progress"] = lateral_progress.mean()
         self.extras["log"]["success_rate"] = success_mask.float().mean()
 
         return total_reward

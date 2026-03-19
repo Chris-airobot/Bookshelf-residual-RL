@@ -13,11 +13,42 @@ from . import agents
 
 
 gym.register(
-    id="Template-Bookshelf-Direct-v0",
-    entry_point=f"{__name__}.bookshelf_env:BookshelfEnv",
+    id="Bookshelf-Direct-v0",
+    entry_point=f"{__name__}.bookshelf_env_v0:BookshelfEnv",
     disable_env_checker=True,
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.bookshelf_env_cfg:BookshelfEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.bookshelf_env_cfg_v0:BookshelfEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+
+gym.register(
+    id="Bookshelf-Direct-v1",
+    entry_point=f"{__name__}.bookshelf_env_v1:BookshelfEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bookshelf_env_cfg_v1:BookshelfEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Bookshelf-Direct-v2",
+    entry_point=f"{__name__}.bookshelf_env_v2:BookshelfEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bookshelf_env_cfg_v2:BookshelfEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
+gym.register(
+    id="Bookshelf-Direct-v3",
+    entry_point=f"{__name__}.bookshelf_env_v3:BookshelfEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bookshelf_env_cfg_v3:BookshelfEnvCfg",
         "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )

@@ -133,3 +133,26 @@ Some examples of packages that can likely be excluded are:
 "<path-to-isaac-sim>/extscache/omni.services.*"     // Services tools
 ...
 ```
+
+### Code for Running
+
+Play
+```
+python scripts/sb3/play.py --task=Bookshelf-Direct-v0 --num_envs 1 --real-time --checkpoint "/home/chris/RL/bookshelf/logs/sb3/Template-Bookshelf-Direct-v0/2026-03-17_23-12-50/model.zip"
+```
+
+View Training Results
+```
+tensorboard --logdir logs/sb3
+```
+
+Training
+
+```
+python scripts/sb3/train.py --task=Bookshelf-Direct-v0 --max_iterations=2000
+```
+
+Manual Testing
+```
+python scripts/manual_step.py --task=Bookshelf-Direct-v0 --num_envs 1 --sync_usd_xform
+```

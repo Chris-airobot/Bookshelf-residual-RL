@@ -129,7 +129,9 @@ def main():
     print("[INFO] Press Enter to repeat last action. Type 'q' to quit.")
 
     obs, info = env.reset()
-    last_action = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
+    zero_action = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
+    last_action = zero_action.clone()
+    last_nudge = zero_action.clone()
 
     # Optional USD Xform sync (so gizmo matches the moving book when Fabric is enabled).
     # This is purely for visualization/debug and does not change training.
@@ -179,6 +181,7 @@ def main():
     for step in range(args_cli.steps):
         # non-blocking read of latest command (if any)
         got_command = False
+        nudge_this_step = False
         while True:
             try:
                 line = cmd_queue.get_nowait()
@@ -190,8 +193,9 @@ def main():
                 stop_event.set()
                 break
             if line == "":
-                # repeat last action
+                # repeat last nudge for a single step
                 got_command = True
+                nudge_this_step = True
                 continue
 
             parts = line.split()
@@ -205,19 +209,29 @@ def main():
                 continue
             action = torch.tensor(vals, device=env.unwrapped.device, dtype=torch.float32).unsqueeze(0)
             action = action * float(args_cli.action_gain)
-            last_action = torch.clamp(action, -1.0, 1.0)
+            last_nudge = torch.clamp(action, -1.0, 1.0)
             got_command = True
+            nudge_this_step = True
 
         if stop_event.is_set():
             break
 
-        action = last_action
+        # Single-step nudge: apply last_nudge for exactly one step if a command was received,
+        # otherwise hold zero action.
+        if nudge_this_step:
+            action = last_nudge
+        else:
+            action = zero_action
 
         # Use no_grad instead of inference_mode.
         # inference_mode can mark internal Isaac Lab buffers as "inference tensors", and then env.reset()
         # may fail when it tries to update them outside inference_mode.
         with torch.no_grad():
             obs, reward, terminated, truncated, info = env.step(action)
+
+        # After applying a one-step nudge, revert to zero action.
+        if nudge_this_step:
+            last_action = zero_action.clone()
 
         # keep USD Xform in sync with commanded pose for correct gizmo (Fabric-enabled debug)
         if book_xformable is not None and hasattr(env.unwrapped, "_book_pos_w"):
@@ -285,7 +299,9 @@ def main():
         if term0 and args_cli.reset_on_terminated:
             with torch.no_grad():
                 obs, info = env.reset()
-            print(f"[INFO] reset() because terminated=True (truncated={trunc0} ignored)")
+            # After reset, hold zero action until user types a new command.
+            last_action = zero_action.clone()
+            print(f"[INFO] reset() because terminated=True (truncated={trunc0} ignored); action reset to zero")
 
         if not simulation_app.is_running():
             break
