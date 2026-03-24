@@ -52,3 +52,13 @@ gym.register(
         "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )
+
+gym.register(
+    id="Bookshelf-Direct-v4",
+    entry_point=f"{__name__}.bookshelf_env_v4:BookshelfEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bookshelf_env_cfg_v4:BookshelfEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)

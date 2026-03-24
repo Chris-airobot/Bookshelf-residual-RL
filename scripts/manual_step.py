@@ -9,9 +9,9 @@
 Usage example:
   python scripts/manual_step.py --task=Template-Bookshelf-Direct-v0 --num_envs 1
 
-Then type actions like:
-  0.5 0.0
-  0.0 -0.2
+Then type actions like (v4: dx dy dz dyaw dgrip in [-1,1]):
+  0.5 0.0 0.0 0.0 0.0
+  0.0 -0.2 0.05 0.0 -0.5
 Press Enter to repeat the last action, or type 'q' to quit.
 """
 
@@ -74,10 +74,22 @@ parser.add_argument(
     help="Multiply typed actions by this gain (debug-only; still clamped to [-1, 1]).",
 )
 parser.add_argument(
+    "--continuous_action",
+    action="store_true",
+    default=False,
+    help="Keep applying the last typed action every step until you enter a new one (default: one-step nudge then zero).",
+)
+parser.add_argument(
     "--sync_usd_xform",
     action="store_true",
     default=False,
     help="Sync USD Xform of env_0 book to commanded pose each step (for correct gizmo with Fabric enabled).",
+)
+parser.add_argument(
+    "--debug_terminate",
+    action="store_true",
+    default=True,
+    help="Print which termination flag fired (Bookshelf v4: debug_print_terminate_reason on env cfg).",
 )
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -120,6 +132,8 @@ def main():
     # For manual debugging, we often want to avoid timeouts entirely so the pose doesn't get reset unexpectedly.
     if args_cli.episode_length_s is not None:
         env_cfg.episode_length_s = float(args_cli.episode_length_s)
+    if args_cli.debug_terminate and hasattr(env_cfg, "debug_print_terminate_reason"):
+        env_cfg.debug_print_terminate_reason = True
     env = gym.make(args_cli.task, cfg=env_cfg)
 
     print(f"[INFO] observation_space: {env.observation_space}")
@@ -216,12 +230,17 @@ def main():
         if stop_event.is_set():
             break
 
-        # Single-step nudge: apply last_nudge for exactly one step if a command was received,
-        # otherwise hold zero action.
-        if nudge_this_step:
-            action = last_nudge
+        # Default: single-step nudge then zero. With --continuous_action, keep last_nudge until a new line is typed.
+        if args_cli.continuous_action:
+            if nudge_this_step:
+                action = last_nudge
+            else:
+                action = last_nudge if last_nudge.abs().any() else zero_action
         else:
-            action = zero_action
+            if nudge_this_step:
+                action = last_nudge
+            else:
+                action = zero_action
 
         # Use no_grad instead of inference_mode.
         # inference_mode can mark internal Isaac Lab buffers as "inference tensors", and then env.reset()
@@ -229,21 +248,25 @@ def main():
         with torch.no_grad():
             obs, reward, terminated, truncated, info = env.step(action)
 
-        # After applying a one-step nudge, revert to zero action.
-        if nudge_this_step:
+        if not args_cli.continuous_action and nudge_this_step:
             last_action = zero_action.clone()
 
-        # keep USD Xform in sync with commanded pose for correct gizmo (Fabric-enabled debug)
-        if book_xformable is not None and hasattr(env.unwrapped, "_book_pos_w"):
-            pos_w = env.unwrapped._book_pos_w[0].detach().cpu()
+        # keep USD Xform in sync with sim book pose for correct gizmo (Fabric-enabled debug)
+        if book_xformable is not None:
+            book = env.unwrapped.book
+            pos_w = book.data.root_link_pos_w[0].detach().cpu()
             env_origin = env.unwrapped.scene.env_origins[0].detach().cpu()
             pos_local = pos_w - env_origin
-            quat_wxyz = env.unwrapped.cfg.book_standing_quat
+            qwxyz = book.data.root_link_quat_w[0].detach().cpu()
             translate_op.Set(Gf.Vec3f(float(pos_local[0]), float(pos_local[1]), float(pos_local[2])))
             orient_op.Set(
                 Gf.Quatd(
-                    float(quat_wxyz[0]),
-                    Gf.Vec3d(float(quat_wxyz[1]), float(quat_wxyz[2]), float(quat_wxyz[3])),
+                    float(qwxyz[0].item()),
+                    Gf.Vec3d(
+                        float(qwxyz[1].item()),
+                        float(qwxyz[2].item()),
+                        float(qwxyz[3].item()),
+                    ),
                 )
             )
 
@@ -301,6 +324,7 @@ def main():
                 obs, info = env.reset()
             # After reset, hold zero action until user types a new command.
             last_action = zero_action.clone()
+            last_nudge = zero_action.clone()
             print(f"[INFO] reset() because terminated=True (truncated={trunc0} ignored); action reset to zero")
 
         if not simulation_app.is_running():
