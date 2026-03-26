@@ -4,16 +4,14 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Config for Bookshelf-Direct-v4 (insert-only).
+"""Config for Bookshelf-Direct-v4 (spawn-only).
 
 This cfg keeps only what is needed to spawn:
 - the robot articulation
 - the book rigid object
 - the bookshelf geometry (slot parameters, shelf dimensions)
 
-This version defines an **insertion-only** RL task:
-- Robot keeps grasping the book (no release, no push-after-release)
-- Success is geometry-only at the slot mouth (dwell a few steps)
+All action/observation/reward/termination shaping has been intentionally removed for now.
 """
 
 import math
@@ -60,18 +58,13 @@ class BookshelfEnvV4SceneCfg(InteractiveSceneCfg):
 
 @configclass
 class BookshelfEnvCfg(DirectRLEnvCfg):
-    """Insertion-only env (4D Cartesian + yaw actions, geometry success)."""
+    """Spawn-only env (no task logic)."""
 
     decimation = 2
     episode_length_s = 10.0
-    # Actions: [dx, dy, dz, dyaw] in [-1, 1]
-    action_space = 4
-    # Obs (15):
-    # [front_to_mouth, lat_err, yaw_err, z_err,
-    #  ex, ey, ez, eyaw,
-    #  vx, vy, wz,
-    #  prev_dx, prev_dy, prev_dz, prev_dyaw]
-    observation_space = 15
+    # Keep minimal placeholder spaces so `DirectRLEnv` can run without special-casing.
+    action_space = 1
+    observation_space = 1
     state_space = 0
 
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
@@ -165,76 +158,8 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # Shelf height: slightly lower than z=0.2-COM alignment to avoid scraping the shelf during straight inserts.
     shelf_top_z = 0.05
     shelf_thickness = 0.02
-    
 
-    # --- insertion-only task parameters ---
-
-    # Action scales (meters / radians per step).
-    # NOTE: these are meters; keep them in the mm range for this tight insertion task.
-    dx_action_scale = 0.06
-    dy_action_scale = 0.04
-    dz_action_scale = 0.03
-    dyaw_action_scale = math.radians(1.2)
-
-    # If |action| < this on all dims, hold last IK arm setpoint (avoids sag from tracking measured q under load).
-    ik_hold_action_epsilon = 1e-5
-
-    # Reset randomization (arm joints). Larger -> more visible book pose variety.
-    reset_arm_joint_pos_noise = math.radians(8.0)
-
-    # Isaac Lab reach (ik_abs) uses a fictitious end-effector frame offset from `panda_hand`.
-    ik_body_offset_pos = (0.0, 0.0, 0.107)
-
-    # Scale for tracking errors (ex, ey, ez, eyaw) in observations.
-    tracking_error_obs_scale = 0.05
-
-    # Light normalization/clipping for raw geometry + velocity obs.
-    front_to_mouth_obs_scale = 0.08
-    lat_err_obs_scale = 0.05
-    z_err_obs_scale = 0.05
-    yaw_err_obs_scale = math.radians(30.0)
-    lin_vel_obs_scale = 0.5
-    ang_vel_obs_scale = 2.0
-
-    # Success thresholds (geometry-only at slot mouth).
-    # Insertion-only "release-ready partial insertion corridor" (measured against true `slot_x_open/slot_x_back`):
-    # - enter: front face is this far past the mouth plane (m)
-    # - back: front face is still this far away from the back panel (m); set <=0 to disable upper bound
-    success_enter_margin = 0.08
-    success_back_margin = 0.03
-    success_z_thresh = 0.015
-    success_yaw_thresh = math.radians(8.0)
-    success_steps = 4
-    # Require a small clearance margin relative to the nominal slot half-width.
-    success_lateral_margin = 0.000
-
-
-    # Optional stability gate for success (set to 0 to disable).
-    success_max_lin_vel = 0.0
-    success_max_ang_vel = 0.0
-
-    # Prevent immediate success on reset (steps).
-    min_steps_before_success = 5
-
-    # Debug printing for success gates.
-    debug_print_success = False
-    debug_print_success_every = 1
-
-    # Reward shaping (simple, insertion-only).
-    progress_scale = 4.0
-    depth_reward_scale = 0.6
-    lateral_penalty_scale = 1.5
-    yaw_penalty_scale = 0.8
-    z_penalty_scale = 1.0
-    action_delta_penalty_scale = 0.0003
-    step_penalty = -0.001
-    success_bonus = 50.0
-
-    # Debug/safety terminations (optional).
-    max_abs_xy = 0.95
-    fell_height_thresh = 0.16
-    upright_dot_thresh = 0.85
-    enable_failure_terminations = False
+    # (All task-related thresholds, penalties, and IK/action parameters removed.)
 
     # v4 reset: book COM from grasp (finger midpoint + panda_hand axes). Orientation:
     # - "standing_world": book_standing_quat + world yaw jitter (neighbors / shelf upright in world).
@@ -257,9 +182,8 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     book_to_hand_quat_franka_axes_wxyz = (0.5, -0.5, -0.5, -0.5)
     # Used when book_grasp_orientation_in_hand == "manual_quat".
     book_grasp_rel_quat_wxyz = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
-    # In-hand COM jitter at reset (meters), applied in grasp frame before snapping the book.
-    book_grasp_x_jitter = 0.01
-    book_grasp_y_jitter = 0.006
+    book_grasp_x_jitter = 0.0
+    book_grasp_y_jitter = 0.0
     # World +Z yaw after q_book_in_hand (non-zero breaks strict franka_axes grasp lock).
-    book_grasp_yaw_jitter = math.radians(8.0)
+    book_grasp_yaw_jitter = 0.0
     debug_print_grasp_frame = False

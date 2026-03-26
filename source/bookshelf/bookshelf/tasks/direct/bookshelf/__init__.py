@@ -62,3 +62,14 @@ gym.register(
         "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
     },
 )
+
+# Insertion-only v4: robot keeps grasping, geometry-only success at slot mouth.
+gym.register(
+    id="Bookshelf-Direct-v4-insert-only",
+    entry_point=f"{__name__}.bookshelf_env_book_only:BookshelfEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bookshelf_env_cfg_book_only:BookshelfEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)

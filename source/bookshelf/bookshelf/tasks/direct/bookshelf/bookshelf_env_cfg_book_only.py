@@ -162,25 +162,21 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # Center-to-center step along Y between adjacent standing books (spine thickness + small gap).
     neighbor_book_pitch_gap: float = 0.002
     wall_thickness = 0.02
-    # Shelf height: slightly lower than z=0.2-COM alignment to avoid scraping the shelf during straight inserts.
+    # Shelf height: slightly lower to avoid scraping the shelf during straight inserts.
     shelf_top_z = 0.05
     shelf_thickness = 0.02
-    
 
     # --- insertion-only task parameters ---
 
     # Action scales (meters / radians per step).
     # NOTE: these are meters; keep them in the mm range for this tight insertion task.
-    dx_action_scale = 0.06
-    dy_action_scale = 0.04
-    dz_action_scale = 0.03
+    dx_action_scale = 0.006
+    dy_action_scale = 0.004
+    dz_action_scale = 0.003
     dyaw_action_scale = math.radians(1.2)
 
     # If |action| < this on all dims, hold last IK arm setpoint (avoids sag from tracking measured q under load).
     ik_hold_action_epsilon = 1e-5
-
-    # Reset randomization (arm joints). Larger -> more visible book pose variety.
-    reset_arm_joint_pos_noise = math.radians(8.0)
 
     # Isaac Lab reach (ik_abs) uses a fictitious end-effector frame offset from `panda_hand`.
     ik_body_offset_pos = (0.0, 0.0, 0.107)
@@ -196,29 +192,21 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     lin_vel_obs_scale = 0.5
     ang_vel_obs_scale = 2.0
 
+    # Reset: allow a short PhysX settling window so the grasp stabilizes.
+    reset_book_contact_settle_steps = 5
+
+    # Full reset: desired **book leading face** X in env frame = ``slot_x_open + offset`` (negative = in front of mouth).
+    pre_insert_book_front_offset_from_mouth: float = -0.055
+    # IK substeps toward the hand pose implied by desired book pose + grasp transform (full reset only).
+    # If 0, the book is still written to the pre-insert pose but the arm remains at the default posture (usually wrong).
+    reset_preinsert_ik_steps: int = 45
+
     # Success thresholds (geometry-only at slot mouth).
-    # Insertion-only "release-ready partial insertion corridor" (measured against true `slot_x_open/slot_x_back`):
-    # - enter: front face is this far past the mouth plane (m)
-    # - back: front face is still this far away from the back panel (m); set <=0 to disable upper bound
-    success_enter_margin = 0.08
-    success_back_margin = 0.03
-    success_z_thresh = 0.015
-    success_yaw_thresh = math.radians(8.0)
+    success_z_thresh = 0.018
+    success_yaw_thresh = math.radians(12.0)
     success_steps = 4
     # Require a small clearance margin relative to the nominal slot half-width.
-    success_lateral_margin = 0.000
-
-
-    # Optional stability gate for success (set to 0 to disable).
-    success_max_lin_vel = 0.0
-    success_max_ang_vel = 0.0
-
-    # Prevent immediate success on reset (steps).
-    min_steps_before_success = 5
-
-    # Debug printing for success gates.
-    debug_print_success = False
-    debug_print_success_every = 1
+    success_lateral_margin = 0.002
 
     # Reward shaping (simple, insertion-only).
     progress_scale = 4.0
@@ -236,11 +224,8 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     upright_dot_thresh = 0.85
     enable_failure_terminations = False
 
-    # v4 reset: book COM from grasp (finger midpoint + panda_hand axes). Orientation:
-    # - "standing_world": book_standing_quat + world yaw jitter (neighbors / shelf upright in world).
-    # - "grasp_relative": q_world = q_panda_hand * q_book_in_hand * yaw_jitter; see book_grasp_orientation_in_hand.
-    book_reset_orient_mode = "grasp_relative"
-
+    # Grasp geometry for pre-insert: inverse of ``q_book = q_hand * q_body_to_hand * q_grasp_yaw`` with
+    # book position = finger_mid + R_hand * offset_hand. See ``BookshelfEnv._hand_pose_for_preinsert_book``.
     # Book COM offset in grasp frame (origin = finger midpoint, +X/+Y/+Z = panda_hand body axes).
     # +Z_hand = approach (between fingers). Increase Z to pull the COM out of the palm when using franka_axes orientation.
     # Grasp origin is the finger midpoint (see BookshelfEnv._grasp_frame_pose_w).
@@ -249,7 +234,6 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # - hand +Z ~= book long axis (half length ~= 0.076) => keep Z offset within the long-axis span
     book_grasp_offset_hand = (0.0, 0.0, 0.075)
 
-    # grasp_relative: how q_book_in_hand is chosen.
     # "franka_axes": +X_book || +Z_hand (approach), +Y_book || +X_hand, +Z_book || +Y_hand (close).
     # "manual_quat": use book_grasp_rel_quat_wxyz only.
     book_grasp_orientation_in_hand = "franka_axes"
@@ -257,9 +241,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     book_to_hand_quat_franka_axes_wxyz = (0.5, -0.5, -0.5, -0.5)
     # Used when book_grasp_orientation_in_hand == "manual_quat".
     book_grasp_rel_quat_wxyz = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
-    # In-hand COM jitter at reset (meters), applied in grasp frame before snapping the book.
-    book_grasp_x_jitter = 0.01
-    book_grasp_y_jitter = 0.006
-    # World +Z yaw after q_book_in_hand (non-zero breaks strict franka_axes grasp lock).
-    book_grasp_yaw_jitter = math.radians(8.0)
-    debug_print_grasp_frame = False
+    book_grasp_x_jitter = 0.0
+    book_grasp_y_jitter = 0.0
+    # In-hand yaw in ``q_body_to_hand * q_grasp_yaw`` (pre-insert IK); also scales world yaw on standing quat.
+    book_grasp_yaw_jitter = 0.0
