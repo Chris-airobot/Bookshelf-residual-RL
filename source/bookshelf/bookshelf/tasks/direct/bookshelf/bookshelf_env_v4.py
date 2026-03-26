@@ -48,6 +48,24 @@ def _yaw_from_quat_wxyz(q: torch.Tensor) -> torch.Tensor:
     return torch.atan2(siny_cosp, cosy_cosp)
 
 
+def _cuboid_corners_local(half_extents: torch.Tensor) -> torch.Tensor:
+    """Return 8 cuboid corners in local frame given half-extents (hx, hy, hz)."""
+    hx, hy, hz = half_extents.unbind(dim=-1)
+    return torch.stack(
+        (
+            torch.stack((+hx, +hy, +hz), dim=-1),
+            torch.stack((+hx, +hy, -hz), dim=-1),
+            torch.stack((+hx, -hy, +hz), dim=-1),
+            torch.stack((+hx, -hy, -hz), dim=-1),
+            torch.stack((-hx, +hy, +hz), dim=-1),
+            torch.stack((-hx, +hy, -hz), dim=-1),
+            torch.stack((-hx, -hy, +hz), dim=-1),
+            torch.stack((-hx, -hy, -hz), dim=-1),
+        ),
+        dim=-2,
+    )
+
+
 def _quat_mul_wxyz(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Hamilton product for quaternions (w, x, y, z)."""
     aw, ax, ay, az = a.unbind(dim=-1)
@@ -79,6 +97,8 @@ class BookshelfEnv(DirectRLEnv):
         self._jam_for_reward = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self._last_actions = torch.zeros((self.num_envs, 5), device=self.device)
+        self._release_steps_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._prev_front_to_mouth = torch.zeros(self.num_envs, device=self.device)
 
         self._target_pos_env = torch.zeros((self.num_envs, 3), device=self.device)
         self._target_yaw = torch.zeros(self.num_envs, device=self.device)
@@ -140,6 +160,9 @@ class BookshelfEnv(DirectRLEnv):
         # half_x_plus = float((r0 * h).sum().item())
         # mouth_x = _geom_slot_mouth_x(self.cfg)
         # self._book_com_x_max = float(mouth_x - half_x_plus - self.cfg.initial_slot_mouth_clearance_x)
+
+        half = 0.5 * torch.tensor(self.cfg.book_size, device=self.device, dtype=torch.float32)
+        self._book_corners_local = _cuboid_corners_local(half).to(device=self.device, dtype=torch.float32)
 
     def _setup_scene(self):
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
@@ -257,6 +280,46 @@ class BookshelfEnv(DirectRLEnv):
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
+
+    def _book_corners_env(self) -> torch.Tensor:
+        """Book cuboid corners in env frame: shape (num_envs, 8, 3)."""
+        pos_w = self.book.data.root_link_pos_w
+        quat_w = self.book.data.root_link_quat_w
+        # IsaacLab quat_apply doesn't broadcast over the corner dimension; flatten env×corner.
+        corners_l = self._book_corners_local.view(1, 8, 3).expand(self.num_envs, 8, 3)
+        quat_rep = quat_w.view(self.num_envs, 1, 4).expand(self.num_envs, 8, 4)
+        corners_w = math_utils.quat_apply(
+            quat_rep.reshape(-1, 4),
+            corners_l.reshape(-1, 3),
+        ).view(self.num_envs, 8, 3) + pos_w.view(self.num_envs, 1, 3)
+        return corners_w - self.scene.env_origins.view(self.num_envs, 1, 3)
+
+    def _stage_metrics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return (front_to_mouth, front_to_back, lat_extent, z_err, yaw_err_abs)."""
+        corners = self._book_corners_env()
+        front_x = corners[..., 0].max(dim=-1).values
+        mouth_x = torch.tensor(_geom_slot_mouth_x(self.cfg), device=self.device, dtype=front_x.dtype)
+        front_to_mouth = front_x - mouth_x
+        front_to_back = self.cfg.slot_x_back - front_x
+
+        lat_extent = torch.abs(corners[..., 1] - self.cfg.slot_center_y).max(dim=-1).values
+
+        p = self._book_pos_env()
+        z_target = self.cfg.shelf_top_z + self.cfg.shelf_thickness + 0.5 * self.cfg.book_size[1]
+        z_err = p[:, 2] - z_target
+
+        yaw_err_abs = torch.abs(self._yaw_err())
+        return front_to_mouth, front_to_back, lat_extent, z_err, yaw_err_abs
+
+    def _gripper_open_ratio(self) -> torch.Tensor:
+        """Commanded gripper opening ratio in [0, 1] based on finger joint soft limits."""
+        if len(self._finger_joint_ids) == 0:
+            return torch.zeros(self.num_envs, device=self.device)
+        finger_cmd = self._gripper_pos_des.mean(dim=-1)
+        finger_low = self._finger_lower_limits.mean(dim=-1)
+        finger_high = self._finger_upper_limits.mean(dim=-1)
+        denom = torch.clamp(finger_high - finger_low, min=1.0e-6)
+        return torch.clamp((finger_cmd - finger_low) / denom, 0.0, 1.0)
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone().clamp(-1.0, 1.0)
@@ -405,6 +468,10 @@ class BookshelfEnv(DirectRLEnv):
         fs = self.cfg.contact_obs_force_scale
         ts = self.cfg.contact_obs_torque_scale
 
+        front_to_mouth, front_to_back, _, z_err, _ = self._stage_metrics()
+        grip_open = self._gripper_open_ratio()
+        post_release = (grip_open > self.cfg.post_release_push_open_thresh).float()
+
         obs = torch.stack(
             (
                 self.cfg.slot_x_back - p[:, 0],
@@ -425,6 +492,11 @@ class BookshelfEnv(DirectRLEnv):
                 self._last_actions[:, 2],
                 self._last_actions[:, 3],
                 self._last_actions[:, 4],
+                grip_open,
+                z_err,
+                front_to_mouth,
+                front_to_back,
+                post_release,
             ),
             dim=-1,
         )
@@ -456,7 +528,7 @@ class BookshelfEnv(DirectRLEnv):
         # v = self.book.data.root_link_vel_w
         ins = p[:, 0] - self.cfg.slot_x_open
         lat_e = torch.abs(p[:, 1] - self.cfg.slot_center_y)
-        yaw_e = torch.abs(self._yaw_err())
+        front_to_mouth, front_to_back, lat_extent, z_err, yaw_e = self._stage_metrics()
 
         d_ins = ins - self.prev_insertion_depth
         lat_gate = torch.exp(-((lat_e / self.cfg.progress_lateral_sigma) ** 2))
@@ -465,6 +537,15 @@ class BookshelfEnv(DirectRLEnv):
         gated_progress = self.cfg.progress_gate_floor + (1.0 - self.cfg.progress_gate_floor) * gate
         progress_r = self.cfg.progress_scale * torch.clamp(d_ins, min=-0.02, max=0.02) * gated_progress
         insertion_pos_r = self.cfg.insertion_pos_reward_scale * torch.clamp(ins, min=-0.20, max=0.08)
+
+        # Dense "approach mouth plane" reward (pre-insertion): encourage front edge to move toward crossing the mouth.
+        d_mouth = front_to_mouth - self._prev_front_to_mouth
+        mouth_lat_gate = torch.exp(-((lat_extent / self.cfg.mouth_progress_lateral_sigma) ** 2))
+        mouth_yaw_gate = torch.exp(-((yaw_e / self.cfg.mouth_progress_yaw_sigma) ** 2))
+        mouth_gate = mouth_lat_gate * mouth_yaw_gate
+        mouth_progress_r = (
+            self.cfg.mouth_approach_progress_scale * torch.clamp(d_mouth, min=-0.02, max=0.02) * mouth_gate
+        )
 
         lateral_prog = self._prev_lateral_err - lat_e
         center_r = self.cfg.center_scale * torch.clamp(lateral_prog, min=-0.02, max=0.02)
@@ -478,8 +559,8 @@ class BookshelfEnv(DirectRLEnv):
 
         backward = torch.clamp(-d_ins, min=0.0)
         # v4: backoff allowance — when misaligned, use lower backward penalty so policy can retreat then reinsert.
-        misaligned_for_backoff = (lat_e > self.cfg.backoff_allowance_lateral_thresh) | (
-            yaw_e > self.cfg.backoff_allowance_yaw_thresh
+        misaligned_for_backoff = ((lat_e > self.cfg.backoff_allowance_lateral_thresh) | (yaw_e > self.cfg.backoff_allowance_yaw_thresh)) & (
+            fn > self.cfg.backoff_contact_norm_thresh
         )
         back_scale = torch.where(
             misaligned_for_backoff,
@@ -495,29 +576,54 @@ class BookshelfEnv(DirectRLEnv):
         misaligned = (mis_lat | mis_yaw).float()
         misalign_push_pen = self.cfg.misaligned_push_scale * torch.clamp(d_ins, min=0.0) * misaligned
 
+        # Before reaching the mouth plane, reduce harsh penalties so exploration can approach the slot.
+        pre_mouth = front_to_mouth < 0.0
+        pre_scale = torch.full_like(fn, self.cfg.pre_mouth_penalty_scale)
+        one = torch.ones_like(fn)
+        pen_scale = torch.where(pre_mouth, pre_scale, one)
+        contact_pen = contact_pen * pen_scale
+        misalign_push_pen = misalign_push_pen * pen_scale
+
         dact = self.actions - self._last_actions
         dact_pen = self.cfg.action_delta_penalty_scale * torch.sum(dact**2, dim=-1)
         dgrip_pen = self.cfg.grip_action_delta_penalty_scale * (dact[:, 4] ** 2)
 
+        # Anti-dither: discourage forward/backward chattering near the mouth plane.
+        near_mouth = torch.abs(front_to_mouth) < self.cfg.mouth_dither_window
+        dx_now = self.actions[:, 0]
+        dx_prev = self._last_actions[:, 0]
+        flip = (dx_now * dx_prev) < 0.0
+        active = (dx_now.abs() > 0.2) & (dx_prev.abs() > 0.2)
+        dx_signflip_pen = self.cfg.dx_signflip_penalty_scale * (near_mouth & flip & active).float()
+
         # Release shaping: reward opening only when reasonably aligned/inserted.
         open_cmd = torch.clamp(self.actions[:, 4] - self.cfg.release_open_action_deadband, min=0.0)
+        inner_half = 0.5 * (self.cfg.book_size[2] + self.cfg.slot_lateral_clearance)
+        mouth_ok = front_to_mouth > 0.0
+        z_ok = torch.abs(z_err) < self.cfg.success_z_thresh
         release_ok = (
-            (lat_e < self.cfg.release_align_lateral_thresh)
+            mouth_ok
+            & (lat_extent < inner_half)
+            & z_ok
             & (yaw_e < self.cfg.release_align_yaw_thresh)
             & (ins > self.cfg.release_min_insertion)
         )
         release_bonus = self.cfg.release_bonus_scale * open_cmd * release_ok.float()
         premature_open_pen = self.cfg.premature_open_penalty_scale * open_cmd * (~release_ok).float()
 
-        # Estimate commanded gripper opening ratio [0, 1] from finger limits.
-        if len(self._finger_joint_ids) > 0:
-            finger_cmd = self._gripper_pos_des.mean(dim=-1)
-            finger_low = self._finger_lower_limits.mean(dim=-1)
-            finger_high = self._finger_upper_limits.mean(dim=-1)
-            denom = torch.clamp(finger_high - finger_low, min=1.0e-6)
-            gripper_open_ratio = torch.clamp((finger_cmd - finger_low) / denom, 0.0, 1.0)
-        else:
-            gripper_open_ratio = torch.zeros_like(ins)
+        gripper_open_ratio = self._gripper_open_ratio()
+
+        # State-based early-open penalty: if the gripper is open before a clean insertion, penalize each step.
+        upright = self._upright_ok()
+        stage1_insert = (
+            (front_to_mouth > 0.0)
+            & (lat_extent < inner_half)
+            & (yaw_e < self.cfg.success_yaw_thresh)
+            & (torch.abs(z_err) < self.cfg.success_z_thresh)
+            & upright
+        )
+        early_open = (gripper_open_ratio > self.cfg.early_open_ratio_thresh) & (~stage1_insert)
+        early_open_state_pen = self.cfg.early_open_state_penalty_scale * gripper_open_ratio * early_open.float()
 
         drop_after_open = (
             (gripper_open_ratio > self.cfg.gripper_open_norm_thresh)
@@ -526,20 +632,42 @@ class BookshelfEnv(DirectRLEnv):
         ).float()
         drop_after_open_pen = self.cfg.drop_after_open_penalty_scale * drop_after_open
 
+        # Post-release push shaping: encourage continuing to push inward after opening.
+        post_release = gripper_open_ratio > self.cfg.post_release_push_open_thresh
+        push_progress_r = (
+            self.cfg.post_release_push_progress_scale * torch.clamp(d_ins, min=0.0, max=0.02) * post_release.float()
+        )
+        push_depth_r = self.cfg.post_release_push_depth_scale * torch.clamp(ins, min=0.0, max=0.08) * post_release.float()
+        insertion_stage_r = post_release.float() * (
+            self.cfg.insertion_stage_1_bonus * (ins > self.cfg.insertion_stage_1_thresh).float()
+            + self.cfg.insertion_stage_2_bonus * (ins > self.cfg.insertion_stage_2_thresh).float()
+            + self.cfg.insertion_stage_3_bonus * (ins > self.cfg.insertion_stage_3_thresh).float()
+        )
+
         side_bad = (lat_e > self.cfg.side_bad_lateral_thresh) & (ins < self.cfg.side_bad_insertion_thresh)
         side_bad_pen = self.cfg.side_bad_penalty * side_bad.float()
 
         # # v4: gripper collision penalty — no sensor yet, so zero. Add sensor + check when robot/gripper exist.
         # gripper_pen = torch.zeros(self.num_envs, device=self.device)
 
-        inserted = ins >= self.cfg.success_min_insertion
-        aligned = lat_e < self.cfg.success_lateral_thresh
-        yaw_ok = yaw_e < self.cfg.success_yaw_thresh
-        upright = self._upright_ok()
         tipped_for_fail = (~upright) & (ins >= self.cfg.tipped_check_min_ins)
-        inside = inserted & aligned & yaw_ok & upright
+        released = gripper_open_ratio > self.cfg.release_open_ratio_thresh
+
+        v_lin = self.book.data.root_link_vel_w[:, 0:3]
+        v_ang = self.book.data.root_link_vel_w[:, 3:6]
+        stable = (torch.linalg.norm(v_lin, dim=-1) < self.cfg.release_stable_linvel_thresh) & (
+            torch.linalg.norm(v_ang, dim=-1) < self.cfg.release_stable_angvel_thresh
+        )
+        stage2_release_stable = stage1_insert & released & stable
+        self._release_steps_buf = torch.where(
+            stage2_release_stable, self._release_steps_buf + 1, torch.zeros_like(self._release_steps_buf)
+        )
+        release_dwell_ok = self._release_steps_buf >= self.cfg.release_stable_steps
+
+        stage3_push = stage1_insert & release_dwell_ok & (front_to_back < self.cfg.success_final_depth_margin) & stable
+
         self.success_steps_buf = torch.where(
-            inside, self.success_steps_buf + 1, torch.zeros_like(self.success_steps_buf)
+            stage3_push, self.success_steps_buf + 1, torch.zeros_like(self.success_steps_buf)
         )
         success_mask = self.success_steps_buf >= self.cfg.success_steps
 
@@ -562,16 +690,22 @@ class BookshelfEnv(DirectRLEnv):
         rew = (
             progress_r
             + insertion_pos_r
+            + mouth_progress_r
             + center_r
             + yaw_r
             + self.cfg.step_penalty
             - dact_pen
             - dgrip_pen
+            - dx_signflip_pen
             - contact_pen
             - back_pen
             - misalign_push_pen
             + release_bonus
+            + push_progress_r
+            + push_depth_r
+            + insertion_stage_r
             - premature_open_pen
+            - early_open_state_pen
             - drop_after_open_pen
             # + gripper_pen
             + success_r
@@ -584,11 +718,14 @@ class BookshelfEnv(DirectRLEnv):
         self.prev_insertion_depth = ins.detach()
         self._prev_lateral_err = lat_e.detach()
         self._prev_yaw_err = yaw_e.detach()
+        self._prev_front_to_mouth = front_to_mouth.detach()
         self._last_actions = self.actions.detach()
 
         self.extras.setdefault("log", {})
         self.extras["log"]["insertion_depth"] = ins.mean()
         self.extras["log"]["insertion_pos_r"] = insertion_pos_r.mean()
+        self.extras["log"]["mouth_progress_r"] = mouth_progress_r.mean()
+        self.extras["log"]["dx_signflip_pen"] = dx_signflip_pen.mean()
         self.extras["log"]["lateral_err"] = lat_e.mean()
         self.extras["log"]["yaw_err_abs"] = yaw_e.mean()
         self.extras["log"]["contact_norm"] = fn.mean()
@@ -596,9 +733,16 @@ class BookshelfEnv(DirectRLEnv):
         self.extras["log"]["jam_rate"] = self._jam_for_reward.float().mean()
         self.extras["log"]["side_bad_rate"] = side_bad.float().mean()
         self.extras["log"]["release_bonus"] = release_bonus.mean()
+        self.extras["log"]["push_progress_r"] = push_progress_r.mean()
+        self.extras["log"]["push_depth_r"] = push_depth_r.mean()
+        self.extras["log"]["insertion_stage_r"] = insertion_stage_r.mean()
         self.extras["log"]["premature_open_pen"] = premature_open_pen.mean()
+        self.extras["log"]["early_open_state_pen"] = early_open_state_pen.mean()
         self.extras["log"]["drop_after_open_pen"] = drop_after_open_pen.mean()
         self.extras["log"]["gripper_open_ratio"] = gripper_open_ratio.mean()
+        self.extras["log"]["early_open_rate"] = early_open.float().mean()
+        self.extras["log"]["stage1_insert_rate"] = stage1_insert.float().mean()
+        self.extras["log"]["release_dwell_ok_rate"] = release_dwell_ok.float().mean()
 
         return rew
 
@@ -623,9 +767,13 @@ class BookshelfEnv(DirectRLEnv):
         if self.cfg.enable_failure_terminations:
             terminated = success | oob | explode | jammed | fell | tipped | bad_gripper_collision
         else:
-            # Even in permissive mode, always reset if the book has dropped to the ground.
-            terminated = success | fell
+            terminated = success
+            if bool(self.cfg.terminate_on_fell):
+                terminated = terminated | fell
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+
+        self.extras.setdefault("log", {})
+        self.extras["log"]["fell_rate"] = fell.float().mean()
 
         if self.cfg.debug_print_terminate_reason and bool(terminated.any().item()):
             for e in terminated.nonzero(as_tuple=False).reshape(-1).tolist():
@@ -845,6 +993,12 @@ class BookshelfEnv(DirectRLEnv):
         self._prev_yaw_err[env_ids_t] = torch.abs(book_yaw_wrapped)
         self._last_actions[env_ids_t] = 0.0
         self.success_steps_buf[env_ids_t] = 0
+        self._release_steps_buf[env_ids_t] = 0
+        # Initialize mouth metric buffer at reset.
+        corners0 = self._book_corners_env()[env_ids_t]
+        front_x0 = corners0[..., 0].max(dim=-1).values
+        mouth_x = _geom_slot_mouth_x(self.cfg)
+        self._prev_front_to_mouth[env_ids_t] = (front_x0 - mouth_x).detach()
         self._peak_ins[env_ids_t] = ins0
         self._stall_buf[env_ids_t] = 0
         self._jam_for_reward[env_ids_t] = False

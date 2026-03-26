@@ -59,8 +59,8 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     decimation = 2
     episode_length_s = 10.0
     action_space = 5
-    # Geometry(3) + controller state(4: ex,ey,ez,eyaw) + motion(3) + contact(3) + prev_action(5) = 18
-    observation_space = 18
+    # Geometry(3) + controller state(4: ex,ey,ez,eyaw) + motion(3) + contact(3) + prev_action(5) + stage(5) = 23
+    observation_space = 23
     state_space = 0
 
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
@@ -153,11 +153,18 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     wall_thickness = 0.02
     # Shelf height: top of shelf at 0.25 m; books (standing) center at shelf_top_z + shelf_thick + book_height/2.
     shelf_top_z = 0.25
+    shelf_thickness = 0.02
 
     success_min_insertion = 0.040
     success_lateral_thresh = 0.015
     success_yaw_thresh = math.radians(12.0)
     success_steps = 3
+    success_z_thresh = 0.018
+    success_final_depth_margin = 0.012
+    release_stable_steps = 6
+    release_stable_linvel_thresh = 0.05
+    release_stable_angvel_thresh = 0.8
+    release_open_ratio_thresh = 0.70
 
     # action: [dx, dy, dz, dyaw, dgrip] in [-1, 1]; each step applies residual deltas on CURRENT EE/tool pose.
     # IK command remains absolute pose in base frame (reach ik_abs style), computed from current pose + delta.
@@ -165,7 +172,8 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     dy_action_scale = 0.04  # ±4 mm
     dz_action_scale = 0.05  # ±5 mm vertical (book held off shelf / alignment)
     dyaw_action_scale = math.radians(2.0)  # ±2°
-    dgrip_action_scale = 0.002  # per-step finger joint delta (m), clamped to finger soft limits
+    # Smaller than v4 initial: exploration noise otherwise opens fully and causes immediate drop/reset.
+    dgrip_action_scale = 0.0004  # per-step finger joint delta (m), clamped to finger soft limits
 
     # Isaac Lab reach (ik_abs) uses a fictitious end-effector frame offset from `panda_hand`.
     # We mirror that here so "dx forward" moves the tool tip, not the raw hand body.
@@ -205,11 +213,18 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     progress_gate_floor = 0.3
     # Dense term on absolute insertion depth (clipped) to discourage static local optima.
     insertion_pos_reward_scale = 0.8
-    progress_lateral_sigma = 0.005
-    progress_yaw_sigma = math.radians(4.0)
-    misaligned_push_lateral_thresh = 0.008
-    misaligned_push_yaw_thresh = math.radians(7.0)
+    # Dense approach-to-mouth shaping (front edge toward slot entrance plane).
+    mouth_approach_progress_scale = 3.0
+    mouth_progress_lateral_sigma = 0.01
+    mouth_progress_yaw_sigma = math.radians(8.0)
+    # Loosened vs earlier v4: corridor was too needle-like and encouraged probe/retreat oscillations.
+    progress_lateral_sigma = 0.010
+    progress_yaw_sigma = math.radians(8.0)
+    misaligned_push_lateral_thresh = 0.015
+    misaligned_push_yaw_thresh = math.radians(12.0)
     misaligned_push_scale = 3.0
+    # Reduce harsh penalties before the book has reached the mouth plane.
+    pre_mouth_penalty_scale = 0.25
     action_delta_penalty_scale = 0.0003
     # Gripper action smoothness (5th action dim): penalize abrupt open/close commands.
     grip_action_delta_penalty_scale = 0.001
@@ -231,7 +246,12 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # v4: backoff allowance — when misaligned, reduce backward penalty so policy can retreat then reinsert.
     backoff_allowance_lateral_thresh = 0.012
     backoff_allowance_yaw_thresh = math.radians(10.0)
-    backoff_backward_penalty_scale = 0.2
+    backoff_backward_penalty_scale = 0.32
+    backoff_contact_norm_thresh = 25.0
+
+    # Anti-dither near mouth: penalize dx sign-flips in a small window around the mouth plane.
+    mouth_dither_window = 0.015
+    dx_signflip_penalty_scale = 0.15
 
     # Gripper release shaping (used only now that action includes dgrip).
     release_open_action_deadband = 0.2
@@ -239,11 +259,26 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     release_align_yaw_thresh = math.radians(4.0)
     release_min_insertion = 0.045
     release_bonus_scale = 0.1
-    premature_open_penalty_scale = 1.0
+    premature_open_penalty_scale = 2.5
+    # State-based early-open penalty (independent of instantaneous action).
+    early_open_ratio_thresh = 0.25
+    early_open_state_penalty_scale = 3.0
     # Penalize dropping while gripper is substantially open and insertion is still shallow.
-    drop_height_thresh = 0.08
+    # Must be >= fell_height_thresh to ensure we apply drop penalty BEFORE termination on fell.
+    drop_height_thresh = 0.175
     gripper_open_norm_thresh = 0.7
-    drop_after_open_penalty_scale = 20.0
+    drop_after_open_penalty_scale = 60.0
+
+    # Cabinet-style staged insertion shaping after release (no change to success condition).
+    post_release_push_open_thresh = 0.65
+    post_release_push_progress_scale = 6.0
+    post_release_push_depth_scale = 1.5
+    insertion_stage_1_thresh = 0.010
+    insertion_stage_2_thresh = 0.025
+    insertion_stage_3_thresh = 0.040
+    insertion_stage_1_bonus = 0.25
+    insertion_stage_2_bonus = 0.60
+    insertion_stage_3_bonus = 1.20
 
     # v4: gripper/tool collision (no-op until robot/gripper bodies and sensor exist).
     # gripper_collision_penalty_scale = -3.0
@@ -303,3 +338,5 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     debug_print_terminate_reason = False
     # If False, terminate only on success (plus timeout), not on explode/oob/fell/tipped/jammed.
     enable_failure_terminations = False
+    # Even when enable_failure_terminations=False, v4 would still terminate on fell. Allow disabling for debugging.
+    terminate_on_fell = True
