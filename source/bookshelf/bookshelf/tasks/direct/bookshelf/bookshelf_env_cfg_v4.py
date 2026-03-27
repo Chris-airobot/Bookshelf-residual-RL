@@ -180,7 +180,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     ik_hold_action_epsilon = 1e-5
 
     # Reset randomization (arm joints). Larger -> more visible book pose variety.
-    reset_arm_joint_pos_noise = math.radians(8.0)
+    reset_arm_joint_pos_noise = math.radians(2.0)
 
     # Isaac Lab reach (ik_abs) uses a fictitious end-effector frame offset from `panda_hand`.
     ik_body_offset_pos = (0.0, 0.0, 0.107)
@@ -221,11 +221,18 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     debug_print_success_every = 1
 
     # Reward shaping (simple, insertion-only).
-    progress_scale = 4.0
-    depth_reward_scale = 0.6
-    lateral_penalty_scale = 1.5
-    yaw_penalty_scale = 0.8
-    z_penalty_scale = 1.0
+    progress_scale = 7.0
+    depth_reward_scale = 1.2
+    center_progress_scale = 2.0
+    yaw_progress_scale = 1.0
+    lateral_penalty_scale = 0.9
+    yaw_penalty_scale = 0.5
+    z_penalty_scale = 0.7
+    clearance_violation_scale = 3.0
+    aligned_forward_bonus_scale = 2.0
+    # Loose alignment gate for adding forward bonus (not success thresholds).
+    aligned_bonus_lat_thresh = 0.01
+    aligned_bonus_yaw_thresh = math.radians(10.0)
     action_delta_penalty_scale = 0.0003
     step_penalty = -0.001
     success_bonus = 50.0
@@ -258,8 +265,8 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # Used when book_grasp_orientation_in_hand == "manual_quat".
     book_grasp_rel_quat_wxyz = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
     # In-hand COM jitter at reset (meters), applied in grasp frame before snapping the book.
-    book_grasp_x_jitter = 0.01
-    book_grasp_y_jitter = 0.006
+    book_grasp_x_jitter = 0.003
+    book_grasp_y_jitter = 0.002
     # World +Z yaw after q_book_in_hand (non-zero breaks strict franka_axes grasp lock).
-    book_grasp_yaw_jitter = math.radians(8.0)
+    book_grasp_yaw_jitter = math.radians(2.0)
     debug_print_grasp_frame = False

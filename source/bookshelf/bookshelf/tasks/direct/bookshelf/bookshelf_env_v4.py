@@ -108,6 +108,8 @@ class BookshelfEnv(DirectRLEnv):
         self._last_actions = torch.zeros((self.num_envs, 4), device=self.device)
         self._success_steps_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._prev_front_to_mouth = torch.zeros(self.num_envs, device=self.device)
+        self._prev_abs_lat_err = torch.zeros(self.num_envs, device=self.device)
+        self._prev_abs_yaw_err = torch.zeros(self.num_envs, device=self.device)
 
         # Integrated Cartesian target (env frame + base yaw).
         self._target_pos_env = torch.zeros((self.num_envs, 3), device=self.device)
@@ -245,7 +247,7 @@ class BookshelfEnv(DirectRLEnv):
         return torch.abs(spine_w[:, 2]) > self.cfg.upright_dot_thresh
 
     def _stage_metrics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return (front_to_true_mouth, lat_err, lat_extent, z_err, yaw_err_abs, front_to_back)."""
+        """Return (front_to_true_mouth, lat_err, lat_extent, z_err, yaw_err_signed, front_to_back)."""
         corners = self._book_corners_env()
         front_x = corners[..., 0].max(dim=-1).values
         front_to_true_mouth = front_x - float(self.cfg.slot_x_open)
@@ -259,8 +261,8 @@ class BookshelfEnv(DirectRLEnv):
         z_err = p[:, 2] - float(z_target)
 
         yaw = _yaw_from_quat_wxyz(self.book.data.root_link_quat_w)
-        yaw_err_abs = torch.abs(_wrap_to_pi(yaw))
-        return front_to_true_mouth, lat_err, lat_extent, z_err, yaw_err_abs, front_to_back
+        yaw_err = _wrap_to_pi(yaw)
+        return front_to_true_mouth, lat_err, lat_extent, z_err, yaw_err, front_to_back
 
     def _setup_scene(self):
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
@@ -411,12 +413,12 @@ class BookshelfEnv(DirectRLEnv):
             self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids)
 
     def _get_observations(self) -> dict:
-        front_to_mouth, lat_err, _, z_err, yaw_e, _ = self._stage_metrics()
+        front_to_mouth, lat_err, _, z_err, yaw_err, _ = self._stage_metrics()
         v = self.book.data.root_link_vel_w
 
         f2m_s = torch.clamp(front_to_mouth / float(self.cfg.front_to_mouth_obs_scale), -1.0, 1.0)
         lat_s = torch.clamp(lat_err / float(self.cfg.lat_err_obs_scale), -1.0, 1.0)
-        yaw_s = torch.clamp(yaw_e / float(self.cfg.yaw_err_obs_scale), -1.0, 1.0)
+        yaw_s = torch.clamp(yaw_err / float(self.cfg.yaw_err_obs_scale), -1.0, 1.0)
         z_s = torch.clamp(z_err / float(self.cfg.z_err_obs_scale), -1.0, 1.0)
         vx_s = torch.clamp(v[:, 0] / float(self.cfg.lin_vel_obs_scale), -1.0, 1.0)
         vy_s = torch.clamp(v[:, 1] / float(self.cfg.lin_vel_obs_scale), -1.0, 1.0)
@@ -464,22 +466,40 @@ class BookshelfEnv(DirectRLEnv):
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
-        front_to_mouth, lat_err, lat_extent, z_err, yaw_e, _ = self._stage_metrics()
+        front_to_mouth, lat_err, lat_extent, z_err, yaw_err, _ = self._stage_metrics()
+        abs_lat = torch.abs(lat_err)
+        abs_yaw = torch.abs(yaw_err)
+        yaw_e = abs_yaw
 
         d_mouth = front_to_mouth - self._prev_front_to_mouth
         progress = self.cfg.progress_scale * torch.clamp(d_mouth, min=-0.02, max=0.02)
 
         depth = self.cfg.depth_reward_scale * torch.clamp(front_to_mouth, min=0.0, max=0.08)
 
+        # Alignment progress (constructive shaping): reward reductions in |lat_err| and |yaw_err|.
+        center_prog = self.cfg.center_progress_scale * torch.clamp(
+            self._prev_abs_lat_err - abs_lat, min=-0.01, max=0.01
+        )
+        yaw_prog = self.cfg.yaw_progress_scale * torch.clamp(
+            self._prev_abs_yaw_err - abs_yaw, min=-0.05, max=0.05
+        )
+
         inner_half = 0.5 * (self.cfg.book_size[2] + self.cfg.slot_lateral_clearance)
         clearance_limit = inner_half - float(self.cfg.success_lateral_margin)
         clearance_violation = torch.clamp(lat_extent - clearance_limit, min=0.0)
         align_pen = (
-            self.cfg.lateral_penalty_scale * torch.abs(lat_err)
+            self.cfg.lateral_penalty_scale * abs_lat
             + self.cfg.yaw_penalty_scale * yaw_e
             + self.cfg.z_penalty_scale * torch.abs(z_err)
-            + 10.0 * clearance_violation
+            + self.cfg.clearance_violation_scale * clearance_violation
         )
+
+        # Extra forward incentive when roughly aligned: encourages "align then insert" instead of dithering.
+        aligned_for_bonus = (abs_lat < float(self.cfg.aligned_bonus_lat_thresh)) & (
+            abs_yaw < float(self.cfg.aligned_bonus_yaw_thresh)
+        )
+        aligned_forward = self.cfg.aligned_forward_bonus_scale * torch.clamp(d_mouth, min=0.0, max=0.02)
+        aligned_forward = torch.where(aligned_for_bonus, aligned_forward, torch.zeros_like(aligned_forward))
 
         dact = self.actions - self._last_actions
         dact_pen = self.cfg.action_delta_penalty_scale * torch.sum(dact**2, dim=-1)
@@ -487,14 +507,27 @@ class BookshelfEnv(DirectRLEnv):
         success = self._success_steps_buf >= self.cfg.success_steps
         success_r = self.cfg.success_bonus * success.float()
 
-        rew = progress + depth - align_pen - dact_pen + self.cfg.step_penalty + success_r
+        rew = (
+            progress
+            + depth
+            + center_prog
+            + yaw_prog
+            + aligned_forward
+            - align_pen
+            - dact_pen
+            + self.cfg.step_penalty
+            + success_r
+        )
 
         self._prev_front_to_mouth = front_to_mouth.detach()
+        self._prev_abs_lat_err = abs_lat.detach()
+        self._prev_abs_yaw_err = abs_yaw.detach()
         self._last_actions = self.actions.detach()
         return rew
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        front_to_mouth, _, lat_extent, z_err, yaw_e, front_to_back = self._stage_metrics()
+        front_to_mouth, _, lat_extent, z_err, yaw_err, front_to_back = self._stage_metrics()
+        yaw_e = torch.abs(yaw_err)
         upright = self._upright_ok()
 
         inner_half = 0.5 * (self.cfg.book_size[2] + self.cfg.slot_lateral_clearance)
@@ -625,10 +658,12 @@ class BookshelfEnv(DirectRLEnv):
         # IMPORTANT: re-seed the arm hold target from the current measured joint pose after reset/settle.
         # Otherwise, action==0 can still "continue" towards an old hold setpoint from the previous episode.
         self._arm_hold_joint_pos[env_ids_t] = self.robot.data.joint_pos[env_ids_t][:, self._arm_joint_ids].clone()
-        self.robot.set_joint_position_target(self._arm_hold_joint_pos[env_ids_t], joint_ids=self._arm_joint_ids)
+        self.robot.set_joint_position_target(
+            self._arm_hold_joint_pos[env_ids_t], joint_ids=self._arm_joint_ids, env_ids=env_ids_t
+        )
         if len(self._finger_joint_ids) > 0:
             finger_des = self.robot.data.default_joint_pos[env_ids_t][:, self._finger_joint_ids]
-            self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids)
+            self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids, env_ids=env_ids_t)
 
         # Initialize integrated target to current EE tool pose and yaw.
         ee_body_pos_env = self.robot.data.body_pos_w[env_ids_t, self._ee_body_idx] - self.scene.env_origins[env_ids_t]
@@ -646,3 +681,7 @@ class BookshelfEnv(DirectRLEnv):
         self._prev_front_to_mouth[env_ids_t] = (front_x0 - float(self.cfg.slot_x_open)).detach()
         self._last_actions[env_ids_t] = 0.0
         self._success_steps_buf[env_ids_t] = 0
+        # Reset progress buffers.
+        _, lat_err0, _, _, yaw_err0, _ = self._stage_metrics()
+        self._prev_abs_lat_err[env_ids_t] = torch.abs(lat_err0)[env_ids_t].detach()
+        self._prev_abs_yaw_err[env_ids_t] = torch.abs(yaw_err0)[env_ids_t].detach()
