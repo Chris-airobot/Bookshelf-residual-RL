@@ -245,7 +245,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     slot_reach_yaw_thresh = math.radians(12.0)
     slot_reach_z_thresh = 0.018
     # front_to_mouth must be in (-slot_reach_mouth_window_m, success_enter_margin) (approach + pre-success insert).
-    slot_reach_mouth_window_m = 0.10
+    slot_reach_mouth_window_m = 0.010
     # Archive-inspired anti-dither shaping.
     # Closer to 1.0 => less "comfort" outside the mouth (reduces pre-insert local optimum).
     pre_mouth_penalty_scale = 0.85
