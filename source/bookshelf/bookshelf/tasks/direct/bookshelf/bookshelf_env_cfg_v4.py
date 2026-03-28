@@ -222,18 +222,37 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
 
     # Reward shaping (simple, insertion-only).
     progress_scale = 7.0
-    depth_reward_scale = 1.2
+    # Linear + quadratic depth shaping in [0, success_enter_margin] to reward committing past the mouth.
+    depth_reward_scale = 2.5
+    depth_corridor_progress_scale = 1.2
     center_progress_scale = 2.0
     yaw_progress_scale = 1.0
     lateral_penalty_scale = 0.9
     yaw_penalty_scale = 0.5
     z_penalty_scale = 0.7
-    clearance_violation_scale = 3.0
+    # Softer base scale; first centimeters past mouth use clearance_ramp (see env).
+    clearance_violation_scale = 1.5
+    # Meters past mouth plane over which clearance penalty ramps from 50% to 100%.
+    clearance_ramp_depth_m = 0.03
     aligned_forward_bonus_scale = 2.0
     # Loose alignment gate for adding forward bonus (not success thresholds).
     aligned_bonus_lat_thresh = 0.01
     aligned_bonus_yaw_thresh = math.radians(10.0)
-    action_delta_penalty_scale = 0.0003
+    # Dense bonus when the book has effectively "reached" the slot mouth region (aligned + close in X).
+    # Keep scale well above typical per-step penalties so hovering in this funnel beats oscillating away.
+    slot_reach_bonus_scale = 6.0
+    slot_reach_lat_thresh = 0.012
+    slot_reach_yaw_thresh = math.radians(12.0)
+    slot_reach_z_thresh = 0.018
+    # front_to_mouth must be in (-slot_reach_mouth_window_m, success_enter_margin) (approach + pre-success insert).
+    slot_reach_mouth_window_m = 0.10
+    # Archive-inspired anti-dither shaping.
+    # Closer to 1.0 => less "comfort" outside the mouth (reduces pre-insert local optimum).
+    pre_mouth_penalty_scale = 0.85
+    mouth_dither_window = 0.015
+    dx_signflip_penalty_scale = 0.4
+    dx_signflip_active_thresh = 0.2
+    action_delta_penalty_scale = 0.0015
     step_penalty = -0.001
     success_bonus = 50.0
 

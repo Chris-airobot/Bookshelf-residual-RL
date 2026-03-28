@@ -474,7 +474,11 @@ class BookshelfEnv(DirectRLEnv):
         d_mouth = front_to_mouth - self._prev_front_to_mouth
         progress = self.cfg.progress_scale * torch.clamp(d_mouth, min=-0.02, max=0.02)
 
-        depth = self.cfg.depth_reward_scale * torch.clamp(front_to_mouth, min=0.0, max=0.08)
+        enter_m = float(self.cfg.success_enter_margin)
+        fm_pos = torch.clamp(front_to_mouth, min=0.0, max=enter_m)
+        depth = self.cfg.depth_reward_scale * fm_pos
+        norm_depth = torch.clamp(front_to_mouth / enter_m, 0.0, 1.0)
+        depth_sq = float(self.cfg.depth_corridor_progress_scale) * (norm_depth**2)
 
         # Alignment progress (constructive shaping): reward reductions in |lat_err| and |yaw_err|.
         center_prog = self.cfg.center_progress_scale * torch.clamp(
@@ -487,12 +491,18 @@ class BookshelfEnv(DirectRLEnv):
         inner_half = 0.5 * (self.cfg.book_size[2] + self.cfg.slot_lateral_clearance)
         clearance_limit = inner_half - float(self.cfg.success_lateral_margin)
         clearance_violation = torch.clamp(lat_extent - clearance_limit, min=0.0)
-        align_pen = (
+        base_align = (
             self.cfg.lateral_penalty_scale * abs_lat
             + self.cfg.yaw_penalty_scale * yaw_e
             + self.cfg.z_penalty_scale * torch.abs(z_err)
-            + self.cfg.clearance_violation_scale * clearance_violation
         )
+        clr_scale = float(self.cfg.clearance_violation_scale)
+        ramp_d = float(getattr(self.cfg, "clearance_ramp_depth_m", 0.03))
+        ramp = torch.clamp(front_to_mouth / ramp_d, 0.0, 1.0)
+        # Past mouth: ramp clearance cost from 50% -> 100% over ramp_d (ease cliff at insertion).
+        clr_ramp = torch.where(front_to_mouth > 0.0, 0.5 + 0.5 * ramp, torch.ones_like(front_to_mouth))
+        clearance_pen = clr_scale * clr_ramp * clearance_violation
+        align_pen = base_align + clearance_pen
 
         # Extra forward incentive when roughly aligned: encourages "align then insert" instead of dithering.
         aligned_for_bonus = (abs_lat < float(self.cfg.aligned_bonus_lat_thresh)) & (
@@ -501,8 +511,42 @@ class BookshelfEnv(DirectRLEnv):
         aligned_forward = self.cfg.aligned_forward_bonus_scale * torch.clamp(d_mouth, min=0.0, max=0.02)
         aligned_forward = torch.where(aligned_for_bonus, aligned_forward, torch.zeros_like(aligned_forward))
 
+        # Strong incentive to stay in the "at the slot" funnel (dominates small penalties / dither if tuned).
+        sr_lat = float(getattr(self.cfg, "slot_reach_lat_thresh", 0.012))
+        sr_yaw = float(getattr(self.cfg, "slot_reach_yaw_thresh", 0.21))
+        sr_z = float(getattr(self.cfg, "slot_reach_z_thresh", 0.018))
+        sr_win = float(getattr(self.cfg, "slot_reach_mouth_window_m", 0.10))
+        sr_scale = float(getattr(self.cfg, "slot_reach_bonus_scale", 0.0))
+        in_slot_funnel = (
+            (abs_lat < sr_lat)
+            & (abs_yaw < sr_yaw)
+            & (torch.abs(z_err) < sr_z)
+            & (front_to_mouth > -sr_win)
+            & (front_to_mouth < enter_m)
+        )
+        slot_reach = sr_scale * in_slot_funnel.float()
+
         dact = self.actions - self._last_actions
         dact_pen = self.cfg.action_delta_penalty_scale * torch.sum(dact**2, dim=-1)
+
+        # Archive-inspired anti-dither: penalize x-action sign flips near mouth plane.
+        near_mouth = torch.abs(front_to_mouth) < float(self.cfg.mouth_dither_window)
+        dx_now = self.actions[:, 0]
+        dx_prev = self._last_actions[:, 0]
+        flip = (dx_now * dx_prev) < 0.0
+        active = (dx_now.abs() > float(self.cfg.dx_signflip_active_thresh)) & (
+            dx_prev.abs() > float(self.cfg.dx_signflip_active_thresh)
+        )
+        dx_signflip_pen = self.cfg.dx_signflip_penalty_scale * (near_mouth & flip & active).float()
+
+        # Before reaching mouth, soften harsh alignment penalties to avoid local probe/retreat traps.
+        pre_mouth = front_to_mouth < 0.0
+        pen_scale = torch.where(
+            pre_mouth,
+            torch.full_like(front_to_mouth, float(self.cfg.pre_mouth_penalty_scale)),
+            torch.ones_like(front_to_mouth),
+        )
+        align_pen = align_pen * pen_scale
 
         success = self._success_steps_buf >= self.cfg.success_steps
         success_r = self.cfg.success_bonus * success.float()
@@ -510,11 +554,14 @@ class BookshelfEnv(DirectRLEnv):
         rew = (
             progress
             + depth
+            + depth_sq
             + center_prog
             + yaw_prog
             + aligned_forward
+            + slot_reach
             - align_pen
             - dact_pen
+            - dx_signflip_pen
             + self.cfg.step_penalty
             + success_r
         )
