@@ -63,7 +63,7 @@ gym.register(
     },
 )
 
-# Insertion-only v4: robot keeps grasping, geometry-only success at slot mouth.
+# v4 book-only variant: fixed grasp / book-only ablations (see bookshelf_env_book_only).
 gym.register(
     id="Bookshelf-Direct-v4-insert-only",
     entry_point=f"{__name__}.bookshelf_env_book_only:BookshelfEnv",

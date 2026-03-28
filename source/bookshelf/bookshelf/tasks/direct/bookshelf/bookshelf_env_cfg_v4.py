@@ -11,9 +11,10 @@ This cfg keeps only what is needed to spawn:
 - the book rigid object
 - the bookshelf geometry (slot parameters, shelf dimensions)
 
-This version defines an **insertion-only** RL task:
-- Robot keeps grasping the book (no release, no push-after-release)
+This version defines an insertion RL task with **learned gripper**:
+- Actions: Cartesian residual + yaw + gripper open/close
 - Success is geometry-only at the slot mouth (dwell a few steps)
+- Termination: book COM on the floor (not on shelf deck) → failure; book on shelf without grasp → continue
 """
 
 import math
@@ -60,18 +61,19 @@ class BookshelfEnvV4SceneCfg(InteractiveSceneCfg):
 
 @configclass
 class BookshelfEnvCfg(DirectRLEnvCfg):
-    """Insertion-only env (4D Cartesian + yaw actions, geometry success)."""
+    """Insertion env (5D: Cartesian + yaw + gripper; geometry success)."""
 
     decimation = 2
     episode_length_s = 10.0
-    # Actions: [dx, dy, dz, dyaw] in [-1, 1]
-    action_space = 4
-    # Obs (15):
+    # Actions: [dx, dy, dz, dyaw, g_gripper] in [-1, 1]; g=-1 closed, g=+1 open
+    action_space = 5
+    # Obs (17):
     # [front_to_mouth, lat_err, yaw_err, z_err,
     #  ex, ey, ez, eyaw,
     #  vx, vy, wz,
-    #  prev_dx, prev_dy, prev_dz, prev_dyaw]
-    observation_space = 15
+    #  gripper_open01,
+    #  prev_dx, prev_dy, prev_dz, prev_dyaw, prev_gripper]
+    observation_space = 17
     state_space = 0
 
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
@@ -175,8 +177,11 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     dy_action_scale = 0.04
     dz_action_scale = 0.03
     dyaw_action_scale = math.radians(1.2)
+    # Gripper: finger joint targets (m); action g=-1 → closed, g=+1 → open
+    gripper_closed_joint_pos = 0.002
+    gripper_open_joint_pos = 0.04
 
-    # If |action| < this on all dims, hold last IK arm setpoint (avoids sag from tracking measured q under load).
+    # If |arm action| < this on all arm dims, hold last IK arm setpoint (gripper excluded).
     ik_hold_action_epsilon = 1e-5
 
     # Reset randomization (arm joints). Larger -> more visible book pose variety.
@@ -261,6 +266,14 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     fell_height_thresh = 0.16
     upright_dot_thresh = 0.85
     enable_failure_terminations = False
+
+    # Ground failure uses **lowest book corner** z (not COM): standing book on floor can have COM ~0.11 m.
+    book_floor_lowest_z_thresh = 0.042
+    # Extra padding (m) around shelf cuboid footprint for "still on shelf" exemption (see env).
+    shelf_footprint_x_pad_m = 0.04
+    shelf_footprint_y_pad_m = 0.05
+    # Lowest corner must be at/above deck minus slack to count as supported on shelf (deck = shelf_top_z + shelf_thickness).
+    book_on_shelf_z_slack_m = 0.02
 
     # v4 reset: book COM from grasp (finger midpoint + panda_hand axes). Orientation:
     # - "standing_world": book_standing_quat + world yaw jitter (neighbors / shelf upright in world).

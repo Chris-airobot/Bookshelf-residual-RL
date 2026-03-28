@@ -9,8 +9,8 @@
 Usage example:
   python scripts/manual_step.py --task=Template-Bookshelf-Direct-v0 --num_envs 1
 
-Then type actions like (v4: dx dy dz dyaw dgrip in [-1,1]):
-  0.5 0.0 0.0 0.0 0.0
+Then type actions like (v4: dx dy dz dyaw dgrip in [-1,1]; dgrip=-1 close, +1 open):
+  0.5 0.0 0.0 0.0 -1.0
   0.0 -0.2 0.05 0.0 -0.5
 Press Enter to repeat the last action, or type 'q' to quit.
 """

@@ -4,12 +4,11 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Bookshelf-Direct-v4 (insert-only environment).
+"""Bookshelf-Direct-v4 environment.
 
-Insertion-only RL task:
-- Robot keeps grasping the book (no release, no push-after-release)
-- Actions are 4D: [dx, dy, dz, dyaw] residual deltas on an integrated Cartesian target
-- Success is geometry-only at the slot mouth (hold for a few steps)
+- Actions: [dx, dy, dz, dyaw, g_gripper] residuals; gripper maps to finger position targets
+- Success: geometry at slot mouth (hold for a few steps)
+- Failure: book COM on the floor (exempt if still over shelf deck footprint)
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ def _cuboid_corners_local(half_extents: torch.Tensor) -> torch.Tensor:
 
 
 class BookshelfEnv(DirectRLEnv):
-    """Insertion-only env with minimal action/obs/reward."""
+    """Bookshelf insertion env with Cartesian + yaw + gripper actions."""
 
     cfg: BookshelfEnvCfg
 
@@ -105,7 +104,7 @@ class BookshelfEnv(DirectRLEnv):
         self._ik_cmd = torch.zeros((self.num_envs, 7), device=self.device)
 
         # Buffers.
-        self._last_actions = torch.zeros((self.num_envs, 4), device=self.device)
+        self._last_actions = torch.zeros((self.num_envs, 5), device=self.device)
         self._success_steps_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._prev_front_to_mouth = torch.zeros(self.num_envs, device=self.device)
         self._prev_abs_lat_err = torch.zeros(self.num_envs, device=self.device)
@@ -264,6 +263,28 @@ class BookshelfEnv(DirectRLEnv):
         yaw_err = _wrap_to_pi(yaw)
         return front_to_true_mouth, lat_err, lat_extent, z_err, yaw_err, front_to_back
 
+    def _book_supported_on_shelf(self, p_env: torch.Tensor, lowest_z: torch.Tensor) -> torch.Tensor:
+        """COM over shelf footprint and **lowest corner** on/near the deck — not merely COM height (avoids floor false negatives)."""
+        x0 = float(self.cfg.slot_x_open)
+        x1 = float(self.cfg.slot_x_back)
+        mid_x = 0.5 * (x0 + x1)
+        depth_x = x1 - x0 + 0.06
+        hx = 0.5 * depth_x + float(self.cfg.shelf_footprint_x_pad_m)
+        bthick = self.cfg.book_size[2]
+        clearance = self.cfg.slot_lateral_clearance
+        inner_half = 0.5 * (bthick + clearance)
+        half_lateral_y = 0.5 * bthick
+        n_extra = max(0, int(self.cfg.shelf_extra_books_per_side))
+        pitch_y = bthick + float(self.cfg.neighbor_book_pitch_gap)
+        shelf_half_y = inner_half + bthick + n_extra * pitch_y
+        hy = shelf_half_y + float(self.cfg.shelf_footprint_y_pad_m)
+        cy = float(self.cfg.slot_center_y)
+        deck_z = float(self.cfg.shelf_top_z + self.cfg.shelf_thickness)
+        slack = float(self.cfg.book_on_shelf_z_slack_m)
+        in_xy = (p_env[:, 0] >= mid_x - hx) & (p_env[:, 0] <= mid_x + hx) & (p_env[:, 1] >= cy - hy) & (p_env[:, 1] <= cy + hy)
+        lowest_on_deck = lowest_z >= deck_z - slack
+        return in_xy & lowest_on_deck
+
     def _setup_scene(self):
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
@@ -398,7 +419,8 @@ class BookshelfEnv(DirectRLEnv):
 
         joint_pos_des = self._compute_ik_joint_targets_from_tool(target_pos_env, target_yaw)
 
-        act_small = self.actions.abs() < float(self.cfg.ik_hold_action_epsilon)
+        arm_act = self.actions[:, 0:4]
+        act_small = arm_act.abs() < float(self.cfg.ik_hold_action_epsilon)
         hold_arm = act_small.all(dim=-1)
         move_arm = ~hold_arm
         move_exp = move_arm.unsqueeze(-1).expand_as(joint_pos_des)
@@ -407,9 +429,14 @@ class BookshelfEnv(DirectRLEnv):
         joint_pos_des = torch.where(hold_exp, self._arm_hold_joint_pos, joint_pos_des)
         self.robot.set_joint_position_target(joint_pos_des, joint_ids=self._arm_joint_ids)
 
-        # Keep gripper fixed (no learning).
+        # Gripper: g=-1 → closed, g=+1 → open (same target for both finger joints).
         if len(self._finger_joint_ids) > 0:
-            finger_des = self.robot.data.default_joint_pos[:, self._finger_joint_ids]
+            g = self.actions[:, 4].clamp(-1.0, 1.0)
+            c = float(self.cfg.gripper_closed_joint_pos)
+            o = float(self.cfg.gripper_open_joint_pos)
+            finger_cmd = 0.5 * (1.0 - g) * c + 0.5 * (1.0 + g) * o
+            n_f = len(self._finger_joint_ids)
+            finger_des = finger_cmd.unsqueeze(-1).expand(self.num_envs, n_f)
             self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids)
 
     def _get_observations(self) -> dict:
@@ -443,6 +470,16 @@ class BookshelfEnv(DirectRLEnv):
         ez_s = torch.clamp(ez / te, -1.0, 1.0)
         eyaw_s = torch.clamp(eyaw / te, -1.0, 1.0)
 
+        c = float(self.cfg.gripper_closed_joint_pos)
+        o = float(self.cfg.gripper_open_joint_pos)
+        if len(self._finger_joint_ids) > 0:
+            fp = self.robot.data.joint_pos[:, self._finger_joint_ids]
+            fmean = fp.mean(dim=-1)
+            grip_open01 = (fmean - c) / (o - c + 1e-9)
+            grip_s = torch.clamp(2.0 * grip_open01 - 1.0, -1.0, 1.0)
+        else:
+            grip_s = torch.zeros(self.num_envs, device=self.device)
+
         obs = torch.stack(
             (
                 f2m_s,
@@ -456,10 +493,12 @@ class BookshelfEnv(DirectRLEnv):
                 vx_s,
                 vy_s,
                 wz_s,
+                grip_s,
                 self._last_actions[:, 0],
                 self._last_actions[:, 1],
                 self._last_actions[:, 2],
                 self._last_actions[:, 3],
+                self._last_actions[:, 4],
             ),
             dim=-1,
         )
@@ -631,31 +670,39 @@ class BookshelfEnv(DirectRLEnv):
         success = self._success_steps_buf >= int(self.cfg.success_steps)
 
         time_out = self.episode_length_buf >= self.max_episode_length - 1
+        p = self._book_pos_env()
+        corners_w = self._book_corners_env()
+        lowest_z = corners_w[..., 2].min(dim=-1).values
+        floor_z = float(getattr(self.cfg, "book_floor_lowest_z_thresh", 0.042))
+        book_touches_ground = lowest_z < floor_z
+        on_shelf = self._book_supported_on_shelf(p, lowest_z)
+        book_dropped_to_ground = book_touches_ground & ~on_shelf
+
         if bool(self.cfg.enable_failure_terminations):
-            p = self._book_pos_env()
             oob = (torch.abs(p[:, 0]) > self.cfg.max_abs_xy) | (torch.abs(p[:, 1]) > self.cfg.max_abs_xy)
             fell = p[:, 2] < self.cfg.fell_height_thresh
-            terminated = success | oob | fell
+            terminated = success | book_dropped_to_ground | oob | fell
         else:
             oob = torch.zeros_like(success)
             fell = torch.zeros_like(success)
-            terminated = success
+            terminated = success | book_dropped_to_ground
 
         # Debug: print which termination triggered (first terminated env only).
         if bool(torch.any(terminated)):
             i = int(torch.nonzero(terminated, as_tuple=False)[0, 0].item())
-            print(
-                "[DONE] env="
-                f"{i} success={bool(success[i].item())} oob={bool(oob[i].item())} fell={bool(fell[i].item())} "
-                f"steps={int(self._success_steps_buf[i].item())} "
-                f"front_to_mouth={float(front_to_mouth[i].item()):+.4f} "
-                f"front_to_back={float(front_to_back[i].item()):+.4f} "
-                f"lat_extent={float(lat_extent[i].item()):.4f} "
-                f"z_err={float(z_err[i].item()):+.4f} "
-                f"yaw_e={float(yaw_e[i].item()):.4f} "
-                f"upright={bool(upright[i].item())} "
-                f"lin={float(lin_speed[i].item()):.3f} ang={float(ang_speed[i].item()):.3f}"
-            )
+            # print(
+            #     "[DONE] env="
+            #     f"{i} success={bool(success[i].item())} book_drop={bool(book_dropped_to_ground[i].item())} "
+            #     f"oob={bool(oob[i].item())} fell={bool(fell[i].item())} "
+            #     f"steps={int(self._success_steps_buf[i].item())} "
+            #     f"front_to_mouth={float(front_to_mouth[i].item()):+.4f} "
+            #     f"front_to_back={float(front_to_back[i].item()):+.4f} "
+            #     f"lat_extent={float(lat_extent[i].item()):.4f} "
+            #     f"z_err={float(z_err[i].item()):+.4f} "
+            #     f"yaw_e={float(yaw_e[i].item()):.4f} "
+            #     f"upright={bool(upright[i].item())} "
+            #     f"lin={float(lin_speed[i].item()):.3f} ang={float(ang_speed[i].item()):.3f}"
+            # )
         return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
