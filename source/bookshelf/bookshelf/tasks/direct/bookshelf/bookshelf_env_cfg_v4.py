@@ -222,7 +222,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     min_steps_before_success = 5
 
     # Debug printing for success gates.
-    debug_print_success = False
+    debug_print_success = True
     debug_print_success_every = 1
 
     # Reward shaping (simple, insertion-only).
@@ -243,14 +243,18 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # Loose alignment gate for adding forward bonus (not success thresholds).
     aligned_bonus_lat_thresh = 0.01
     aligned_bonus_yaw_thresh = math.radians(10.0)
-    # Dense bonus when the book has effectively "reached" the slot mouth region (aligned + close in X).
-    # Keep scale well above typical per-step penalties so hovering in this funnel beats oscillating away.
-    slot_reach_bonus_scale = 6.0
+    # Slot funnel: one-time entry bonus + small per-step (avoid ~6*600 reward farming).
+    slot_reach_entry_bonus = 10.0
+    slot_reach_per_step_scale = 0.12
     slot_reach_lat_thresh = 0.012
     slot_reach_yaw_thresh = math.radians(12.0)
     slot_reach_z_thresh = 0.018
     # front_to_mouth must be in (-slot_reach_mouth_window_m, success_enter_margin) (approach + pre-success insert).
     slot_reach_mouth_window_m = 0.010
+    # After book is supported on shelf: reward forward insertion; penalize no progress toward success depth.
+    post_insert_push_scale = 4.0
+    shelf_stagnation_penalty_scale = 0.25
+    shelf_stall_d_mouth_thresh = 0.0008
     # Archive-inspired anti-dither shaping.
     # Closer to 1.0 => less "comfort" outside the mouth (reduces pre-insert local optimum).
     pre_mouth_penalty_scale = 0.85
@@ -259,7 +263,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     dx_signflip_active_thresh = 0.2
     action_delta_penalty_scale = 0.0015
     step_penalty = -0.001
-    success_bonus = 50.0
+    success_bonus = 400.0
 
     # Debug/safety terminations (optional).
     max_abs_xy = 0.95

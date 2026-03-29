@@ -120,6 +120,7 @@ class BookshelfEnv(DirectRLEnv):
 
         # Hold arm target when action≈0 (avoid sag under load).
         self._arm_hold_joint_pos = self.robot.data.default_joint_pos[:, self._arm_joint_ids].clone()
+        self._slot_reach_entry_credited = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def _grasp_frame_pose_w(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         lf_pos = self.robot.data.body_pos_w[env_ids, self._left_finger_body_idx]
@@ -550,12 +551,11 @@ class BookshelfEnv(DirectRLEnv):
         aligned_forward = self.cfg.aligned_forward_bonus_scale * torch.clamp(d_mouth, min=0.0, max=0.02)
         aligned_forward = torch.where(aligned_for_bonus, aligned_forward, torch.zeros_like(aligned_forward))
 
-        # Strong incentive to stay in the "at the slot" funnel (dominates small penalties / dither if tuned).
+        # Slot funnel: one-time entry reward + small per-step (avoids multi-thousand return from camping).
         sr_lat = float(getattr(self.cfg, "slot_reach_lat_thresh", 0.012))
         sr_yaw = float(getattr(self.cfg, "slot_reach_yaw_thresh", 0.21))
         sr_z = float(getattr(self.cfg, "slot_reach_z_thresh", 0.018))
         sr_win = float(getattr(self.cfg, "slot_reach_mouth_window_m", 0.10))
-        sr_scale = float(getattr(self.cfg, "slot_reach_bonus_scale", 0.0))
         in_slot_funnel = (
             (abs_lat < sr_lat)
             & (abs_yaw < sr_yaw)
@@ -563,7 +563,26 @@ class BookshelfEnv(DirectRLEnv):
             & (front_to_mouth > -sr_win)
             & (front_to_mouth < enter_m)
         )
-        slot_reach = sr_scale * in_slot_funnel.float()
+        first_funnel_enter = in_slot_funnel & ~self._slot_reach_entry_credited
+        entry_bonus = float(getattr(self.cfg, "slot_reach_entry_bonus", 10.0))
+        slot_reach_once = entry_bonus * first_funnel_enter.float()
+        self._slot_reach_entry_credited = self._slot_reach_entry_credited | first_funnel_enter
+        per_step = float(getattr(self.cfg, "slot_reach_per_step_scale", 0.12))
+        slot_reach = slot_reach_once + per_step * in_slot_funnel.float()
+
+        corners_r = self._book_corners_env()
+        lowest_z = corners_r[..., 2].min(dim=-1).values
+        p_env = self._book_pos_env()
+        on_shelf = self._book_supported_on_shelf(p_env, lowest_z)
+        post_push = float(getattr(self.cfg, "post_insert_push_scale", 0.0)) * torch.clamp(d_mouth, 0.0, 0.02)
+        post_push = post_push * on_shelf.float() * (front_to_mouth > 0.0).float() * (front_to_mouth < enter_m).float()
+        stall_thr = float(getattr(self.cfg, "shelf_stall_d_mouth_thresh", 0.0008))
+        stall_pen_s = float(getattr(self.cfg, "shelf_stagnation_penalty_scale", 0.0))
+        # Only past mouth, pre-success: penalize idle random actions instead of pushing deeper.
+        shelf_stall = (
+            on_shelf & (front_to_mouth > 0.0) & (front_to_mouth < enter_m) & (d_mouth < stall_thr)
+        )
+        shelf_stagnation_pen = stall_pen_s * shelf_stall.float()
 
         dact = self.actions - self._last_actions
         dact_pen = self.cfg.action_delta_penalty_scale * torch.sum(dact**2, dim=-1)
@@ -598,6 +617,8 @@ class BookshelfEnv(DirectRLEnv):
             + yaw_prog
             + aligned_forward
             + slot_reach
+            + post_push
+            - shelf_stagnation_pen
             - align_pen
             - dact_pen
             - dx_signflip_pen
@@ -779,3 +800,4 @@ class BookshelfEnv(DirectRLEnv):
         _, lat_err0, _, _, yaw_err0, _ = self._stage_metrics()
         self._prev_abs_lat_err[env_ids_t] = torch.abs(lat_err0)[env_ids_t].detach()
         self._prev_abs_yaw_err[env_ids_t] = torch.abs(yaw_err0)[env_ids_t].detach()
+        self._slot_reach_entry_credited[env_ids_t] = False
