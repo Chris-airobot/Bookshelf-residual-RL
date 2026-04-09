@@ -10,7 +10,9 @@
 
 import argparse
 import contextlib
+import json
 import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,14 +30,23 @@ parser.add_argument(
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument("--log_interval", type=int, default=100_000, help="Log data every n timesteps.")
-parser.add_argument("--checkpoint", type=str, default=None, help="Continue the training from checkpoint.")
+parser.add_argument(
+    "--checkpoint",
+    type=str,
+    default=None,
+    help="Continue training from a .zip checkpoint (same obs/action dims). "
+    "VecNormalize stats are always reset (fresh) for curriculum/reward shifts; only policy weights load.",
+)
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
+parser.add_argument("--mlflow", action="store_true", default=False, help="Enable MLflow logging.")
+parser.add_argument("--mlflow_experiment", type=str, default="bookshelf-sb3", help="MLflow experiment name.")
+parser.add_argument("--mlflow_uri", type=str, default=None, help="MLflow tracking URI (optional).")
 parser.add_argument(
-    "--keep_all_info",
-    action="store_true",
-    default=False,
-    help="Use a slower SB3 wrapper but keep all the extra training info.",
+    "--mlflow_log_every_n_calls",
+    type=int,
+    default=200,
+    help="Mirror SB3 scalar logs to MLflow every N callback calls.",
 )
 parser.add_argument(
     "--ray-proc-id", "-rid", type=int, default=None, help="Automatically configured by Ray integration, otherwise None."
@@ -100,11 +111,30 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper, process_sb3_cfg
 
 import isaaclab_tasks  # noqa: F401
+from experiment_spec import build_experiment_spec
 from isaaclab_tasks.utils.hydra import hydra_task_config
+from mlflow_utils import (
+    MlflowSb3MetricsCallback,
+    end_mlflow_run_if_active,
+    is_mlflow_available,
+    log_artifact_if_exists,
+    log_config_snapshot,
+    log_json_artifact,
+    maybe_start_mlflow_run,
+)
 
 # import logger
 logger = logging.getLogger(__name__)
 import bookshelf.tasks  # noqa: F401
+
+
+def _safe_git_info() -> dict[str, str]:
+    try:
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+        dirty = subprocess.call(["git", "diff", "--quiet"]) != 0
+        return {"git_commit": sha, "git_dirty": str(bool(dirty))}
+    except Exception:
+        return {"git_commit": "unknown", "git_dirty": "unknown"}
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -141,6 +171,31 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # save command used to run the script
     command = " ".join(sys.orig_argv)
     (Path(log_dir) / "command.txt").write_text(command)
+
+    # Build reproducibility artifact for reward/obs/action/termination definitions.
+    env_cfg_path = "bookshelf/source/bookshelf/bookshelf/tasks/direct/bookshelf/bookshelf_env_cfg_v4.py"
+    env_impl_path = "bookshelf/source/bookshelf/bookshelf/tasks/direct/bookshelf/bookshelf_env_v4.py"
+    exp_spec = build_experiment_spec(
+        env_cfg=env_cfg,
+        task_name=str(args_cli.task),
+        env_cfg_path=env_cfg_path,
+        env_impl_path=env_impl_path,
+    )
+    exp_spec_path = Path(log_dir) / "params" / "experiment_spec.json"
+    exp_spec_path.write_text(json.dumps(exp_spec, indent=2, sort_keys=True))
+
+    mlflow_active = maybe_start_mlflow_run(
+        enabled=bool(args_cli.mlflow),
+        run_name=run_info,
+        tracking_uri=args_cli.mlflow_uri,
+        experiment_name=args_cli.mlflow_experiment,
+        tags={"task": str(args_cli.task), **_safe_git_info()},
+    )
+    if args_cli.mlflow and not is_mlflow_available():
+        print("[WARN] --mlflow requested but mlflow package is unavailable. Continuing without MLflow.")
+    if mlflow_active:
+        log_config_snapshot(env_cfg=env_cfg, agent_cfg=agent_cfg, args_dict=vars(args_cli))
+        log_json_artifact(_safe_git_info(), filename="git_info.json", artifact_path="params")
 
     # post-process agent configuration
     agent_cfg = process_sb3_cfg(agent_cfg, env_cfg.scene.num_envs)
@@ -180,8 +235,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     start_time = time.time()
 
-    # wrap around environment for stable baselines
-    env = Sb3VecEnvWrapper(env, fast_variant=not args_cli.keep_all_info)
+    # Full extras logging (env extras["log"] → TensorBoard episode scalars on done). Slower than fast_variant.
+    env = Sb3VecEnvWrapper(env, fast_variant=False)
 
     norm_keys = {"normalize_input", "normalize_value", "clip_obs"}
     norm_args = {}
@@ -201,6 +256,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             clip_reward=np.inf,
         )
 
+    # Intentionally do not load old VecNormalize.pkl when resuming: reward distribution often shifts (curriculum).
+
     # create agent from stable baselines
     agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
     if args_cli.checkpoint is not None:
@@ -209,6 +266,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # callbacks for agent
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)
     callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    if mlflow_active:
+        callbacks.append(MlflowSb3MetricsCallback(log_every_n_calls=args_cli.mlflow_log_every_n_calls))
 
     # train the agent
     with contextlib.suppress(KeyboardInterrupt):
@@ -228,6 +287,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env.save(os.path.join(log_dir, "model_vecnormalize.pkl"))
 
     print(f"Training time: {round(time.time() - start_time, 2)} seconds")
+
+    if mlflow_active:
+        log_artifact_if_exists(Path(log_dir) / "params" / "env.yaml", artifact_path="params")
+        log_artifact_if_exists(Path(log_dir) / "params" / "agent.yaml", artifact_path="params")
+        log_artifact_if_exists(Path(log_dir) / "params" / "experiment_spec.json", artifact_path="params")
+        log_artifact_if_exists(Path(log_dir) / "command.txt", artifact_path="params")
+        log_artifact_if_exists(Path(log_dir) / "model.zip", artifact_path="checkpoints")
+        log_artifact_if_exists(Path(log_dir) / "model_vecnormalize.pkl", artifact_path="checkpoints")
+        end_mlflow_run_if_active()
 
     # close the simulator
     env.close()

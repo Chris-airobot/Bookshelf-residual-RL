@@ -156,28 +156,29 @@ def main() -> None:
     env_u = env.unwrapped
     device = env_u.device
     adim = int(env.action_space.shape[-1])
-    if adim != 5:
-        print(f"[WARN] Expected action dim 5 for v4; got {adim}. Pulses pad with zeros beyond known indices.")
+    if adim != 6:
+        print(f"[WARN] Expected action dim 6 for v4; got {adim}. Pulses pad with zeros beyond known indices.")
 
     mag = max(-1.0, min(1.0, float(args_cli.action_mag)))
 
-    def _a4(a: list[float]) -> torch.Tensor:
-        row = (a + [0.0] * adim)[:adim]
+    def _a6(a: list[float]) -> torch.Tensor:
+        row = (a + [0.0] * adim)[:adim]  # pad to env action dimension
         return torch.tensor([row], device=device, dtype=torch.float32)
 
     z = torch.zeros((1, adim), device=device)
     cases: dict[str, torch.Tensor] = {
         "hold": z.clone(),
-        "xp": _a4([mag, 0.0, 0.0, 0.0]),
-        "xm": _a4([-mag, 0.0, 0.0, 0.0]),
-        "yp": _a4([0.0, mag, 0.0, 0.0]),
-        "ym": _a4([0.0, -mag, 0.0, 0.0]),
-        "zp": _a4([0.0, 0.0, mag, 0.0]),
-        "zm": _a4([0.0, 0.0, -mag, 0.0]),
-        "yawp": _a4([0.0, 0.0, 0.0, mag, 0.0]),
-        "yawm": _a4([0.0, 0.0, 0.0, -mag, 0.0]),
-        "gripc": _a4([0.0, 0.0, 0.0, 0.0, -mag]),
-        "gripo": _a4([0.0, 0.0, 0.0, 0.0, mag]),
+        # Action order is [dx, dy, dz, dpitch, dyaw, g_gripper]
+        "xp": _a6([mag, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        "xm": _a6([-mag, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        "yp": _a6([0.0, mag, 0.0, 0.0, 0.0, 0.0]),
+        "ym": _a6([0.0, -mag, 0.0, 0.0, 0.0, 0.0]),
+        "zp": _a6([0.0, 0.0, mag, 0.0, 0.0, 0.0]),
+        "zm": _a6([0.0, 0.0, -mag, 0.0, 0.0, 0.0]),
+        "yawp": _a6([0.0, 0.0, 0.0, 0.0, mag, 0.0]),
+        "yawm": _a6([0.0, 0.0, 0.0, 0.0, -mag, 0.0]),
+        "gripc": _a6([0.0, 0.0, 0.0, 0.0, 0.0, -mag]),
+        "gripo": _a6([0.0, 0.0, 0.0, 0.0, 0.0, mag]),
     }
 
     with torch.no_grad():

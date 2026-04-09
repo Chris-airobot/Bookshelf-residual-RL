@@ -6,9 +6,8 @@
 
 """Bookshelf-Direct-v4 environment.
 
-- Actions: [dx, dy, dz, dyaw, g_gripper] residuals; gripper maps to finger position targets
-- Success: geometry at slot mouth (hold for a few steps)
-- Failure: book COM on the floor (exempt if still over shelf deck footprint)
+Internal phases (single policy): insert (grasped) → release → retreat → push; terminal success only
+in the push phase when full-placement geometry + stability gates hold.
 """
 
 from __future__ import annotations
@@ -28,6 +27,11 @@ from isaaclab.utils import math as math_utils
 from isaaclab.utils.math import sample_uniform
 
 from .bookshelf_env_cfg_v4 import BookshelfEnvCfg
+
+_PHASE_INSERT = 0
+_PHASE_RELEASE = 1
+_PHASE_RETREAT = 2
+_PHASE_PUSH = 3
 
 
 def _wrap_to_pi(angle: torch.Tensor) -> torch.Tensor:
@@ -60,8 +64,35 @@ def _cuboid_corners_local(half_extents: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _neighbor_book_dims(cfg: BookshelfEnvCfg) -> tuple[float, float, float]:
+    """Cuboid (L, H, T) for slot-defining neighbor meshes; defaults to ``book_size``."""
+    nbs = getattr(cfg, "neighbor_book_size", None)
+    if nbs is not None:
+        return (float(nbs[0]), float(nbs[1]), float(nbs[2]))
+    b = cfg.book_size
+    return (float(b[0]), float(b[1]), float(b[2]))
+
+
+def _geom_slot_mouth_x_from_neighbor(cfg: BookshelfEnvCfg) -> float:
+    """Env-X of the robot-facing side of the slot-defining neighbor books.
+
+    Neighbors are spawned as ``MeshCuboidCfg(size=neighbor_book_size or book_size)`` at ``mid_x`` with
+    ``book_standing_quat``. The mouth plane for metrics is the minimum world-X over their 8 corners.
+    """
+    x0 = float(cfg.slot_x_open)
+    x1 = float(cfg.slot_x_back)
+    mid_x = 0.5 * (x0 + x1)
+    nb = _neighbor_book_dims(cfg)
+    half = 0.5 * torch.tensor(list(nb), dtype=torch.float32)
+    corners_l = _cuboid_corners_local(half)
+    qw, qx, qy, qz = cfg.book_standing_quat
+    quat = torch.tensor([qw, qx, qy, qz], dtype=torch.float32).unsqueeze(0).expand(8, 4)
+    corners_rot = math_utils.quat_apply(quat, corners_l)
+    return float(mid_x + corners_rot[:, 0].min().item())
+
+
 class BookshelfEnv(DirectRLEnv):
-    """Bookshelf insertion env with Cartesian + yaw + gripper actions."""
+    """Bookshelf placement env with Cartesian + pitch + yaw + gripper and an internal phase FSM."""
 
     cfg: BookshelfEnvCfg
 
@@ -104,11 +135,19 @@ class BookshelfEnv(DirectRLEnv):
         self._ik_cmd = torch.zeros((self.num_envs, 7), device=self.device)
 
         # Buffers.
-        self._last_actions = torch.zeros((self.num_envs, 5), device=self.device)
         self._success_steps_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._prev_front_to_mouth = torch.zeros(self.num_envs, device=self.device)
-        self._prev_abs_lat_err = torch.zeros(self.num_envs, device=self.device)
-        self._prev_abs_yaw_err = torch.zeros(self.num_envs, device=self.device)
+        self._prev_rear_to_mouth = torch.zeros(self.num_envs, device=self.device)
+        self._phase = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._phase_start = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._release_ready_hold_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._release_open_stable_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._retreat_clear_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._prev_hand_clearance = torch.zeros(self.num_envs, device=self.device)
+        self._prev_gripper_open = torch.zeros(self.num_envs, device=self.device)
+        self._step_metrics: dict[str, torch.Tensor] = {}
+        self._crossed_mouth_bonus_given = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._pending_insert_release_bonus = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # Integrated Cartesian target (env frame + base yaw).
         self._target_pos_env = torch.zeros((self.num_envs, 3), device=self.device)
@@ -118,9 +157,12 @@ class BookshelfEnv(DirectRLEnv):
         half = 0.5 * torch.tensor(self.cfg.book_size, device=self.device, dtype=torch.float32)
         self._book_corners_local = _cuboid_corners_local(half).to(device=self.device, dtype=torch.float32)
 
+        # Slot mouth plane for metrics: derived from neighbor cuboid geometry (same as _setup_scene).
+        self._geom_mouth_x = _geom_slot_mouth_x_from_neighbor(self.cfg)
+        self._neighbor_thick_y = float(_neighbor_book_dims(self.cfg)[2])
+
         # Hold arm target when action≈0 (avoid sag under load).
         self._arm_hold_joint_pos = self.robot.data.default_joint_pos[:, self._arm_joint_ids].clone()
-        self._slot_reach_entry_credited = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def _grasp_frame_pose_w(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         lf_pos = self.robot.data.body_pos_w[env_ids, self._left_finger_body_idx]
@@ -193,6 +235,15 @@ class BookshelfEnv(DirectRLEnv):
         q_b2h = self._q_body_to_hand_grasp(n, grasp_quat_w.dtype)
         qyaw = self._quat_world_yaw_half(yaw_delta)
         book_quat_w = math_utils.quat_mul(grasp_quat_w, math_utils.quat_mul(q_b2h, qyaw))
+        # Keep book orientation fixed at the standing quaternion during reset.
+        # We still allow position jitter (via `off` and the measured grasp pose), but avoid
+        # random quaternion differences that can make early learning harder.
+        book_quat_w = (
+            torch.tensor(self.cfg.book_standing_quat, device=self.device, dtype=dtype)
+            .unsqueeze(0)
+            .expand(n, 4)
+            .clone()
+        )
 
         book_state = self.book.data.default_root_state[env_ids_t].clone()
         book_state[:, 0:3] = book_pos_env + self.scene.env_origins[env_ids_t]
@@ -208,13 +259,18 @@ class BookshelfEnv(DirectRLEnv):
         ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
         return ee_pos_b, ee_quat_b
 
-    def _compute_ik_joint_targets_from_tool(self, target_pos_env: torch.Tensor, target_yaw: torch.Tensor) -> torch.Tensor:
-        """Absolute IK: reach tool target in env frame with yaw in base frame; keep current roll/pitch."""
+    def _compute_ik_joint_targets_from_tool(
+        self, target_pos_env: torch.Tensor, target_yaw: torch.Tensor, target_pitch_delta: torch.Tensor
+    ) -> torch.Tensor:
+        """Absolute IK: reach tool target in env frame with yaw+pitch in base frame.
+
+        Roll is kept from the current measured tool pose. Pitch can be adjusted by `target_pitch_delta`.
+        """
         self._target_pos_env[:] = target_pos_env
         self._target_yaw[:] = target_yaw
         _, ee_quat_b = self._ee_pose_in_base()
         ee_roll_b, ee_pitch_b, _ = math_utils.euler_xyz_from_quat(ee_quat_b)
-        quat_des_b = math_utils.quat_from_euler_xyz(ee_roll_b, ee_pitch_b, target_yaw)
+        quat_des_b = math_utils.quat_from_euler_xyz(ee_roll_b, ee_pitch_b + target_pitch_delta, target_yaw)
         offset_des_b = math_utils.quat_apply(quat_des_b, self._ik_body_offset_pos_b)
         body_pos_des_b = target_pos_env - offset_des_b
         self._ik_cmd[:, 0:3] = body_pos_des_b
@@ -246,11 +302,44 @@ class BookshelfEnv(DirectRLEnv):
         spine_w = math_utils.quat_apply(quat, spine_l)
         return torch.abs(spine_w[:, 2]) > self.cfg.upright_dot_thresh
 
-    def _stage_metrics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Return (front_to_true_mouth, lat_err, lat_extent, z_err, yaw_err_signed, front_to_back)."""
+    def _current_slot_lateral_clearance(self) -> float:
+        """Return curriculum-adjusted slot clearance in meters."""
+        if not bool(getattr(self.cfg, "enable_slot_clearance_curriculum", False)):
+            return float(self.cfg.slot_lateral_clearance)
+
+        c0 = float(getattr(self.cfg, "slot_lateral_clearance_start", self.cfg.slot_lateral_clearance))
+        c1 = float(getattr(self.cfg, "slot_lateral_clearance_end", self.cfg.slot_lateral_clearance))
+        steps = max(1, int(getattr(self.cfg, "slot_clearance_curriculum_steps", 1)))
+        step_ctr = self.common_step_counter.item() if hasattr(self.common_step_counter, "item") else self.common_step_counter
+        alpha = float(min(1.0, max(0.0, float(step_ctr) / float(steps))))
+        return (1.0 - alpha) * c0 + alpha * c1
+
+    def _gripper_open01(self) -> torch.Tensor:
+        c = float(self.cfg.gripper_closed_joint_pos)
+        o = float(self.cfg.gripper_open_joint_pos)
+        if len(self._finger_joint_ids) > 0:
+            fp = self.robot.data.joint_pos[:, self._finger_joint_ids]
+            fmean = fp.mean(dim=-1)
+            return torch.clamp((fmean - c) / (o - c + 1e-9), 0.0, 1.0)
+        return torch.zeros(self.num_envs, device=self.device)
+
+    def _ee_tool_pos_env(self) -> torch.Tensor:
+        ee_body_pos_env = self.robot.data.body_pos_w[:, self._ee_body_idx] - self.scene.env_origins
+        ee_body_quat_w = self.robot.data.body_quat_w[:, self._ee_body_idx]
+        return ee_body_pos_env + math_utils.quat_apply(ee_body_quat_w, self._ik_body_offset_pos_b)
+
+    def _compute_task_metrics(self) -> dict[str, torch.Tensor]:
+        """Geometry, support, release readiness, speeds, and hand–book clearance (env frame).
+
+        Book X naming matches the rest of this env: ``front_x = max(corner X)`` is the deepest edge into the
+        slot (+X); ``rear_x = min(corner X)`` is the robot-side edge. ``mouth`` is the slot mouth plane.
+        """
         corners = self._book_corners_env()
         front_x = corners[..., 0].max(dim=-1).values
-        front_to_true_mouth = front_x - float(self.cfg.slot_x_open)
+        rear_x = corners[..., 0].min(dim=-1).values
+        mouth = float(self._geom_mouth_x)
+        front_to_mouth = front_x - mouth
+        rear_to_mouth = rear_x - mouth
         front_to_back = float(self.cfg.slot_x_back) - front_x
 
         lat_err = self.cfg.slot_center_y - self._book_pos_env()[:, 1]
@@ -262,7 +351,52 @@ class BookshelfEnv(DirectRLEnv):
 
         yaw = _yaw_from_quat_wxyz(self.book.data.root_link_quat_w)
         yaw_err = _wrap_to_pi(yaw)
-        return front_to_true_mouth, lat_err, lat_extent, z_err, yaw_err, front_to_back
+
+        lowest_z = corners[..., 2].min(dim=-1).values
+        supported = self._book_supported_on_shelf(p, lowest_z)
+
+        # Leading edge past mouth ⇒ front_to_mouth > threshold (not <= 0; that would be still outside / at plane).
+        thr_fm = float(self.cfg.phase_release_ready_min_front_to_mouth)
+        leading_edge_past_mouth = front_to_mouth > thr_fm
+        if bool(self.cfg.phase_release_ready_requires_past_mouth):
+            pm = leading_edge_past_mouth
+        else:
+            pm = torch.ones_like(leading_edge_past_mouth)
+        partial_rear = rear_to_mouth >= float(self.cfg.phase_release_ready_rear_to_mouth_min)
+        lat_ok = torch.abs(lat_err) <= float(self.cfg.phase_release_ready_max_abs_lat_err)
+        yaw_ok = torch.abs(yaw_err) <= float(self.cfg.phase_release_ready_max_abs_yaw_err)
+        z_ok = torch.abs(z_err) <= float(self.cfg.phase_release_ready_max_abs_z_err)
+        sup_req = bool(self.cfg.phase_release_ready_requires_supported)
+        sup_ok = supported if sup_req else torch.ones_like(supported)
+        ready_time = self.episode_length_buf > int(self.cfg.min_steps_before_success)
+        release_ready = pm & partial_rear & lat_ok & yaw_ok & z_ok & sup_ok & ready_time
+
+        v = self.book.data.root_link_vel_w
+        book_lin_speed = torch.linalg.norm(v[:, 0:3], dim=-1)
+        book_ang_speed = torch.linalg.norm(v[:, 3:6], dim=-1)
+
+        tool_pos = self._ee_tool_pos_env()
+        # Proxy clearance: IK tool point vs book vertices (not finger collision geometry).
+        dists = torch.linalg.norm(corners - tool_pos.unsqueeze(1), dim=-1)
+        hand_clearance = dists.min(dim=-1).values
+
+        gripper_open = self._gripper_open01()
+
+        return {
+            "front_to_mouth": front_to_mouth,
+            "lat_err": lat_err,
+            "lat_extent": lat_extent,
+            "z_err": z_err,
+            "yaw_err": yaw_err,
+            "front_to_back": front_to_back,
+            "rear_to_mouth": rear_to_mouth,
+            "supported_on_shelf": supported,
+            "release_ready": release_ready,
+            "book_lin_speed": book_lin_speed,
+            "book_ang_speed": book_ang_speed,
+            "hand_clearance": hand_clearance,
+            "gripper_open": gripper_open,
+        }
 
     def _book_supported_on_shelf(self, p_env: torch.Tensor, lowest_z: torch.Tensor) -> torch.Tensor:
         """COM over shelf footprint and **lowest corner** on/near the deck — not merely COM height (avoids floor false negatives)."""
@@ -271,8 +405,8 @@ class BookshelfEnv(DirectRLEnv):
         mid_x = 0.5 * (x0 + x1)
         depth_x = x1 - x0 + 0.06
         hx = 0.5 * depth_x + float(self.cfg.shelf_footprint_x_pad_m)
-        bthick = self.cfg.book_size[2]
-        clearance = self.cfg.slot_lateral_clearance
+        bthick = self._neighbor_thick_y
+        clearance = self._current_slot_lateral_clearance()
         inner_half = 0.5 * (bthick + clearance)
         half_lateral_y = 0.5 * bthick
         n_extra = max(0, int(self.cfg.shelf_extra_books_per_side))
@@ -293,10 +427,13 @@ class BookshelfEnv(DirectRLEnv):
         x1 = self.cfg.slot_x_back
         mid_x = 0.5 * (x0 + x1)
         depth_x = x1 - x0 + 0.06
-        bthick = self.cfg.book_size[2]
-        bheight = self.cfg.book_size[1]
-        blen = self.cfg.book_size[0]
-        clearance = self.cfg.slot_lateral_clearance
+        nb = _neighbor_book_dims(self.cfg)
+        blen, bheight, bthick = float(nb[0]), float(nb[1]), float(nb[2])
+        # Shelf is spawned once; if curriculum is enabled, start with the wider setting.
+        if bool(getattr(self.cfg, "enable_slot_clearance_curriculum", False)):
+            clearance = float(getattr(self.cfg, "slot_lateral_clearance_start", self.cfg.slot_lateral_clearance))
+        else:
+            clearance = float(self.cfg.slot_lateral_clearance)
         inner_half = 0.5 * (bthick + clearance)
         half_lateral_y = 0.5 * bthick
         n_extra = max(0, int(self.cfg.shelf_extra_books_per_side))
@@ -399,14 +536,40 @@ class BookshelfEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone().clamp(-1.0, 1.0)
+        self._phase_start = self._phase.clone()
 
     def _apply_action(self) -> None:
-        dx = self.actions[:, 0] * self.cfg.dx_action_scale
-        dy = self.actions[:, 1] * self.cfg.dy_action_scale
-        dz = self.actions[:, 2] * self.cfg.dz_action_scale
-        dyaw = self.actions[:, 3] * self.cfg.dyaw_action_scale
+        ph = self._phase
+        s_ins = float(self.cfg.phase_insert_arm_scale)
+        s_rel = float(self.cfg.phase_release_arm_scale)
+        s_ret = float(self.cfg.phase_retreat_arm_scale)
+        s_push = float(self.cfg.phase_push_arm_scale)
+        arm_scale = torch.where(
+            ph == _PHASE_INSERT,
+            torch.full((self.num_envs,), s_ins, device=self.device, dtype=torch.float32),
+            torch.where(
+                ph == _PHASE_RELEASE,
+                torch.full((self.num_envs,), s_rel, device=self.device, dtype=torch.float32),
+                torch.where(
+                    ph == _PHASE_RETREAT,
+                    torch.full((self.num_envs,), s_ret, device=self.device, dtype=torch.float32),
+                    torch.full((self.num_envs,), s_push, device=self.device, dtype=torch.float32),
+                ),
+            ),
+        )
+        dx_ins_m = float(getattr(self.cfg, "phase_insert_dx_multiplier", 1.0))
+        dx_mul = torch.where(
+            ph == _PHASE_INSERT,
+            torch.full((self.num_envs,), dx_ins_m, device=self.device, dtype=torch.float32),
+            torch.ones((self.num_envs,), device=self.device, dtype=torch.float32),
+        )
 
-        # Residual-on-current style: target is computed from current measured EE(tool) pose each step.
+        dx = self.actions[:, 0] * self.cfg.dx_action_scale * arm_scale * dx_mul
+        dy = self.actions[:, 1] * self.cfg.dy_action_scale * arm_scale
+        dz = self.actions[:, 2] * self.cfg.dz_action_scale * arm_scale
+        dpitch = self.actions[:, 3] * self.cfg.dpitch_action_scale * arm_scale
+        dyaw = self.actions[:, 4] * self.cfg.dyaw_action_scale * arm_scale
+
         ee_body_pos_env = self.robot.data.body_pos_w[:, self._ee_body_idx] - self.scene.env_origins
         ee_body_quat_w = self.robot.data.body_quat_w[:, self._ee_body_idx]
         ee_tool_offset_w = math_utils.quat_apply(ee_body_quat_w, self._ik_body_offset_pos_b)
@@ -418,11 +581,13 @@ class BookshelfEnv(DirectRLEnv):
         target_pos_env = ee_tool_pos_env + torch.stack((dx, dy, dz), dim=-1)
         target_yaw = _wrap_to_pi(ee_yaw_b + dyaw)
 
-        joint_pos_des = self._compute_ik_joint_targets_from_tool(target_pos_env, target_yaw)
+        joint_pos_des = self._compute_ik_joint_targets_from_tool(target_pos_env, target_yaw, dpitch)
 
-        arm_act = self.actions[:, 0:4]
+        arm_act = self.actions[:, 0:5]
         act_small = arm_act.abs() < float(self.cfg.ik_hold_action_epsilon)
         hold_arm = act_small.all(dim=-1)
+        if bool(getattr(self.cfg, "ik_hold_disable_in_insert", False)):
+            hold_arm = hold_arm & (ph != _PHASE_INSERT)
         move_arm = ~hold_arm
         move_exp = move_arm.unsqueeze(-1).expand_as(joint_pos_des)
         self._arm_hold_joint_pos = torch.where(move_exp, joint_pos_des, self._arm_hold_joint_pos)
@@ -430,263 +595,351 @@ class BookshelfEnv(DirectRLEnv):
         joint_pos_des = torch.where(hold_exp, self._arm_hold_joint_pos, joint_pos_des)
         self.robot.set_joint_position_target(joint_pos_des, joint_ids=self._arm_joint_ids)
 
-        # Gripper: g=-1 → closed, g=+1 → open (same target for both finger joints).
         if len(self._finger_joint_ids) > 0:
-            g = self.actions[:, 4].clamp(-1.0, 1.0)
+            g = self.actions[:, 5].clamp(-1.0, 1.0)
             c = float(self.cfg.gripper_closed_joint_pos)
             o = float(self.cfg.gripper_open_joint_pos)
-            finger_cmd = 0.5 * (1.0 - g) * c + 0.5 * (1.0 + g) * o
+            thr = float(self.cfg.gripper_open_action_threshold)
+            # INSERT / RETREAT / PUSH: keep gripper closed or open deterministically.
+            finger_cmd = torch.full_like(g, c)
+            in_release = ph == _PHASE_RELEASE
+            finger_cmd = torch.where(in_release & (g >= thr), torch.full_like(g, o), finger_cmd)
+            finger_cmd = torch.where(
+                (ph == _PHASE_RETREAT) | (ph == _PHASE_PUSH), torch.full_like(g, o), finger_cmd
+            )
             n_f = len(self._finger_joint_ids)
             finger_des = finger_cmd.unsqueeze(-1).expand(self.num_envs, n_f)
             self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids)
 
     def _get_observations(self) -> dict:
-        front_to_mouth, lat_err, _, z_err, yaw_err, _ = self._stage_metrics()
-        v = self.book.data.root_link_vel_w
+        m = self._compute_task_metrics()
+        phase_s = torch.clamp(self._phase.to(dtype=torch.float32) / 3.0, 0.0, 1.0)
 
-        f2m_s = torch.clamp(front_to_mouth / float(self.cfg.front_to_mouth_obs_scale), -1.0, 1.0)
-        lat_s = torch.clamp(lat_err / float(self.cfg.lat_err_obs_scale), -1.0, 1.0)
-        yaw_s = torch.clamp(yaw_err / float(self.cfg.yaw_err_obs_scale), -1.0, 1.0)
-        z_s = torch.clamp(z_err / float(self.cfg.z_err_obs_scale), -1.0, 1.0)
-        vx_s = torch.clamp(v[:, 0] / float(self.cfg.lin_vel_obs_scale), -1.0, 1.0)
-        vy_s = torch.clamp(v[:, 1] / float(self.cfg.lin_vel_obs_scale), -1.0, 1.0)
-        wz_s = torch.clamp(v[:, 5] / float(self.cfg.ang_vel_obs_scale), -1.0, 1.0)
+        f2m_s = torch.clamp(m["front_to_mouth"] / float(self.cfg.front_to_mouth_obs_scale), -1.0, 1.0)
+        r2m_s = torch.clamp(m["rear_to_mouth"] / float(self.cfg.rear_to_mouth_obs_scale), -1.0, 1.0)
+        f2b_s = torch.clamp(m["front_to_back"] / float(self.cfg.front_to_back_obs_scale), -1.0, 1.0)
+        lat_s = torch.clamp(m["lat_err"] / float(self.cfg.lat_err_obs_scale), -1.0, 1.0)
+        yaw_s = torch.clamp(m["yaw_err"] / float(self.cfg.yaw_err_obs_scale), -1.0, 1.0)
+        z_s = torch.clamp(m["z_err"] / float(self.cfg.z_err_obs_scale), -1.0, 1.0)
 
-        ee_body_pos_env = self.robot.data.body_pos_w[:, self._ee_body_idx] - self.scene.env_origins
+        gripper_open = m["gripper_open"]
+        sup_f = m["supported_on_shelf"].to(dtype=torch.float32)
+        rr_f = m["release_ready"].to(dtype=torch.float32)
+        hc_s = torch.clamp(m["hand_clearance"] / float(self.cfg.hand_clearance_obs_scale), -1.0, 1.0)
+
         ee_body_quat_w = self.robot.data.body_quat_w[:, self._ee_body_idx]
-        ee_tool_offset_w = math_utils.quat_apply(ee_body_quat_w, self._ik_body_offset_pos_b)
-        ee_tool_pos_env = ee_body_pos_env + ee_tool_offset_w
+        tool_pos_env = self._ee_tool_pos_env()
+        book_pos_env = self._book_pos_env()
+        tool_to_book = tool_pos_env - book_pos_env
+        ttb = float(self.cfg.tool_to_book_pos_obs_scale)
+        tool_to_book_x_s = torch.clamp(tool_to_book[:, 0] / ttb, -1.0, 1.0)
+        tool_to_book_y_s = torch.clamp(tool_to_book[:, 1] / ttb, -1.0, 1.0)
+        tool_to_book_z_s = torch.clamp(tool_to_book[:, 2] / ttb, -1.0, 1.0)
 
-        _, ee_quat_b_obs = self._ee_pose_in_base()
-        _, _, ee_yaw_b = math_utils.euler_xyz_from_quat(ee_quat_b_obs)
+        tool_yaw_w = _yaw_from_quat_wxyz(ee_body_quat_w)
+        book_yaw_w = _yaw_from_quat_wxyz(self.book.data.root_link_quat_w)
+        tool_yaw_minus_book_yaw = _wrap_to_pi(tool_yaw_w - book_yaw_w)
+        tyaw_scale = float(self.cfg.tool_yaw_minus_book_yaw_obs_scale)
+        tool_yaw_minus_book_yaw_s = torch.clamp(tool_yaw_minus_book_yaw / tyaw_scale, -1.0, 1.0)
 
-        ex = self._target_pos_env[:, 0] - ee_tool_pos_env[:, 0]
-        ey = self._target_pos_env[:, 1] - ee_tool_pos_env[:, 1]
-        ez = self._target_pos_env[:, 2] - ee_tool_pos_env[:, 2]
-        eyaw = _wrap_to_pi(self._target_yaw - ee_yaw_b)
-
-        te = float(self.cfg.tracking_error_obs_scale)
-        ex_s = torch.clamp(ex / te, -1.0, 1.0)
-        ey_s = torch.clamp(ey / te, -1.0, 1.0)
-        ez_s = torch.clamp(ez / te, -1.0, 1.0)
-        eyaw_s = torch.clamp(eyaw / te, -1.0, 1.0)
-
-        c = float(self.cfg.gripper_closed_joint_pos)
-        o = float(self.cfg.gripper_open_joint_pos)
-        if len(self._finger_joint_ids) > 0:
-            fp = self.robot.data.joint_pos[:, self._finger_joint_ids]
-            fmean = fp.mean(dim=-1)
-            grip_open01 = (fmean - c) / (o - c + 1e-9)
-            grip_s = torch.clamp(2.0 * grip_open01 - 1.0, -1.0, 1.0)
-        else:
-            grip_s = torch.zeros(self.num_envs, device=self.device)
+        _, tool_p_w, _ = math_utils.euler_xyz_from_quat(ee_body_quat_w)
+        _, book_p_w, _ = math_utils.euler_xyz_from_quat(self.book.data.root_link_quat_w)
+        tool_pitch_minus_book_pitch = _wrap_to_pi(tool_p_w - book_p_w)
+        tp_scale = float(self.cfg.tool_pitch_minus_book_pitch_obs_scale)
+        tool_pitch_minus_book_pitch_s = torch.clamp(tool_pitch_minus_book_pitch / tp_scale, -1.0, 1.0)
 
         obs = torch.stack(
             (
+                phase_s,
                 f2m_s,
                 lat_s,
                 yaw_s,
                 z_s,
-                ex_s,
-                ey_s,
-                ez_s,
-                eyaw_s,
-                vx_s,
-                vy_s,
-                wz_s,
-                grip_s,
-                self._last_actions[:, 0],
-                self._last_actions[:, 1],
-                self._last_actions[:, 2],
-                self._last_actions[:, 3],
-                self._last_actions[:, 4],
+                f2b_s,
+                r2m_s,
+                gripper_open,
+                sup_f,
+                rr_f,
+                hc_s,
+                tool_to_book_x_s,
+                tool_to_book_y_s,
+                tool_to_book_z_s,
+                tool_yaw_minus_book_yaw_s,
+                tool_pitch_minus_book_pitch_s,
             ),
             dim=-1,
         )
         return {"policy": obs}
 
     def _get_rewards(self) -> torch.Tensor:
-        front_to_mouth, lat_err, lat_extent, z_err, yaw_err, _ = self._stage_metrics()
-        abs_lat = torch.abs(lat_err)
-        abs_yaw = torch.abs(yaw_err)
-        yaw_e = abs_yaw
+        # DirectRLEnv calls `_get_dones()` before `_get_rewards()`; recompute if cache is empty (defensive).
+        m = self._step_metrics
+        if not m:
+            m = self._compute_task_metrics()
+            self._step_metrics = m
+        ps = self._phase_start
 
-        d_mouth = front_to_mouth - self._prev_front_to_mouth
-        progress = self.cfg.progress_scale * torch.clamp(d_mouth, min=-0.02, max=0.02)
+        front_to_mouth = m["front_to_mouth"]
+        lat_err = m["lat_err"]
+        z_err = m["z_err"]
+        yaw_err = m["yaw_err"]
+        rear_to_mouth = m["rear_to_mouth"]
+        d_rear = rear_to_mouth - self._prev_rear_to_mouth
+        fm_prev = self._prev_front_to_mouth
+        d_front = front_to_mouth - fm_prev
 
-        enter_m = float(self.cfg.success_enter_margin)
-        fm_pos = torch.clamp(front_to_mouth, min=0.0, max=enter_m)
-        depth = self.cfg.depth_reward_scale * fm_pos
-        norm_depth = torch.clamp(front_to_mouth / enter_m, 0.0, 1.0)
-        depth_sq = float(self.cfg.depth_corridor_progress_scale) * (norm_depth**2)
-
-        # Alignment progress (constructive shaping): reward reductions in |lat_err| and |yaw_err|.
-        center_prog = self.cfg.center_progress_scale * torch.clamp(
-            self._prev_abs_lat_err - abs_lat, min=-0.01, max=0.01
+        # --- INSERT ---
+        rear_p = float(self.cfg.rew_insert_rear_progress_scale) * torch.clamp(d_rear, min=-0.02, max=0.02)
+        # <= 0: leading edge at/before mouth; > 0: truly inside slot (matches release_ready mouth sign).
+        pre_entry = front_to_mouth <= 0.0
+        post_entry = front_to_mouth > 0.0
+        pre_entry_forward = (
+            float(self.cfg.rew_insert_pre_entry_forward_scale)
+            * pre_entry.float()
+            * torch.clamp(d_front, min=0.0, max=0.02)
         )
-        yaw_prog = self.cfg.yaw_progress_scale * torch.clamp(
-            self._prev_abs_yaw_err - abs_yaw, min=-0.05, max=0.05
+        post_push = (
+            float(self.cfg.rew_insert_post_entry_push_scale)
+            * post_entry.float()
+            * torch.clamp(d_rear, min=0.0, max=0.02)
+        )
+        stall_mask = post_entry & (torch.abs(d_rear) < float(self.cfg.rew_insert_stall_thresh_m))
+        post_stall_pen = float(self.cfg.rew_insert_stall_penalty_scale) * stall_mask.float()
+        bottom_bonus = (
+            float(self.cfg.rew_insert_bottom_reward_scale)
+            * (m["supported_on_shelf"] & post_entry).float()
+        )
+        rr_bonus = float(self.cfg.rew_insert_release_ready_bonus_scale) * m["release_ready"].float()
+
+        lo_h = float(self.cfg.rew_insert_hover_mouth_low_m)
+        hi_h = float(self.cfg.rew_insert_hover_mouth_high_m)
+        in_mouth_band = (front_to_mouth >= lo_h) & (front_to_mouth <= hi_h)
+        tiny_rear = torch.abs(d_rear) < float(self.cfg.rew_insert_hover_d_rear_thresh_m)
+        hover_mask = in_mouth_band & tiny_rear & (~m["release_ready"])
+        hover_pen = float(self.cfg.rew_insert_hover_penalty_scale) * hover_mask.float()
+
+        r_lo = float(self.cfg.rew_insert_abs_rear_to_mouth_clip_lo)
+        r_hi = float(self.cfg.rew_insert_abs_rear_to_mouth_clip_hi)
+        abs_rear = float(self.cfg.rew_insert_abs_rear_to_mouth_scale) * torch.clamp(rear_to_mouth, min=r_lo, max=r_hi)
+
+        align_full = (
+            float(self.cfg.rew_insert_lat_penalty_scale) * torch.abs(lat_err)
+            + float(self.cfg.rew_insert_z_penalty_scale) * torch.abs(z_err)
+            + float(self.cfg.rew_insert_yaw_penalty_scale) * torch.abs(yaw_err)
+        )
+        pre_mul = float(getattr(self.cfg, "rew_insert_align_penalty_pre_mul", 1.0))
+        align_scale = pre_entry.float() * pre_mul + post_entry.float()
+        align_ins = align_scale * align_full
+
+        just_crossed = (fm_prev <= 0.0) & (front_to_mouth > 0.0) & (~self._crossed_mouth_bonus_given)
+        mouth_cross_b = float(self.cfg.rew_insert_cross_mouth_bonus) * just_crossed.float()
+        self._crossed_mouth_bonus_given = self._crossed_mouth_bonus_given | just_crossed
+
+        trans_b = float(self.cfg.rew_insert_to_release_transition_bonus) * self._pending_insert_release_bonus.float()
+        self._pending_insert_release_bonus.fill_(False)
+
+        rew_ins = (
+            rear_p
+            + pre_entry_forward
+            + post_push
+            - post_stall_pen
+            + bottom_bonus
+            + rr_bonus
+            + abs_rear
+            - hover_pen
+            + mouth_cross_b
+            + trans_b
+            - align_ins
         )
 
-        inner_half = 0.5 * (self.cfg.book_size[2] + self.cfg.slot_lateral_clearance)
-        clearance_limit = inner_half - float(self.cfg.success_lateral_margin)
-        clearance_violation = torch.clamp(lat_extent - clearance_limit, min=0.0)
-        base_align = (
-            self.cfg.lateral_penalty_scale * abs_lat
-            + self.cfg.yaw_penalty_scale * yaw_e
-            + self.cfg.z_penalty_scale * torch.abs(z_err)
+        # --- RELEASE ---
+        dg = m["gripper_open"] - self._prev_gripper_open
+        rew_open = float(self.cfg.rew_release_open_progress_scale) * torch.clamp(dg, min=0.0, max=1.0)
+        sp = m["book_lin_speed"] + 0.12 * m["book_ang_speed"]
+        rel_speed_pen = float(self.cfg.rew_release_speed_penalty_scale) * sp
+        align_rel = (
+            float(self.cfg.rew_release_lat_penalty_scale) * torch.abs(lat_err)
+            + float(self.cfg.rew_release_z_penalty_scale) * torch.abs(z_err)
+            + float(self.cfg.rew_release_yaw_penalty_scale) * torch.abs(yaw_err)
         )
-        clr_scale = float(self.cfg.clearance_violation_scale)
-        ramp_d = float(getattr(self.cfg, "clearance_ramp_depth_m", 0.03))
-        ramp = torch.clamp(front_to_mouth / ramp_d, 0.0, 1.0)
-        # Past mouth: ramp clearance cost from 50% -> 100% over ramp_d (ease cliff at insertion).
-        clr_ramp = torch.where(front_to_mouth > 0.0, 0.5 + 0.5 * ramp, torch.ones_like(front_to_mouth))
-        clearance_pen = clr_scale * clr_ramp * clearance_violation
-        align_pen = base_align + clearance_pen
+        rew_rel = rew_open - rel_speed_pen - align_rel
 
-        # Extra forward incentive when roughly aligned: encourages "align then insert" instead of dithering.
-        aligned_for_bonus = (abs_lat < float(self.cfg.aligned_bonus_lat_thresh)) & (
-            abs_yaw < float(self.cfg.aligned_bonus_yaw_thresh)
+        # --- RETREAT ---
+        d_clear = m["hand_clearance"] - self._prev_hand_clearance
+        rew_clear = float(self.cfg.rew_retreat_clearance_delta_scale) * torch.clamp(d_clear, min=0.0, max=0.05)
+        ret_sp = m["book_lin_speed"] + 0.15 * m["book_ang_speed"]
+        ret_speed_pen = float(self.cfg.rew_retreat_book_speed_penalty_scale) * ret_sp
+        rear_pull_pen = float(self.cfg.rew_retreat_rear_pull_penalty_scale) * torch.clamp(-d_rear, min=0.0, max=0.02)
+        rew_ret = rew_clear - ret_speed_pen - rear_pull_pen
+
+        # --- PUSH --- (same strict inside-slot definition as INSERT)
+        inside_slot = front_to_mouth > 0.0
+        rear_pp = float(self.cfg.rew_push_rear_progress_scale) * torch.clamp(d_rear, min=-0.02, max=0.02)
+        post_push_p = float(self.cfg.rew_push_post_push_scale) * inside_slot.float() * torch.clamp(d_rear, min=0.0, max=0.02)
+        stall_p = inside_slot & (torch.abs(d_rear) < float(self.cfg.rew_push_stall_thresh_m))
+        post_stall_p = float(self.cfg.rew_push_stall_penalty_scale) * stall_p.float()
+        bottom_p = float(self.cfg.rew_push_bottom_reward_scale) * (m["supported_on_shelf"] & inside_slot).float()
+        align_pu = (
+            float(self.cfg.rew_push_lat_penalty_scale) * torch.abs(lat_err)
+            + float(self.cfg.rew_push_z_penalty_scale) * torch.abs(z_err)
+            + float(self.cfg.rew_push_yaw_penalty_scale) * torch.abs(yaw_err)
         )
-        aligned_forward = self.cfg.aligned_forward_bonus_scale * torch.clamp(d_mouth, min=0.0, max=0.02)
-        aligned_forward = torch.where(aligned_for_bonus, aligned_forward, torch.zeros_like(aligned_forward))
+        rew_push = rear_pp + post_push_p - post_stall_p + bottom_p - align_pu
 
-        # Slot funnel: one-time entry reward + small per-step (avoids multi-thousand return from camping).
-        sr_lat = float(getattr(self.cfg, "slot_reach_lat_thresh", 0.012))
-        sr_yaw = float(getattr(self.cfg, "slot_reach_yaw_thresh", 0.21))
-        sr_z = float(getattr(self.cfg, "slot_reach_z_thresh", 0.018))
-        sr_win = float(getattr(self.cfg, "slot_reach_mouth_window_m", 0.10))
-        in_slot_funnel = (
-            (abs_lat < sr_lat)
-            & (abs_yaw < sr_yaw)
-            & (torch.abs(z_err) < sr_z)
-            & (front_to_mouth > -sr_win)
-            & (front_to_mouth < enter_m)
-        )
-        first_funnel_enter = in_slot_funnel & ~self._slot_reach_entry_credited
-        entry_bonus = float(getattr(self.cfg, "slot_reach_entry_bonus", 10.0))
-        slot_reach_once = entry_bonus * first_funnel_enter.float()
-        self._slot_reach_entry_credited = self._slot_reach_entry_credited | first_funnel_enter
-        per_step = float(getattr(self.cfg, "slot_reach_per_step_scale", 0.12))
-        slot_reach = slot_reach_once + per_step * in_slot_funnel.float()
+        ins_m = (ps == _PHASE_INSERT).to(dtype=torch.float32)
+        rel_m = (ps == _PHASE_RELEASE).to(dtype=torch.float32)
+        ret_m = (ps == _PHASE_RETREAT).to(dtype=torch.float32)
+        psh_m = (ps == _PHASE_PUSH).to(dtype=torch.float32)
+        rew_phase = ins_m * rew_ins + rel_m * rew_rel + ret_m * rew_ret + psh_m * rew_push
 
-        corners_r = self._book_corners_env()
-        lowest_z = corners_r[..., 2].min(dim=-1).values
+        step_pen = float(self.cfg.step_penalty)
+        success = self._success_steps_buf >= int(self.cfg.success_steps)
+        success_r = float(self.cfg.success_bonus) * success.float()
+
+        corners_w = self._book_corners_env()
+        lowest_z = corners_w[..., 2].min(dim=-1).values
+        floor_z = float(self.cfg.book_floor_lowest_z_thresh)
+        book_touches_ground = lowest_z < floor_z
         p_env = self._book_pos_env()
         on_shelf = self._book_supported_on_shelf(p_env, lowest_z)
-        post_push = float(getattr(self.cfg, "post_insert_push_scale", 0.0)) * torch.clamp(d_mouth, 0.0, 0.02)
-        post_push = post_push * on_shelf.float() * (front_to_mouth > 0.0).float() * (front_to_mouth < enter_m).float()
-        stall_thr = float(getattr(self.cfg, "shelf_stall_d_mouth_thresh", 0.0008))
-        stall_pen_s = float(getattr(self.cfg, "shelf_stagnation_penalty_scale", 0.0))
-        # Only past mouth, pre-success: penalize idle random actions instead of pushing deeper.
-        shelf_stall = (
-            on_shelf & (front_to_mouth > 0.0) & (front_to_mouth < enter_m) & (d_mouth < stall_thr)
-        )
-        shelf_stagnation_pen = stall_pen_s * shelf_stall.float()
+        book_dropped_to_ground = book_touches_ground & ~on_shelf
+        drop_pen = float(self.cfg.drop_penalty) * book_dropped_to_ground.float()
 
-        dact = self.actions - self._last_actions
-        dact_pen = self.cfg.action_delta_penalty_scale * torch.sum(dact**2, dim=-1)
+        rew = rew_phase + step_pen + success_r + drop_pen
 
-        # Archive-inspired anti-dither: penalize x-action sign flips near mouth plane.
-        near_mouth = torch.abs(front_to_mouth) < float(self.cfg.mouth_dither_window)
-        dx_now = self.actions[:, 0]
-        dx_prev = self._last_actions[:, 0]
-        flip = (dx_now * dx_prev) < 0.0
-        active = (dx_now.abs() > float(self.cfg.dx_signflip_active_thresh)) & (
-            dx_prev.abs() > float(self.cfg.dx_signflip_active_thresh)
-        )
-        dx_signflip_pen = self.cfg.dx_signflip_penalty_scale * (near_mouth & flip & active).float()
-
-        # Before reaching mouth, soften harsh alignment penalties to avoid local probe/retreat traps.
-        pre_mouth = front_to_mouth < 0.0
-        pen_scale = torch.where(
-            pre_mouth,
-            torch.full_like(front_to_mouth, float(self.cfg.pre_mouth_penalty_scale)),
-            torch.ones_like(front_to_mouth),
-        )
-        align_pen = align_pen * pen_scale
-
-        success = self._success_steps_buf >= self.cfg.success_steps
-        success_r = self.cfg.success_bonus * success.float()
-
-        rew = (
-            progress
-            + depth
-            + depth_sq
-            + center_prog
-            + yaw_prog
-            + aligned_forward
-            + slot_reach
-            + post_push
-            - shelf_stagnation_pen
-            - align_pen
-            - dact_pen
-            - dx_signflip_pen
-            + self.cfg.step_penalty
-            + success_r
-        )
+        self.extras.setdefault("log", {})
+        self.extras["log"]["reward_mean"] = rew.mean()
+        self.extras["log"]["rear_to_mouth_mean"] = rear_to_mouth.mean()
+        self.extras["log"]["front_to_mouth_mean"] = front_to_mouth.mean()
+        self.extras["log"]["success_signal_mean"] = success.float().mean()
+        self.extras["log"]["drop_signal_mean"] = book_dropped_to_ground.float().mean()
+        self.extras["log"]["rew_insert_mean"] = (ins_m * rew_ins).mean()
+        self.extras["log"]["rew_release_mean"] = (rel_m * rew_rel).mean()
+        self.extras["log"]["rew_retreat_mean"] = (ret_m * rew_ret).mean()
+        self.extras["log"]["rew_push_mean"] = (psh_m * rew_push).mean()
+        # INSERT debug: fractions are over all envs (insert envs contribute; others zero).
+        self.extras["log"]["insert_mouth_band_frac"] = (ins_m * in_mouth_band.to(dtype=torch.float32)).mean()
+        self.extras["log"]["insert_post_entry_frac"] = (ins_m * post_entry.float()).mean()
+        self.extras["log"]["insert_tiny_d_rear_frac"] = (ins_m * tiny_rear.to(dtype=torch.float32)).mean()
+        self.extras["log"]["insert_hover_pen_mean"] = (ins_m * hover_pen).mean()
+        self.extras["log"]["insert_mouth_cross_event_mean"] = just_crossed.float().mean()
+        self.extras["log"]["insert_abs_rear_mean"] = (ins_m * abs_rear).mean()
 
         self._prev_front_to_mouth = front_to_mouth.detach()
-        self._prev_abs_lat_err = abs_lat.detach()
-        self._prev_abs_yaw_err = abs_yaw.detach()
-        self._last_actions = self.actions.detach()
+        self._prev_rear_to_mouth = rear_to_mouth.detach()
+        self._prev_hand_clearance = m["hand_clearance"].detach()
+        self._prev_gripper_open = m["gripper_open"].detach()
         return rew
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
-        front_to_mouth, _, lat_extent, z_err, yaw_err, front_to_back = self._stage_metrics()
+        m = self._compute_task_metrics()
+        self._step_metrics = m
+
+        phase_b = self._phase
+        rr = m["release_ready"]
+        self._release_ready_hold_buf = torch.where(
+            phase_b == _PHASE_INSERT,
+            torch.where(rr, self._release_ready_hold_buf + 1, torch.zeros_like(self._release_ready_hold_buf)),
+            torch.zeros_like(self._release_ready_hold_buf),
+        )
+        open_ok = m["gripper_open"] >= float(self.cfg.phase_release_gripper_open_frac)
+        stable = (m["book_lin_speed"] < float(self.cfg.phase_release_max_lin_vel)) & (
+            m["book_ang_speed"] < float(self.cfg.phase_release_max_ang_vel)
+        )
+        rel_ok = open_ok & stable
+        self._release_open_stable_buf = torch.where(
+            phase_b == _PHASE_RELEASE,
+            torch.where(rel_ok, self._release_open_stable_buf + 1, torch.zeros_like(self._release_open_stable_buf)),
+            torch.zeros_like(self._release_open_stable_buf),
+        )
+        clear_ok = m["hand_clearance"] >= float(self.cfg.phase_retreat_min_hand_clearance_m)
+        self._retreat_clear_buf = torch.where(
+            phase_b == _PHASE_RETREAT,
+            torch.where(clear_ok, self._retreat_clear_buf + 1, torch.zeros_like(self._retreat_clear_buf)),
+            torch.zeros_like(self._retreat_clear_buf),
+        )
+
+        go_rel = (phase_b == _PHASE_INSERT) & (
+            self._release_ready_hold_buf >= int(self.cfg.phase_insert_min_release_ready_hold_steps)
+        )
+        self._pending_insert_release_bonus.copy_(go_rel)
+        go_ret = (phase_b == _PHASE_RELEASE) & (
+            self._release_open_stable_buf >= int(self.cfg.phase_release_min_open_stable_steps)
+        )
+        go_push = (phase_b == _PHASE_RETREAT) & (
+            self._retreat_clear_buf >= int(self.cfg.phase_retreat_min_clear_hold_steps)
+        )
+
+        phase_a = phase_b.clone()
+        phase_a = torch.where(go_rel, torch.full_like(phase_a, _PHASE_RELEASE), phase_a)
+        phase_a = torch.where(go_ret, torch.full_like(phase_a, _PHASE_RETREAT), phase_a)
+        phase_a = torch.where(go_push, torch.full_like(phase_a, _PHASE_PUSH), phase_a)
+        self._phase = phase_a
+
+        tr01 = ((phase_b == _PHASE_INSERT) & (phase_a == _PHASE_RELEASE)).float().mean()
+        tr12 = ((phase_b == _PHASE_RELEASE) & (phase_a == _PHASE_RETREAT)).float().mean()
+        tr23 = ((phase_b == _PHASE_RETREAT) & (phase_a == _PHASE_PUSH)).float().mean()
+
+        lat_extent = m["lat_extent"]
+        z_err = m["z_err"]
+        yaw_err = m["yaw_err"]
+        front_to_back = m["front_to_back"]
+        rear_to_mouth = m["rear_to_mouth"]
         yaw_e = torch.abs(yaw_err)
         upright = self._upright_ok()
 
-        inner_half = 0.5 * (self.cfg.book_size[2] + self.cfg.slot_lateral_clearance)
+        curr_clearance = self._current_slot_lateral_clearance()
+        inner_half = 0.5 * (self._neighbor_thick_y + curr_clearance)
         lat_limit = inner_half - float(self.cfg.success_lateral_margin)
-        lat_ok = lat_extent <= (inner_half - float(self.cfg.success_lateral_margin) + 1e-4)
-        depth_ok = front_to_mouth > float(self.cfg.success_enter_margin)
-        if float(self.cfg.success_back_margin) > 0.0:
-            not_too_deep = front_to_back > float(self.cfg.success_back_margin)
-        else:
-            not_too_deep = torch.ones_like(depth_ok)
+        lat_eps = float(self.cfg.success_lateral_extent_eps_m)
+        front_eps = float(self.cfg.success_front_clear_eps_m)
+        lat_limit_eff = lat_limit + lat_eps
+        front_min_eff = float(self.cfg.success_front_clear_min) - front_eps
+        front_max_eff = float(self.cfg.success_front_clear_max) + front_eps
+        lat_ok = lat_extent <= lat_limit_eff
+        rear_ok = (rear_to_mouth >= float(self.cfg.success_rear_to_mouth_min)) & (
+            rear_to_mouth <= float(self.cfg.success_rear_to_mouth_max)
+        )
+        front_band_ok = (front_to_back >= front_min_eff) & (front_to_back <= front_max_eff)
         z_ok = torch.abs(z_err) < float(self.cfg.success_z_thresh)
         yaw_ok = yaw_e < float(self.cfg.success_yaw_thresh)
 
-        # Optional stability gate.
-        v = self.book.data.root_link_vel_w
-        lin_speed = torch.linalg.norm(v[:, 0:3], dim=-1)
-        ang_speed = torch.linalg.norm(v[:, 3:6], dim=-1)
+        lin_speed = m["book_lin_speed"]
+        ang_speed = m["book_ang_speed"]
         if float(self.cfg.success_max_lin_vel) > 0.0:
             stable_lin = lin_speed < float(self.cfg.success_max_lin_vel)
         else:
-            stable_lin = torch.ones_like(depth_ok)
+            stable_lin = torch.ones_like(lat_ok)
         if float(self.cfg.success_max_ang_vel) > 0.0:
             stable_ang = ang_speed < float(self.cfg.success_max_ang_vel)
         else:
-            stable_ang = torch.ones_like(depth_ok)
+            stable_ang = torch.ones_like(lat_ok)
 
-        # Avoid "success on reset": require a few env steps before success can start counting.
         ready = self.episode_length_buf > int(self.cfg.min_steps_before_success)
-        stage_insert = depth_ok & not_too_deep & lat_ok & z_ok & yaw_ok & upright & stable_lin & stable_ang & ready
+        placement_ok = (
+            rear_ok & front_band_ok & lat_ok & z_ok & yaw_ok & upright & stable_lin & stable_ang & ready
+        )
+        # Success is evaluated on `phase_b` before this step's transitions. If we RETREAT→PUSH and are
+        # already placement_ok, the success counter starts on the *next* env step (first full step in PUSH).
+        push_phase = phase_b == _PHASE_PUSH
+        stage_push = push_phase & placement_ok
 
-        if bool(getattr(self.cfg, "debug_print_success", False)):
-            every = max(1, int(getattr(self.cfg, "debug_print_success_every", 1)))
+        if bool(self.cfg.debug_print_success):
+            every = max(1, int(self.cfg.debug_print_success_every))
             step_ctr = self.common_step_counter.item() if hasattr(self.common_step_counter, "item") else self.common_step_counter
             if int(step_ctr) % every == 0:
                 i = 0
                 print(
                     "[SUCCESS_GATES] env=0 "
-                    f"ep_len={int(self.episode_length_buf[i].item())} "
-                    f"front_to_mouth={float(front_to_mouth[i].item()):+.4f}>(enter {float(self.cfg.success_enter_margin):.4f})={bool(depth_ok[i].item())} "
-                    f"front_to_back={float(front_to_back[i].item()):+.4f}>(back {float(self.cfg.success_back_margin):.4f})={bool(not_too_deep[i].item())} "
-                    f"lat_extent={float(lat_extent[i].item()):.4f}<(lim {float(lat_limit):.4f})={bool(lat_ok[i].item())} "
-                    f"z_err={float(z_err[i].item()):+.4f}<(thr {float(self.cfg.success_z_thresh):.4f})={bool(z_ok[i].item())} "
-                    f"yaw_e={float(yaw_e[i].item()):.4f}<(thr {float(self.cfg.success_yaw_thresh):.4f})={bool(yaw_ok[i].item())} "
-                    f"upright={bool(upright[i].item())} "
-                    f"lin={float(lin_speed[i].item()):.3f}<(thr {float(self.cfg.success_max_lin_vel):.3f})={bool(stable_lin[i].item())} "
-                    f"ang={float(ang_speed[i].item()):.3f}<(thr {float(self.cfg.success_max_ang_vel):.3f})={bool(stable_ang[i].item())} "
-                    f"hold_steps={int(self._success_steps_buf[i].item())}/{int(self.cfg.success_steps)} "
-                    f"stage_insert={bool(stage_insert[i].item())}"
+                    f"phase={int(phase_b[i].item())} ep_len={int(self.episode_length_buf[i].item())} "
+                    f"rear_to_mouth={float(rear_to_mouth[i].item()):+.4f} "
+                    f"front_to_back={float(front_to_back[i].item()):+.4f} "
+                    f"placement_ok={bool(placement_ok[i].item())} push_phase={bool(push_phase[i].item())} "
+                    f"hold_steps={int(self._success_steps_buf[i].item())}/{int(self.cfg.success_steps)}"
                 )
 
         self._success_steps_buf = torch.where(
-            stage_insert, self._success_steps_buf + 1, torch.zeros_like(self._success_steps_buf)
+            stage_push, self._success_steps_buf + 1, torch.zeros_like(self._success_steps_buf)
         )
         success = self._success_steps_buf >= int(self.cfg.success_steps)
 
@@ -694,7 +947,7 @@ class BookshelfEnv(DirectRLEnv):
         p = self._book_pos_env()
         corners_w = self._book_corners_env()
         lowest_z = corners_w[..., 2].min(dim=-1).values
-        floor_z = float(getattr(self.cfg, "book_floor_lowest_z_thresh", 0.042))
+        floor_z = float(self.cfg.book_floor_lowest_z_thresh)
         book_touches_ground = lowest_z < floor_z
         on_shelf = self._book_supported_on_shelf(p, lowest_z)
         book_dropped_to_ground = book_touches_ground & ~on_shelf
@@ -708,22 +961,17 @@ class BookshelfEnv(DirectRLEnv):
             fell = torch.zeros_like(success)
             terminated = success | book_dropped_to_ground
 
-        # Debug: print which termination triggered (first terminated env only).
-        if bool(torch.any(terminated)):
-            i = int(torch.nonzero(terminated, as_tuple=False)[0, 0].item())
-            # print(
-            #     "[DONE] env="
-            #     f"{i} success={bool(success[i].item())} book_drop={bool(book_dropped_to_ground[i].item())} "
-            #     f"oob={bool(oob[i].item())} fell={bool(fell[i].item())} "
-            #     f"steps={int(self._success_steps_buf[i].item())} "
-            #     f"front_to_mouth={float(front_to_mouth[i].item()):+.4f} "
-            #     f"front_to_back={float(front_to_back[i].item()):+.4f} "
-            #     f"lat_extent={float(lat_extent[i].item()):.4f} "
-            #     f"z_err={float(z_err[i].item()):+.4f} "
-            #     f"yaw_e={float(yaw_e[i].item()):.4f} "
-            #     f"upright={bool(upright[i].item())} "
-            #     f"lin={float(lin_speed[i].item()):.3f} ang={float(ang_speed[i].item()):.3f}"
-            # )
+        self.extras.setdefault("log", {})
+        self.extras["log"]["phase_insert_frac"] = (self._phase == _PHASE_INSERT).float().mean()
+        self.extras["log"]["phase_release_frac"] = (self._phase == _PHASE_RELEASE).float().mean()
+        self.extras["log"]["phase_retreat_frac"] = (self._phase == _PHASE_RETREAT).float().mean()
+        self.extras["log"]["phase_push_frac"] = (self._phase == _PHASE_PUSH).float().mean()
+        self.extras["log"]["release_ready_mean"] = m["release_ready"].float().mean()
+        self.extras["log"]["supported_on_shelf_mean"] = m["supported_on_shelf"].float().mean()
+        self.extras["log"]["trans_insert_to_release_mean"] = tr01
+        self.extras["log"]["trans_release_to_retreat_mean"] = tr12
+        self.extras["log"]["trans_retreat_to_push_mean"] = tr23
+
         return terminated, time_out
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
@@ -793,11 +1041,19 @@ class BookshelfEnv(DirectRLEnv):
 
         corners0 = self._book_corners_env()[env_ids_t]
         front_x0 = corners0[..., 0].max(dim=-1).values
-        self._prev_front_to_mouth[env_ids_t] = (front_x0 - float(self.cfg.slot_x_open)).detach()
-        self._last_actions[env_ids_t] = 0.0
+        rear_x0 = corners0[..., 0].min(dim=-1).values
+        mouth = float(self._geom_mouth_x)
+        self._prev_front_to_mouth[env_ids_t] = (front_x0 - mouth).detach()
+        self._prev_rear_to_mouth[env_ids_t] = (rear_x0 - mouth).detach()
         self._success_steps_buf[env_ids_t] = 0
-        # Reset progress buffers.
-        _, lat_err0, _, _, yaw_err0, _ = self._stage_metrics()
-        self._prev_abs_lat_err[env_ids_t] = torch.abs(lat_err0)[env_ids_t].detach()
-        self._prev_abs_yaw_err[env_ids_t] = torch.abs(yaw_err0)[env_ids_t].detach()
-        self._slot_reach_entry_credited[env_ids_t] = False
+        self._phase[env_ids_t] = 0
+        self._phase_start[env_ids_t] = 0
+        self._release_ready_hold_buf[env_ids_t] = 0
+        self._release_open_stable_buf[env_ids_t] = 0
+        self._retreat_clear_buf[env_ids_t] = 0
+        self._crossed_mouth_bonus_given[env_ids_t] = False
+        self._pending_insert_release_bonus[env_ids_t] = False
+
+        m0 = self._compute_task_metrics()
+        self._prev_hand_clearance[env_ids_t] = m0["hand_clearance"][env_ids_t].detach()
+        self._prev_gripper_open[env_ids_t] = m0["gripper_open"][env_ids_t].detach()

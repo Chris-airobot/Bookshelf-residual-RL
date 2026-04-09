@@ -4,17 +4,15 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Config for Bookshelf-Direct-v4 (insert-only).
+"""Config for Bookshelf-Direct-v4 (phase-aware placement).
 
-This cfg keeps only what is needed to spawn:
-- the robot articulation
-- the book rigid object
-- the bookshelf geometry (slot parameters, shelf dimensions)
+Spawns the robot articulation, book rigid object, and bookshelf geometry (slot parameters, shelf dimensions).
 
-This version defines an insertion RL task with **learned gripper**:
-- Actions: Cartesian residual + yaw + gripper open/close
-- Success is geometry-only at the slot mouth (dwell a few steps)
-- Termination: book COM on the floor (not on shelf deck) → failure; book on shelf without grasp → continue
+Single-policy episode with internal phases: **held insert → release → retreat → push**, then terminal
+success only when the book is fully placed and stable (same geometry gates as before).
+
+- Actions: Cartesian residual + pitch + yaw + gripper (gripper forced closed in insert/retreat/push as configured).
+- Termination: final placement success, book dropped to floor, optional OOB/fall, or timeout.
 """
 
 import math
@@ -23,7 +21,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.sim.schemas.schemas_cfg import MassPropertiesCfg, RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.materials import RigidBodyMaterialCfg
@@ -36,6 +33,9 @@ _SHELF_BASE_OPEN = 0.68
 _SHELF_BASE_BACK = 0.81
 # Choose offset so back panel (slot_x_back + wall_thickness/2) is ~0.81 m.
 SHELF_OFFSET_X = -0.01
+
+# Manipuland cuboid (L, H, T) in meters; neighbor kinematic books use the same dimensions.
+_BOOK_LWH = (0.152, 0.229, 0.02)
 
 # Pre-insertion arm pose (captured from sim / joint readout). Fingers at 0.005 for closed grasp on the book (not 0.04 cube-open).
 ROBOT_PRE_INSERTION_JOINT_POS = {
@@ -61,19 +61,18 @@ class BookshelfEnvV4SceneCfg(InteractiveSceneCfg):
 
 @configclass
 class BookshelfEnvCfg(DirectRLEnvCfg):
-    """Insertion env (5D: Cartesian + yaw + gripper; geometry success)."""
+    """Bookshelf v4: 6D actions; phase FSM + full-placement terminal success."""
 
     decimation = 2
     episode_length_s = 10.0
-    # Actions: [dx, dy, dz, dyaw, g_gripper] in [-1, 1]; g=-1 closed, g=+1 open
-    action_space = 5
-    # Obs (17):
-    # [front_to_mouth, lat_err, yaw_err, z_err,
-    #  ex, ey, ez, eyaw,
-    #  vx, vy, wz,
-    #  gripper_open01,
-    #  prev_dx, prev_dy, prev_dz, prev_dyaw, prev_gripper]
-    observation_space = 17
+    # Actions (6D): [dx, dy, dz, dpitch, dyaw, g_gripper] in [-1, 1]
+    # g=-1/low -> closed, g=+1/high -> open (threshold applies in RELEASE phase only).
+    action_space = 6
+    # Obs (16): phase_norm,
+    #   front_to_mouth, lat_err, yaw_err, z_err, front_to_back, rear_to_mouth,
+    #   gripper_open, supported_on_shelf, release_ready, hand_clearance_scaled,
+    #   tool_to_book_xyz (3), tool yaw/pitch minus book (2)
+    observation_space = 16
     state_space = 0
 
     sim: SimulationCfg = SimulationCfg(dt=1 / 120, render_interval=decimation)
@@ -121,7 +120,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
             rot=(math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0),
         ),
         spawn=sim_utils.CuboidCfg(
-            size=(0.152, 0.229, 0.02),
+            size=_BOOK_LWH,
             rigid_props=RigidBodyPropertiesCfg(
                 solver_position_iteration_count=12,
                 solver_velocity_iteration_count=2,
@@ -143,22 +142,27 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.2, 0.8)),
         ),
     )
-    book_contact: ContactSensorCfg = ContactSensorCfg(
-        prim_path="/World/envs/env_.*/Book",
-        max_contact_data_count_per_prim=24,
-        update_period=0.0,
-        track_air_time=False,
-    )
 
-    book_size = (0.152, 0.229, 0.02)
+    book_size = _BOOK_LWH
     book_standing_quat = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
+    # Slot-defining neighbor cuboids: same dimensions as the manipuland (see ``_BOOK_LWH``).
+    neighbor_book_size: tuple[float, float, float] = _BOOK_LWH
 
-    # Slot mouth / back; SHELF_OFFSET_X shifts the whole shelf in +X (see module constants above).
+    # Shelf depth anchors (env X): used with ``mid_x = 0.5*(open+back)`` for shelf, neighbors, and back panel.
+    # The *metric* insertion mouth plane is **not** ``slot_x_open``; it is derived in the env from neighbor
+    # cuboid geometry (``neighbor_book_size`` / ``book_standing_quat``).
     slot_x_open = _SHELF_BASE_OPEN + SHELF_OFFSET_X
     slot_x_back = _SHELF_BASE_BACK + SHELF_OFFSET_X
     slot_center_y = 0.0
-    # Slightly narrower than debug-wide setting, while still forgiving for early training.
+    # Stage-1 (wide-slot) training: set the physical slot clearance here.
     slot_lateral_clearance = 0.02
+    # Optional slot-clearance curriculum (linear schedule over global env steps).
+    # NOTE: shelf geometry is spawned once at startup using the curriculum start value;
+    # runtime success/support checks anneal from start -> end.
+    enable_slot_clearance_curriculum = False
+    slot_lateral_clearance_start = 0.02
+    slot_lateral_clearance_end = 0.004
+    slot_clearance_curriculum_steps = 20_000_000
     # Extra kinematic books along ±Y outside the slot-defining pair (visual + tighter shelf layout).
     shelf_extra_books_per_side: int = 2
     # Center-to-center step along Y between adjacent standing books (spine thickness + small gap).
@@ -169,49 +173,89 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     shelf_thickness = 0.02
     
 
-    # --- insertion-only task parameters ---
+    # --- Action scales (meters / radians per step) ---
 
-    # Action scales (meters / radians per step).
-    # NOTE: these are meters; keep them in the mm range for this tight insertion task.
-    dx_action_scale = 0.06
-    dy_action_scale = 0.04
-    dz_action_scale = 0.03
-    dyaw_action_scale = math.radians(1.2)
-    # Gripper: finger joint targets (m); action g=-1 → closed, g=+1 → open
+    dx_action_scale = 0.006
+    # Extra forward authority in INSERT only (multiplies dx residual; dy/dz unchanged).
+    phase_insert_dx_multiplier = 1.75
+    dy_action_scale = 0.002
+    dz_action_scale = 0.0015
+    dyaw_action_scale = math.radians(0.6)
+    dpitch_action_scale = dyaw_action_scale
     gripper_closed_joint_pos = 0.002
     gripper_open_joint_pos = 0.04
+    # Command threshold for opening in RELEASE phase only (g >= threshold → open target).
+    gripper_open_action_threshold = 0.95
 
-    # If |arm action| < this on all arm dims, hold last IK arm setpoint (gripper excluded).
+    # Per-phase arm authority multipliers (applied to dx..dyaw residuals before IK).
+    phase_insert_arm_scale = 1.0
+    phase_release_arm_scale = 0.35
+    phase_retreat_arm_scale = 1.2
+    phase_push_arm_scale = 1.0
+
     ik_hold_action_epsilon = 1e-5
-
-    # Reset randomization (arm joints). Larger -> more visible book pose variety.
+    # If True, never freeze arm on near-zero actions during INSERT (reduces mouth-hover stickiness).
+    ik_hold_disable_in_insert = True
     reset_arm_joint_pos_noise = math.radians(2.0)
-
-    # Isaac Lab reach (ik_abs) uses a fictitious end-effector frame offset from `panda_hand`.
     ik_body_offset_pos = (0.0, 0.0, 0.107)
 
-    # Scale for tracking errors (ex, ey, ez, eyaw) in observations.
-    tracking_error_obs_scale = 0.05
+    # --- Observation scaling / clipping ---
 
-    # Light normalization/clipping for raw geometry + velocity obs.
     front_to_mouth_obs_scale = 0.08
+    rear_to_mouth_obs_scale = 0.08
+    front_to_back_obs_scale = 0.08
     lat_err_obs_scale = 0.05
     z_err_obs_scale = 0.05
     yaw_err_obs_scale = math.radians(30.0)
-    lin_vel_obs_scale = 0.5
-    ang_vel_obs_scale = 2.0
+    hand_clearance_obs_scale = 0.25
+    tool_to_book_pos_obs_scale = 0.25
+    tool_yaw_minus_book_yaw_obs_scale = math.radians(30.0)
+    tool_pitch_minus_book_pitch_obs_scale = math.radians(30.0)
 
-    # Success thresholds (geometry-only at slot mouth).
-    # Insertion-only "release-ready partial insertion corridor" (measured against true `slot_x_open/slot_x_back`):
-    # - enter: front face is this far past the mouth plane (m)
-    # - back: front face is still this far away from the back panel (m); set <=0 to disable upper bound
-    success_enter_margin = 0.08
-    success_back_margin = 0.03
+    # --- Phase FSM: transition gates ---
+
+    # INSERT → RELEASE: release_ready must hold this many consecutive env steps.
+    phase_insert_min_release_ready_hold_steps = 3
+    # release_ready geometry (looser than terminal success).
+    # Convention: front_x = max book corner X (leading edge into +X / into slot); mouth = slot mouth plane.
+    # Then front_to_mouth = front_x - mouth is > 0 once that leading edge is past the mouth (inside the slot).
+    phase_release_ready_requires_past_mouth = True
+    # Require front_to_mouth > this (use a small negative value, e.g. -1e-4, if you need numerical slack).
+    phase_release_ready_min_front_to_mouth = 0.0
+    phase_release_ready_rear_to_mouth_min = -0.033
+    phase_release_ready_max_abs_lat_err = 0.012
+    phase_release_ready_max_abs_yaw_err = math.radians(12.0)
+    phase_release_ready_max_abs_z_err = 0.022
+    phase_release_ready_requires_supported = True
+
+    # RELEASE → RETREAT: gripper open fraction and low book motion, held consecutively.
+    phase_release_gripper_open_frac = 0.82
+    phase_release_max_lin_vel = 0.12
+    phase_release_max_ang_vel = 0.85
+    phase_release_min_open_stable_steps = 3
+
+    # RETREAT → PUSH: minimum tool–book clearance (m) and hold steps.
+    # Clearance is min distance from the IK tool point to book corners (proxy, not full finger mesh clearance).
+    phase_retreat_min_hand_clearance_m = 0.09
+    phase_retreat_min_clear_hold_steps = 3
+
+    # --- Full placement success (terminal, only counted in PUSH phase) ---
+    # rear_to_mouth = rear_x - mouth (m). Acceptable band for terminal success (inclusive).
+    success_rear_to_mouth_min = -0.012
+    success_rear_to_mouth_max = 0.002
+    # front_to_back = slot_x_back - front_x: clearance from deepest face to inner back (0 = flush).
+    success_front_clear_min = 0.0
+    success_front_clear_max = 0.055
+    # Allow small numerical/pose tolerance at the success gate.
+    # (Used in `_get_dones()` to turn "very close" placements into success.)
+    success_front_clear_eps_m = 2.0e-4
+
     success_z_thresh = 0.015
     success_yaw_thresh = math.radians(8.0)
     success_steps = 4
-    # Require a small clearance margin relative to the nominal slot half-width.
     success_lateral_margin = 0.000
+    # Max allowed deviation of the book from the slot center in terms of lateral extent.
+    success_lateral_extent_eps_m = 5.0e-4
 
 
     # Optional stability gate for success (set to 0 to disable).
@@ -221,49 +265,62 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # Prevent immediate success on reset (steps).
     min_steps_before_success = 5
 
-    # Debug printing for success gates.
-    debug_print_success = True
+    debug_print_success = False
     debug_print_success_every = 1
 
-    # Reward shaping (simple, insertion-only).
-    progress_scale = 7.0
-    # Linear + quadratic depth shaping in [0, success_enter_margin] to reward committing past the mouth.
-    depth_reward_scale = 2.5
-    depth_corridor_progress_scale = 1.2
-    center_progress_scale = 2.0
-    yaw_progress_scale = 1.0
-    lateral_penalty_scale = 0.9
-    yaw_penalty_scale = 0.5
-    z_penalty_scale = 0.7
-    # Softer base scale; first centimeters past mouth use clearance_ramp (see env).
-    clearance_violation_scale = 1.5
-    # Meters past mouth plane over which clearance penalty ramps from 50% to 100%.
-    clearance_ramp_depth_m = 0.03
-    aligned_forward_bonus_scale = 2.0
-    # Loose alignment gate for adding forward bonus (not success thresholds).
-    aligned_bonus_lat_thresh = 0.01
-    aligned_bonus_yaw_thresh = math.radians(10.0)
-    # Slot funnel: one-time entry bonus + small per-step (avoid ~6*600 reward farming).
-    slot_reach_entry_bonus = 10.0
-    slot_reach_per_step_scale = 0.12
-    slot_reach_lat_thresh = 0.012
-    slot_reach_yaw_thresh = math.radians(12.0)
-    slot_reach_z_thresh = 0.018
-    # front_to_mouth must be in (-slot_reach_mouth_window_m, success_enter_margin) (approach + pre-success insert).
-    slot_reach_mouth_window_m = 0.010
-    # After book is supported on shelf: reward forward insertion; penalize no progress toward success depth.
-    post_insert_push_scale = 4.0
-    shelf_stagnation_penalty_scale = 0.25
-    shelf_stall_d_mouth_thresh = 0.0008
-    # Archive-inspired anti-dither shaping.
-    # Closer to 1.0 => less "comfort" outside the mouth (reduces pre-insert local optimum).
-    pre_mouth_penalty_scale = 0.85
-    mouth_dither_window = 0.015
-    dx_signflip_penalty_scale = 0.4
-    dx_signflip_active_thresh = 0.2
-    action_delta_penalty_scale = 0.0015
+    # --- Global shaping / terminal ---
     step_penalty = -0.001
-    success_bonus = 400.0
+    success_bonus = 550.0
+    drop_penalty = -3.0
+
+    # INSERT phase rewards / penalties
+    rew_insert_rear_progress_scale = 5.0
+    rew_insert_pre_entry_forward_scale = 1.0
+    # Post-entry shaping only when leading edge is truly inside (front_to_mouth > 0); no pre-mouth window.
+    rew_insert_post_entry_push_scale = 1.0
+    rew_insert_stall_penalty_scale = 0.5
+    rew_insert_stall_thresh_m = 2.0e-4
+    rew_insert_bottom_reward_scale = 0.5
+    # Full alignment weights; pre-entry uses `* rew_insert_align_penalty_pre_mul` (milder before crossing mouth).
+    rew_insert_lat_penalty_scale = 0.9
+    rew_insert_yaw_penalty_scale = 0.5
+    rew_insert_z_penalty_scale = 1.0
+    rew_insert_align_penalty_pre_mul = 0.55
+    # Continuous milestone + one-time bonuses (see env latches / pending flags).
+    rew_insert_release_ready_bonus_scale = 2.5
+    rew_insert_cross_mouth_bonus = 12.0
+    rew_insert_to_release_transition_bonus = 35.0
+    # Absolute depth (in addition to delta progress): linear in clamped rear_to_mouth.
+    rew_insert_abs_rear_to_mouth_scale = 1.2
+    rew_insert_abs_rear_to_mouth_clip_lo = -0.07
+    rew_insert_abs_rear_to_mouth_clip_hi = 0.012
+    # Hover trap: near mouth, negligible rear progress, not release-ready.
+    rew_insert_hover_penalty_scale = 0.4
+    rew_insert_hover_mouth_low_m = -0.01
+    rew_insert_hover_mouth_high_m = 0.005
+    rew_insert_hover_d_rear_thresh_m = 3.0e-4
+
+    # RELEASE phase
+    rew_release_open_progress_scale = 0.8
+    rew_release_speed_penalty_scale = 0.6
+    rew_release_lat_penalty_scale = 0.25
+    rew_release_z_penalty_scale = 0.25
+    rew_release_yaw_penalty_scale = 0.2
+
+    # RETREAT phase
+    rew_retreat_clearance_delta_scale = 2.5
+    rew_retreat_book_speed_penalty_scale = 0.8
+    rew_retreat_rear_pull_penalty_scale = 4.0
+
+    # PUSH phase (final seating)
+    rew_push_rear_progress_scale = 5.0
+    rew_push_post_push_scale = 1.0
+    rew_push_stall_penalty_scale = 0.5
+    rew_push_stall_thresh_m = 2.0e-4
+    rew_push_bottom_reward_scale = 0.5
+    rew_push_lat_penalty_scale = 0.9
+    rew_push_yaw_penalty_scale = 0.5
+    rew_push_z_penalty_scale = 1.0
 
     # Debug/safety terminations (optional).
     max_abs_xy = 0.95
@@ -278,11 +335,6 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     shelf_footprint_y_pad_m = 0.05
     # Lowest corner must be at/above deck minus slack to count as supported on shelf (deck = shelf_top_z + shelf_thickness).
     book_on_shelf_z_slack_m = 0.02
-
-    # v4 reset: book COM from grasp (finger midpoint + panda_hand axes). Orientation:
-    # - "standing_world": book_standing_quat + world yaw jitter (neighbors / shelf upright in world).
-    # - "grasp_relative": q_world = q_panda_hand * q_book_in_hand * yaw_jitter; see book_grasp_orientation_in_hand.
-    book_reset_orient_mode = "grasp_relative"
 
     # Book COM offset in grasp frame (origin = finger midpoint, +X/+Y/+Z = panda_hand body axes).
     # +Z_hand = approach (between fingers). Increase Z to pull the COM out of the palm when using franka_axes orientation.
@@ -305,4 +357,3 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     book_grasp_y_jitter = 0.002
     # World +Z yaw after q_book_in_hand (non-zero breaks strict franka_axes grasp lock).
     book_grasp_yaw_jitter = math.radians(2.0)
-    debug_print_grasp_frame = False

@@ -12,6 +12,8 @@ Usage example:
 Then type actions like (v4: dx dy dz dyaw dgrip in [-1,1]; dgrip=-1 close, +1 open):
   0.5 0.0 0.0 0.0 -1.0
   0.0 -0.2 0.05 0.0 -0.5
+Idle steps (no new line) repeat the last gripper command; they do not send g=0 (which would drift half-open).
+After env reset, idle gripper defaults to closed (-1) until you type a new 5th value.
 Press Enter to repeat the last action, or type 'q' to quit.
 """
 
@@ -134,6 +136,19 @@ def main():
         env_cfg.episode_length_s = float(args_cli.episode_length_s)
     if args_cli.debug_terminate and hasattr(env_cfg, "debug_print_terminate_reason"):
         env_cfg.debug_print_terminate_reason = True
+
+    # For manual "reset" testing we want deterministic starting poses:
+    # - no arm joint noise
+    # - no book grasp-frame jitter (position / yaw)
+    for name in [
+        "reset_arm_joint_pos_noise",
+        "book_grasp_x_jitter",
+        "book_grasp_y_jitter",
+        "book_grasp_z_jitter",
+        "book_grasp_yaw_jitter",
+    ]:
+        if hasattr(env_cfg, name):
+            setattr(env_cfg, name, 0.0)
     env = gym.make(args_cli.task, cfg=env_cfg)
 
     print(f"[INFO] observation_space: {env.observation_space}")
@@ -146,6 +161,10 @@ def main():
     zero_action = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
     last_action = zero_action.clone()
     last_nudge = zero_action.clone()
+    # Bookshelf v4: idle steps must repeat the last gripper command to avoid accidental opens.
+    last_gripper = -1.0
+    if int(env.action_space.shape[-1]) in (5, 6):
+        last_nudge[..., -1] = last_gripper
 
     # Optional USD Xform sync (so gizmo matches the moving book when Fabric is enabled).
     # This is purely for visualization/debug and does not change training.
@@ -224,23 +243,29 @@ def main():
             action = torch.tensor(vals, device=env.unwrapped.device, dtype=torch.float32).unsqueeze(0)
             action = action * float(args_cli.action_gain)
             last_nudge = torch.clamp(action, -1.0, 1.0)
+            if int(env.action_space.shape[-1]) in (5, 6):
+                last_gripper = float(last_nudge[0, -1].item())
             got_command = True
             nudge_this_step = True
 
         if stop_event.is_set():
             break
 
-        # Default: single-step nudge then zero. With --continuous_action, keep last_nudge until a new line is typed.
+        idle_action = zero_action.clone()
+        if int(env.action_space.shape[-1]) in (5, 6):
+            idle_action[..., -1] = last_gripper
+
+        # Default: single-step nudge then idle. With --continuous_action, keep last_nudge until a new line is typed.
         if args_cli.continuous_action:
             if nudge_this_step:
                 action = last_nudge
             else:
-                action = last_nudge if last_nudge.abs().any() else zero_action
+                action = last_nudge if last_nudge.abs().any() else idle_action
         else:
             if nudge_this_step:
                 action = last_nudge
             else:
-                action = zero_action
+                action = idle_action
 
         # Use no_grad instead of inference_mode.
         # inference_mode can mark internal Isaac Lab buffers as "inference tensors", and then env.reset()
@@ -325,6 +350,9 @@ def main():
             # After reset, hold zero action until user types a new command.
             last_action = zero_action.clone()
             last_nudge = zero_action.clone()
+            last_gripper = -1.0
+            if int(env.action_space.shape[-1]) in (5, 6):
+                last_nudge[..., -1] = last_gripper
             print(f"[INFO] reset() because terminated=True (truncated={trunc0} ignored); action reset to zero")
 
         if not simulation_app.is_running():
