@@ -185,8 +185,12 @@ class BookshelfEnv(DirectRLEnv):
             dim=-1,
         )
 
-    def _snap_book_to_measured_grasp(self, env_ids_t: torch.Tensor) -> None:
-        """Place book from measured finger-midpoint so it starts inside the gripper."""
+    def _snap_book_to_measured_grasp(self, env_ids_t: torch.Tensor) -> torch.Tensor:
+        """Place book from measured finger-midpoint so it starts inside the gripper.
+
+        Returns the written book world state (N, 13) so the caller can hold the book
+        at this exact pose during warmup without re-sampling jitter.
+        """
         n = int(env_ids_t.numel())
         dtype = torch.float32
 
@@ -232,6 +236,7 @@ class BookshelfEnv(DirectRLEnv):
         book_state[:, 3:7] = book_quat_w
         book_state[:, 7:] = 0.0
         self.book.write_root_state_to_sim(book_state, env_ids=env_ids_t)
+        return book_state
 
     def _ee_pose_in_base(self) -> tuple[torch.Tensor, torch.Tensor]:
         ee_pos_w = self.robot.data.body_pos_w[:, self._ee_body_idx]
@@ -802,7 +807,9 @@ class BookshelfEnv(DirectRLEnv):
         self.scene.update(dt=self.physics_dt)
 
         # Ensure book starts in the gripper for the (possibly updated) default robot joint pose.
-        self._snap_book_to_measured_grasp(env_ids_t)
+        # Capture the exact written state before any physics runs (avoids residual shelf contacts
+        # corrupting the position on subsequent resets).
+        snapped_book_state = self._snap_book_to_measured_grasp(env_ids_t)
         self.scene.write_data_to_sim()
         self.sim.step(render=False)
         self.scene.update(dt=self.physics_dt)
@@ -817,13 +824,16 @@ class BookshelfEnv(DirectRLEnv):
             finger_des = self.robot.data.default_joint_pos[env_ids_t][:, self._finger_joint_ids]
             self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids, env_ids=env_ids_t)
 
-        # Let contacts settle: re-snap the book each step so the gripper closes around it.
+        # Hold the book at the exact snapped pose while gripper fingers converge.
+        # Use the state returned by _snap_book_to_measured_grasp (pre-physics) so that
+        # residual contact forces from the shelf on prior episodes cannot corrupt the target.
         warmup = int(getattr(self.cfg, "reset_warmup_steps", 0))
-        for _ in range(warmup):
-            self._snap_book_to_measured_grasp(env_ids_t)
-            self.scene.write_data_to_sim()
-            self.sim.step(render=False)
-            self.scene.update(dt=self.physics_dt)
+        if warmup > 0:
+            for _ in range(warmup):
+                self.book.write_root_state_to_sim(snapped_book_state, env_ids=env_ids_t)
+                self.scene.write_data_to_sim()
+                self.sim.step(render=False)
+                self.scene.update(dt=self.physics_dt)
 
         # Initialize integrated target to current EE tool pose and yaw.
         ee_body_pos_env = self.robot.data.body_pos_w[env_ids_t, self._ee_body_idx] - self.scene.env_origins[env_ids_t]

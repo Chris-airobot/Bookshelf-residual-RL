@@ -168,7 +168,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     dz_action_scale = 0.006
     dyaw_action_scale = math.radians(0.6)
 
-    gripper_closed_joint_pos = 0.002
+    gripper_closed_joint_pos = 0.008
     gripper_open_joint_pos = 0.04
     # INSERT→SCRIPTED when action[4] > this value (strictly greater).
     release_trigger_threshold = 0.5
