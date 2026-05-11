@@ -76,3 +76,4 @@ tests/
 
 .cursorignore
 .cursorindexingignore
+data/

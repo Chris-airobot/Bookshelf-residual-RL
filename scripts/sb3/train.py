@@ -16,6 +16,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Ensure the bookshelf package is importable regardless of install state.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BOOKSHELF_SRC = _REPO_ROOT / "source" / "bookshelf"
+if str(_BOOKSHELF_SRC) not in sys.path:
+    sys.path.insert(0, str(_BOOKSHELF_SRC))
+
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -137,6 +143,41 @@ def _safe_git_info() -> dict[str, str]:
         return {"git_commit": "unknown", "git_dirty": "unknown"}
 
 
+def _load_actor_warm_start(agent: PPO, checkpoint_path: str, device: str):
+    """Copy actor weights from an SB3 checkpoint without importing its PPO hyperparameters."""
+    source_agent = PPO.load(checkpoint_path, device=device, print_system_info=True)
+    source_state = source_agent.policy.state_dict()
+    target_state = agent.policy.state_dict()
+
+    actor_prefixes = (
+        "log_std",
+        "mlp_extractor.policy_net.",
+        "action_net.",
+    )
+    copied_keys = []
+    skipped_keys = []
+    for key, source_tensor in source_state.items():
+        if not key.startswith(actor_prefixes):
+            continue
+        target_tensor = target_state.get(key)
+        if target_tensor is None or target_tensor.shape != source_tensor.shape:
+            skipped_keys.append(key)
+            continue
+        target_state[key] = source_tensor.detach().clone()
+        copied_keys.append(key)
+
+    if not copied_keys:
+        raise RuntimeError(
+            f"No compatible actor tensors could be loaded from checkpoint: {checkpoint_path}. "
+            "Check policy architecture, observation size, and action size."
+        )
+
+    agent.policy.load_state_dict(target_state)
+    print(f"[INFO] Warm-started actor from {checkpoint_path}: copied {len(copied_keys)} tensors.")
+    if skipped_keys:
+        print(f"[WARN] Skipped {len(skipped_keys)} actor tensors with incompatible names/shapes: {skipped_keys}")
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with stable-baselines agent."""
@@ -256,12 +297,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             clip_reward=np.inf,
         )
 
+        # When starting from a BC checkpoint, warm-start VecNormalize with
+        # the pre-computed obs stats so the normalisation matches what BC was
+        # trained on from the very first rollout.
+        if args_cli.checkpoint is not None and isinstance(env, VecNormalize):
+            stats_path = args_cli.checkpoint.replace(".zip", "_obs_stats.npz")
+            if os.path.exists(stats_path):
+                stats = np.load(stats_path)
+                env.obs_rms.mean = stats["mean"].astype(np.float64)
+                env.obs_rms.var = (stats["std"] ** 2).astype(np.float64)
+                # Large count makes the initial stats sticky: early rollouts
+                # won't immediately overwrite the pre-computed distribution.
+                env.obs_rms.count = 1e6
+                print(f"[INFO] VecNormalize warm-started from {stats_path}")
+
     # Intentionally do not load old VecNormalize.pkl when resuming: reward distribution often shifts (curriculum).
 
     # create agent from stable baselines
     agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
     if args_cli.checkpoint is not None:
-        agent = agent.load(args_cli.checkpoint, env, print_system_info=True)
+        _load_actor_warm_start(agent, args_cli.checkpoint, device=agent_cfg.get("device", "auto"))
 
     # callbacks for agent
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)

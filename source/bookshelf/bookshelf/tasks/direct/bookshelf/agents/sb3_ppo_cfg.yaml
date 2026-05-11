@@ -18,8 +18,8 @@ clip_range: !!float 0.2
 normalize_input: true
 clip_obs: 10.0
 policy_kwargs:
-  activation_fn: nn.ELU
-  net_arch: [32, 32]
+  activation_fn: nn.ReLU
+  net_arch: [256, 256]
   squash_output: False
 vf_coef: 1.0
 max_grad_norm: 1.0

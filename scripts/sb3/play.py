@@ -11,6 +11,12 @@ import argparse
 import sys
 from pathlib import Path
 
+# Ensure the bookshelf package is importable regardless of install state.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_BOOKSHELF_SRC = _REPO_ROOT / "source" / "bookshelf"
+if str(_BOOKSHELF_SRC) not in sys.path:
+    sys.path.insert(0, str(_BOOKSHELF_SRC))
+
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -80,8 +86,6 @@ from isaaclab.envs import (
 from isaaclab.utils.dict import print_dict
 
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper, process_sb3_cfg
-from isaaclab_rl.utils.pretrained_checkpoint import get_published_pretrained_checkpoint
-
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_tasks.utils.parse_cfg import get_checkpoint_path
@@ -111,12 +115,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     log_root_path = os.path.join("logs", "sb3", train_task_name)
     log_root_path = os.path.abspath(log_root_path)
     # checkpoint and log_dir stuff
-    if args_cli.use_pretrained_checkpoint:
-        checkpoint_path = get_published_pretrained_checkpoint("sb3", train_task_name)
-        if not checkpoint_path:
-            print("[INFO] Unfortunately a pre-trained checkpoint is currently unavailable for this task.")
-            return
-    elif args_cli.checkpoint is None:
+    if args_cli.checkpoint is None:
         # FIXME: last checkpoint doesn't seem to really use the last one'
         if args_cli.use_last_checkpoint:
             checkpoint = "model_.*.zip"
