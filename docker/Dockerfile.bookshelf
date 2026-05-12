@@ -1,0 +1,7 @@
+# Builds bookshelf RL extension on top of isaac-lab-base
+
+ARG DOCKER_NAME_SUFFIX=""
+FROM isaac-lab-base${DOCKER_NAME_SUFFIX} AS bookshelf
+
+# Install the bookshelf extension (already inside the build context at source/bookshelf)
+RUN /workspace/isaaclab/_isaac_sim/python.sh -m pip install -e /workspace/isaaclab/source/bookshelf

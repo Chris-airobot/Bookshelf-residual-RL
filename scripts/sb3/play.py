@@ -177,6 +177,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     agent = PPO.load(checkpoint_path, env, print_system_info=True)
 
     dt = env.unwrapped.step_dt
+    num_envs = env.num_envs
+
+    # Episode tracking
+    # success = terminated with reward > SUCCESS_THRESH (success_bonus=100, drop=-20)
+    SUCCESS_REWARD_THRESH = 50.0
+    ep_reward = [0.0] * num_envs
+    n_success = 0
+    n_timeout = 0
+    n_drop = 0
+    n_episodes = 0
+    PRINT_EVERY = 10  # print rolling stats every N completed episodes
 
     # reset environment
     obs = env.reset()
@@ -189,7 +200,29 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # agent stepping
             actions, _ = agent.predict(obs, deterministic=True)
             # env stepping
-            obs, _, _, _ = env.step(actions)
+            obs, rewards, dones, infos = env.step(actions)
+
+        for i in range(num_envs):
+            ep_reward[i] += float(rewards[i])
+            if dones[i]:
+                r = ep_reward[i]
+                if r > SUCCESS_REWARD_THRESH:
+                    n_success += 1
+                elif r < -10.0:
+                    n_drop += 1
+                else:
+                    n_timeout += 1
+                n_episodes += 1
+                ep_reward[i] = 0.0
+
+                if n_episodes % PRINT_EVERY == 0:
+                    total = n_success + n_timeout + n_drop
+                    print(
+                        f"  [{total:>4} eps]  "
+                        f"success {n_success}/{total} ({100*n_success/max(total,1):.0f}%)  "
+                        f"drop {n_drop}  timeout {n_timeout}"
+                    )
+
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
@@ -200,6 +233,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    # Final summary
+    total = n_success + n_timeout + n_drop
+    if total > 0:
+        print("\n" + "=" * 55)
+        print(f"  Episodes       : {total}")
+        print(f"  Success        : {n_success} / {total}  ({100*n_success/total:.0f}%)")
+        print(f"  Drop           : {n_drop} / {total}  ({100*n_drop/total:.0f}%)")
+        print(f"  Timeout        : {n_timeout} / {total}  ({100*n_timeout/total:.0f}%)")
+        print("=" * 55)
 
     # close the simulator
     env.close()

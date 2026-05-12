@@ -149,7 +149,7 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     slot_x_open = _SHELF_BASE_OPEN + SHELF_OFFSET_X
     slot_x_back = _SHELF_BASE_BACK + SHELF_OFFSET_X
     slot_center_y = 0.0
-    slot_lateral_clearance = 0.02
+    slot_lateral_clearance = 0.004
 
     enable_slot_clearance_curriculum = False
     slot_lateral_clearance_start = 0.02
