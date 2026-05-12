@@ -19,7 +19,7 @@ Terminal success uses geometry thresholds only in PUSH mode.
 """
 
 import math
-
+import os
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
@@ -110,6 +110,10 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
             ),
         },
     )
+
+    _hpc_robot_usd = os.environ.get("BOOKSHELF_PANDA_USD_PATH")
+    if _hpc_robot_usd:
+        robot.spawn.usd_path = _hpc_robot_usd
 
     book: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Book",
