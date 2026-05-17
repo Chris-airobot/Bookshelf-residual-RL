@@ -28,7 +28,6 @@ from isaaclab.controllers.differential_ik import DifferentialIKController
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs import DirectRLEnv
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
-# from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils import math as math_utils
 from isaaclab.utils.math import sample_uniform
 
@@ -386,8 +385,6 @@ class BookshelfEnv(DirectRLEnv):
         return in_xy & lowest_on_deck
 
     def _setup_scene(self):
-        # spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-
         x0 = self.cfg.slot_x_open
         x1 = self.cfg.slot_x_back
         mid_x = 0.5 * (x0 + x1)
@@ -415,6 +412,19 @@ class BookshelfEnv(DirectRLEnv):
         book_vis = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.4, 0.25, 0.15))
 
         base = "/World/envs/env_0/Bookshelf"
+
+        ground_cfg = sim_utils.MeshCuboidCfg(
+            size=(3.0, 3.0, 0.02),
+            rigid_props=kin,
+            collision_props=col,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.25, 0.25, 0.25)),
+        )
+        ground_cfg.func(
+            "/World/envs/env_0/Ground",
+            ground_cfg,
+            translation=(0.0, 0.0, -0.01),
+            orientation=(1.0, 0.0, 0.0, 0.0),
+        )
 
         # Shelf surface.
         shelf_depth = depth_x

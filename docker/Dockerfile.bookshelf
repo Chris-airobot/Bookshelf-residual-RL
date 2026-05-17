@@ -3,5 +3,14 @@
 ARG DOCKER_NAME_SUFFIX=""
 FROM isaac-lab-base${DOCKER_NAME_SUFFIX} AS bookshelf
 
-# Install the bookshelf extension (already inside the build context at source/bookshelf)
+USER root
+
+# Copy your bookshelf extension from your repo into the container
+COPY source/bookshelf /workspace/isaaclab/source/bookshelf
+
+# Install the bookshelf extension
 RUN /workspace/isaaclab/_isaac_sim/python.sh -m pip install -e /workspace/isaaclab/source/bookshelf
+
+# Important for Apptainer/Singularity on HPC:
+# make Isaac Sim and Isaac Lab readable/executable by the non-root HPC user.
+RUN chmod -R a+rX /isaac-sim /workspace/isaaclab
