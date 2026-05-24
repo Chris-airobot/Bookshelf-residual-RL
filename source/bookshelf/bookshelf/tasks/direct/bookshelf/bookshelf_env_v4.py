@@ -37,6 +37,20 @@ _MODE_INSERT = 0
 _MODE_SCRIPTED = 1
 _MODE_PUSH = 2
 
+_DONE_NONE = 0
+_DONE_SUCCESS = 1
+_DONE_DROP = 2
+_DONE_TIMEOUT = 3
+_DONE_NOT_PUSH = 4
+_DONE_DEPTH = 5
+_DONE_LATERAL = 6
+_DONE_Z = 7
+_DONE_YAW = 8
+_DONE_UPRIGHT = 9
+_DONE_UNSTABLE = 10
+_DONE_OOB = 11
+_DONE_FELL = 12
+
 
 def _wrap_to_pi(angle: torch.Tensor) -> torch.Tensor:
     return (angle + torch.pi) % (2.0 * torch.pi) - torch.pi
@@ -142,6 +156,8 @@ class BookshelfEnv(DirectRLEnv):
         self._script_step_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
 
         self._release_request = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._release_step_buf = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
+        self._push_start_step_buf = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
 
         self._success_steps_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._prev_rear_to_mouth = torch.zeros(self.num_envs, device=self.device)
@@ -690,6 +706,11 @@ class BookshelfEnv(DirectRLEnv):
         mode_before = self._mode.clone()
 
         accepted_release = (mode_before == _MODE_INSERT) & self._release_request
+        self._release_step_buf = torch.where(
+            accepted_release & (self._release_step_buf < 0),
+            self.episode_length_buf.clone(),
+            self._release_step_buf,
+        )
 
         # Advance already-scripted envs
         scripted_old = mode_before == _MODE_SCRIPTED
@@ -705,6 +726,11 @@ class BookshelfEnv(DirectRLEnv):
         # Exit scripted block into push mode
         self._mode = torch.where(script_done, torch.full_like(self._mode, _MODE_PUSH), self._mode)
         self._script_step_buf = torch.where(script_done, torch.zeros_like(self._script_step_buf), self._script_step_buf)
+        self._push_start_step_buf = torch.where(
+            script_done & (self._push_start_step_buf < 0),
+            self.episode_length_buf.clone(),
+            self._push_start_step_buf,
+        )
 
         # Success only in PUSH mode
         lat_extent = m["lat_extent"]
@@ -776,7 +802,78 @@ class BookshelfEnv(DirectRLEnv):
             fell = p[:, 2] < self.cfg.fell_height_thresh
             terminated = success | book_dropped_to_ground | oob | fell
         else:
+            oob = torch.zeros_like(success)
+            fell = torch.zeros_like(success)
             terminated = success | book_dropped_to_ground
+
+        done = terminated | time_out
+        depth_ok = rear_ok & front_ok
+        stable_ok = stable_lin & stable_ang
+        failure_code = torch.full((self.num_envs,), _DONE_NONE, dtype=torch.long, device=self.device)
+        failure_code = torch.where(done & success, torch.full_like(failure_code, _DONE_SUCCESS), failure_code)
+        failure_code = torch.where(
+            done & ~success & book_dropped_to_ground, torch.full_like(failure_code, _DONE_DROP), failure_code
+        )
+        failure_code = torch.where(done & ~success & oob, torch.full_like(failure_code, _DONE_OOB), failure_code)
+        failure_code = torch.where(done & ~success & fell, torch.full_like(failure_code, _DONE_FELL), failure_code)
+        failure_code = torch.where(
+            done & ~success & ~(mode_before == _MODE_PUSH), torch.full_like(failure_code, _DONE_NOT_PUSH), failure_code
+        )
+        failure_code = torch.where(
+            done & ~success & (mode_before == _MODE_PUSH) & ~depth_ok,
+            torch.full_like(failure_code, _DONE_DEPTH),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & ~lat_ok,
+            torch.full_like(failure_code, _DONE_LATERAL),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & ~z_ok,
+            torch.full_like(failure_code, _DONE_Z),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & ~yaw_ok,
+            torch.full_like(failure_code, _DONE_YAW),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & yaw_ok & ~upright,
+            torch.full_like(failure_code, _DONE_UPRIGHT),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & yaw_ok & upright & ~stable_ok,
+            torch.full_like(failure_code, _DONE_UNSTABLE),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & time_out & (failure_code == _DONE_NONE),
+            torch.full_like(failure_code, _DONE_TIMEOUT),
+            failure_code,
+        )
+
+        push_steps = torch.where(
+            self._push_start_step_buf >= 0,
+            self.episode_length_buf - self._push_start_step_buf,
+            torch.full_like(self.episode_length_buf, -1),
+        )
+        self.extras["episode_metric_done"] = done
+        self.extras["episode_metric_slot_clearance"] = torch.full(
+            (self.num_envs,), float(curr_clearance), device=self.device
+        )
+        self.extras["episode_metric_success"] = success
+        self.extras["episode_metric_failure_code"] = failure_code
+        self.extras["episode_metric_final_lat_err"] = torch.abs(m["lat_err"])
+        self.extras["episode_metric_final_z_err"] = torch.abs(z_err)
+        self.extras["episode_metric_final_yaw_err_deg"] = torch.rad2deg(yaw_e)
+        self.extras["episode_metric_final_rear_to_mouth"] = rear_to_mouth
+        self.extras["episode_metric_final_front_to_back"] = front_to_back
+        self.extras["episode_metric_release_step"] = self._release_step_buf
+        self.extras["episode_metric_push_steps"] = push_steps
+        self.extras["episode_metric_mode_at_done"] = mode_before
 
         return terminated, time_out
 
@@ -869,3 +966,5 @@ class BookshelfEnv(DirectRLEnv):
         self._mode_start[env_ids_t] = _MODE_INSERT
         self._script_step_buf[env_ids_t] = 0
         self._release_request[env_ids_t] = False
+        self._release_step_buf[env_ids_t] = -1
+        self._push_start_step_buf[env_ids_t] = -1

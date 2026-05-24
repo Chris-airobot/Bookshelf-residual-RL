@@ -117,6 +117,7 @@ from isaaclab.utils.io import dump_yaml
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper, process_sb3_cfg
 
 import isaaclab_tasks  # noqa: F401
+from episode_metrics import EpisodeMetricsCsvCallback
 from experiment_spec import build_experiment_spec
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from mlflow_utils import (
@@ -320,7 +321,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # callbacks for agent
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)
-    callbacks = [checkpoint_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    episode_metrics_callback = EpisodeMetricsCsvCallback(log_dir=log_dir)
+    callbacks = [checkpoint_callback, episode_metrics_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
     if mlflow_active:
         callbacks.append(MlflowSb3MetricsCallback(log_every_n_calls=args_cli.mlflow_log_every_n_calls))
 

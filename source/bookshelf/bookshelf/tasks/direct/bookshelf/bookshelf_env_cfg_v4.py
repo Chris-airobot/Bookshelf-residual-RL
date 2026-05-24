@@ -153,12 +153,12 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     slot_x_open = _SHELF_BASE_OPEN + SHELF_OFFSET_X
     slot_x_back = _SHELF_BASE_BACK + SHELF_OFFSET_X
     slot_center_y = 0.0
-    slot_lateral_clearance = 0.004
+    slot_lateral_clearance = 0.003
 
-    enable_slot_clearance_curriculum = True
+    enable_slot_clearance_curriculum = False
     slot_lateral_clearance_start = 0.012
-    slot_lateral_clearance_end = 0.004
-    slot_clearance_curriculum_steps = 10_000_000
+    slot_lateral_clearance_end = 0.001
+    slot_clearance_curriculum_steps = 500_000
 
     shelf_extra_books_per_side: int = 2
     neighbor_book_pitch_gap: float = 0.002
