@@ -25,23 +25,23 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 
 
 # ---------------------------------------------------------------------------
-# Minimal fake env (obs 10D, action 5D) — only used to build the SB3 model
+# Minimal fake env — only used to build the SB3 model
 # ---------------------------------------------------------------------------
 
 class _FakeEnv(gym.Env):
-    def __init__(self):
+    def __init__(self, obs_dim: int, action_dim: int):
         self.observation_space = gym.spaces.Box(
-            -np.inf, np.inf, shape=(10,), dtype=np.float32
+            -np.inf, np.inf, shape=(obs_dim,), dtype=np.float32
         )
         self.action_space = gym.spaces.Box(
-            -100.0, 100.0, shape=(5,), dtype=np.float32
+            -100.0, 100.0, shape=(action_dim,), dtype=np.float32
         )
 
     def reset(self, **kwargs):
-        return np.zeros(10, dtype=np.float32), {}
+        return np.zeros(self.observation_space.shape, dtype=np.float32), {}
 
     def step(self, action):
-        return np.zeros(10, dtype=np.float32), 0.0, False, False, {}
+        return np.zeros(self.observation_space.shape, dtype=np.float32), 0.0, False, False, {}
 
 
 # ---------------------------------------------------------------------------
@@ -77,11 +77,15 @@ def convert(bc_ckpt_path: str, out_path: str):
     bc_ckpt = torch.load(bc_ckpt_path, map_location="cpu", weights_only=False)
     bc_state = bc_ckpt["model_state_dict"]
     hidden = bc_ckpt.get("hidden", 256)
+    obs_dim = int(bc_ckpt.get("obs_dim", bc_state["net.0.weight"].shape[1]))
+    action_dim = int(bc_ckpt.get("action_dim", bc_state["net.4.weight"].shape[0]))
 
     print(f"BC checkpoint  : {bc_ckpt_path}")
     print(f"  epoch        : {bc_ckpt.get('epoch', '?')}")
     print(f"  val_loss     : {bc_ckpt.get('val_loss', '?'):.4f}")
     print(f"  hidden size  : {hidden}")
+    print(f"  obs_dim      : {obs_dim}")
+    print(f"  action_dim   : {action_dim}")
 
     if hidden != 256:
         raise ValueError(
@@ -90,7 +94,7 @@ def convert(bc_ckpt_path: str, out_path: str):
         )
 
     # --- Build a fresh SB3 PPO model with matching arch ---
-    env = DummyVecEnv([_FakeEnv])
+    env = DummyVecEnv([lambda: _FakeEnv(obs_dim, action_dim)])
     model = PPO(
         "MlpPolicy",
         env,

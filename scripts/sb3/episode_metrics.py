@@ -76,7 +76,9 @@ class EpisodeMetricsCsvCallback(BaseCallback):
         "global_step",
         "episode_id",
         "env_id",
+        "slot_center_y",
         "slot_clearance",
+        "missing_book_index",
         "success",
         "failure_reason",
         "episode_length",
@@ -94,6 +96,7 @@ class EpisodeMetricsCsvCallback(BaseCallback):
         "global_step",
         "episodes",
         "window_size",
+        "mean_slot_center_y",
         "mean_slot_clearance",
         "success_rate",
         "timeout_rate",
@@ -155,12 +158,15 @@ class EpisodeMetricsCsvCallback(BaseCallback):
                 continue
             metrics = _metrics_from_infos(infos, env_idx)
             failure_code = int(metrics.get("failure_code", 0) or 0)
-            mode_code = int(metrics.get("mode_at_done", -1) or -1)
+            mode_value = metrics.get("mode_at_done", None)
+            mode_code = -1 if mode_value is None or mode_value == "" else int(mode_value)
             row = {
                 "global_step": int(self.num_timesteps),
                 "episode_id": self.episode_count,
                 "env_id": env_idx,
+                "slot_center_y": metrics.get("slot_center_y", ""),
                 "slot_clearance": metrics.get("slot_clearance", ""),
+                "missing_book_index": metrics.get("missing_book_index", ""),
                 "success": int(bool(metrics.get("success", failure_code == 1))),
                 "failure_reason": _FAILURE_REASONS.get(failure_code, f"code_{failure_code}"),
                 "episode_length": int(self._lengths[env_idx]),
@@ -207,6 +213,7 @@ class EpisodeMetricsCsvCallback(BaseCallback):
             "global_step": int(self.num_timesteps),
             "episodes": self.episode_count,
             "window_size": n,
+            "mean_slot_center_y": self._mean_numeric(rows, "slot_center_y"),
             "mean_slot_clearance": self._mean_numeric(rows, "slot_clearance"),
             "success_rate": float(np.mean([int(row["success"]) for row in rows])),
             "timeout_rate": float(np.mean([row["failure_reason"] == "timeout" for row in rows])),

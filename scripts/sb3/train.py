@@ -101,7 +101,7 @@ from datetime import datetime
 import gymnasium as gym
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.callbacks import CheckpointCallback, LogEveryNTimesteps
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, LogEveryNTimesteps
 from stable_baselines3.common.vec_env import VecNormalize
 
 from isaaclab.envs import (
@@ -179,6 +179,27 @@ def _load_actor_warm_start(agent: PPO, checkpoint_path: str, device: str):
         print(f"[WARN] Skipped {len(skipped_keys)} actor tensors with incompatible names/shapes: {skipped_keys}")
 
 
+class VecNormalizeCheckpointCallback(BaseCallback):
+    """Save VecNormalize stats beside each periodic model checkpoint."""
+
+    def __init__(self, save_freq: int, save_path: str, name_prefix: str = "model_vecnormalize", verbose: int = 0):
+        super().__init__(verbose=verbose)
+        self.save_freq = int(save_freq)
+        self.save_path = Path(save_path)
+        self.name_prefix = str(name_prefix)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % self.save_freq != 0:
+            return True
+        if isinstance(self.training_env, VecNormalize):
+            self.save_path.mkdir(parents=True, exist_ok=True)
+            path = self.save_path / f"{self.name_prefix}_{self.num_timesteps}_steps.pkl"
+            self.training_env.save(str(path))
+            if self.verbose > 0:
+                print(f"Saving VecNormalize stats to {path}")
+        return True
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with stable-baselines agent."""
@@ -215,8 +236,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     (Path(log_dir) / "command.txt").write_text(command)
 
     # Build reproducibility artifact for reward/obs/action/termination definitions.
-    env_cfg_path = "bookshelf/source/bookshelf/bookshelf/tasks/direct/bookshelf/bookshelf_env_cfg_v4.py"
-    env_impl_path = "bookshelf/source/bookshelf/bookshelf/tasks/direct/bookshelf/bookshelf_env_v4.py"
+    task_suffix = str(args_cli.task).split("-")[-1]
+    if not (task_suffix.startswith("v") and task_suffix[1:].isdigit()):
+        task_suffix = "v4"
+    env_cfg_path = f"bookshelf/source/bookshelf/bookshelf/tasks/direct/bookshelf/bookshelf_env_cfg_{task_suffix}.py"
+    env_impl_path = f"bookshelf/source/bookshelf/bookshelf/tasks/direct/bookshelf/bookshelf_env_{task_suffix}.py"
     exp_spec = build_experiment_spec(
         env_cfg=env_cfg,
         task_name=str(args_cli.task),
@@ -320,9 +344,23 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         _load_actor_warm_start(agent, args_cli.checkpoint, device=agent_cfg.get("device", "auto"))
 
     # callbacks for agent
-    checkpoint_callback = CheckpointCallback(save_freq=1000, save_path=log_dir, name_prefix="model", verbose=2)
+    checkpoint_save_freq = 1000
+    checkpoint_callback = CheckpointCallback(
+        save_freq=checkpoint_save_freq, save_path=log_dir, name_prefix="model", verbose=2
+    )
+    vecnormalize_checkpoint_callback = VecNormalizeCheckpointCallback(
+        save_freq=checkpoint_save_freq,
+        save_path=log_dir,
+        name_prefix="model_vecnormalize",
+        verbose=2,
+    )
     episode_metrics_callback = EpisodeMetricsCsvCallback(log_dir=log_dir)
-    callbacks = [checkpoint_callback, episode_metrics_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    callbacks = [
+        checkpoint_callback,
+        vecnormalize_checkpoint_callback,
+        episode_metrics_callback,
+        LogEveryNTimesteps(n_steps=args_cli.log_interval),
+    ]
     if mlflow_active:
         callbacks.append(MlflowSb3MetricsCallback(log_every_n_calls=args_cli.mlflow_log_every_n_calls))
 

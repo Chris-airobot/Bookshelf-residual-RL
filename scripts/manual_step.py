@@ -12,6 +12,7 @@ Usage example:
 Then type actions like (v4: dx dy dz dyaw release_trigger in [-1,1]):
   0.5 0.0 0.0 0.0 -1.0
   0.0 -0.2 0.05 0.0 -0.5
+For v5, actions are: dx dy dz dyaw dpitch release_trigger.
 release_trigger <= 0 means "do not release"; release_trigger > 0.5 requests release.
 Idle steps keep release_trigger at -1.0 unless you explicitly type a different value.
 Press Enter to repeat the last action, or type 'q' to quit.
@@ -49,6 +50,14 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Record SCRIPTED mode samples too. By default they are skipped because policy actions are ignored there.",
+)
+parser.add_argument(
+    "--missing_book_index",
+    type=int,
+    choices=range(10),
+    metavar="[0-9]",
+    default=None,
+    help="For v5 demo collection, force the missing-book slot index while keeping other reset randomization enabled.",
 )
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -148,10 +157,12 @@ def _print_success_status(env) -> None:
     mode = int(uw._mode[0].item())
     mode_name = {0: "INSERT", 1: "SCRIPTED", 2: "PUSH"}.get(mode, str(mode))
     in_push = mode == 2
+    missing_idx = None
+    if hasattr(uw, "_missing_book_index_env"):
+        missing_idx = int(uw._missing_book_index_env[0].item())
 
     rear   = float(m["rear_to_mouth"][0].item())
     front  = float(m["front_to_back"][0].item())
-    lat    = float(m["lat_extent"][0].item())
     z_err  = float(m["z_err"][0].item())
     yaw_e  = float(_math.degrees(abs(float(m["yaw_err"][0].item()))))
 
@@ -159,28 +170,115 @@ def _print_success_status(env) -> None:
     front_eps = float(cfg.success_front_clear_eps_m)
     front_ok = (float(cfg.success_front_clear_min) - front_eps) <= front <= (float(cfg.success_front_clear_max) + front_eps)
 
-    curr_clearance = uw._current_slot_lateral_clearance()
-    inner_half = 0.5 * (uw._neighbor_thick_y + curr_clearance)
-    lat_limit = inner_half - float(cfg.success_lateral_margin)
-    lat_eps   = float(cfg.success_lateral_extent_eps_m)
-    lat_ok    = lat <= (lat_limit + lat_eps)
+    dynamic_gap = "left_clearance" in m and "right_clearance" in m
+    if dynamic_gap:
+        left_clear = float(m["left_clearance"][0].item())
+        right_clear = float(m["right_clearance"][0].item())
+        gap_width = float(m["gap_width"][0].item())
+        gap_margin = float(m["gap_width_margin"][0].item())
+        gap_center_err = float(m["book_to_gap_center_y"][0].item())
+        gap_eps = float(cfg.success_gap_eps_m)
+        lat_ok = left_clear >= -gap_eps and right_clear >= -gap_eps
+    else:
+        lat = float(m["lat_extent"][0].item())
+        curr_clearance = uw._current_slot_lateral_clearance() if hasattr(uw, "_current_slot_lateral_clearance") else 0.0
+        inner_half = 0.5 * (uw._neighbor_thick_y + curr_clearance)
+        lat_limit = inner_half - float(cfg.success_lateral_margin)
+        lat_eps = float(cfg.success_lateral_extent_eps_m)
+        lat_ok = lat <= (lat_limit + lat_eps)
 
     z_ok   = abs(z_err) < float(cfg.success_z_thresh)
     yaw_ok = yaw_e < _math.degrees(float(cfg.success_yaw_thresh))
     upright = bool(uw._upright_ok()[0].item())
     ready  = bool((uw.episode_length_buf[0] > int(cfg.min_steps_before_success)).item())
 
+    stable_lin = True
+    stable_ang = True
+    if float(getattr(cfg, "success_max_lin_vel", 0.0)) > 0.0:
+        stable_lin = float(m["book_lin_speed"][0].item()) < float(cfg.success_max_lin_vel)
+    if float(getattr(cfg, "success_max_ang_vel", 0.0)) > 0.0:
+        stable_ang = float(m["book_ang_speed"][0].item()) < float(cfg.success_max_ang_vel)
+
+    side_books_ok = True
+    side_details: list[tuple[str, float | str, str, bool]] = []
+    if dynamic_gap and hasattr(uw, "left_neighbor_book") and hasattr(uw, "right_neighbor_book"):
+        left_speed = float(torch.linalg.norm(uw.left_neighbor_book.data.root_link_vel_w[0, 0:3]).item())
+        right_speed = float(torch.linalg.norm(uw.right_neighbor_book.data.root_link_vel_w[0, 0:3]).item())
+        left_ang_speed = float(torch.linalg.norm(uw.left_neighbor_book.data.root_link_vel_w[0, 3:6]).item())
+        right_ang_speed = float(torch.linalg.norm(uw.right_neighbor_book.data.root_link_vel_w[0, 3:6]).item())
+        left_pos_env = uw.left_neighbor_book.data.root_link_pos_w - uw.scene.env_origins
+        right_pos_env = uw.right_neighbor_book.data.root_link_pos_w - uw.scene.env_origins
+        left_corners = uw._rigid_corners_env(uw.left_neighbor_book, uw._neighbor_corners_local)
+        right_corners = uw._rigid_corners_env(uw.right_neighbor_book, uw._neighbor_corners_local)
+        left_lowest_z = left_corners[..., 2].min(dim=-1).values
+        right_lowest_z = right_corners[..., 2].min(dim=-1).values
+        side_z_target = (
+            float(cfg.shelf_top_z)
+            + float(cfg.shelf_thickness)
+            + 0.5 * float(cfg.neighbor_book_size[1])
+        )
+
+        left_disp = float(m["left_book_y_disp"][0].item())
+        right_disp = float(m["right_book_y_disp"][0].item())
+        left_yaw = float(_math.degrees(abs(float(m["left_book_yaw"][0].item()))))
+        right_yaw = float(_math.degrees(abs(float(m["right_book_yaw"][0].item()))))
+        side_disp_ok = abs(left_disp) < float(cfg.side_book_max_y_disp) and abs(right_disp) < float(cfg.side_book_max_y_disp)
+        side_yaw_ok = left_yaw < _math.degrees(float(cfg.side_book_max_yaw)) and right_yaw < _math.degrees(float(cfg.side_book_max_yaw))
+        side_speed_ok = left_speed < float(cfg.side_book_max_speed) and right_speed < float(cfg.side_book_max_speed)
+        side_ang_ok = left_ang_speed < float(cfg.side_book_max_ang_speed) and right_ang_speed < float(cfg.side_book_max_ang_speed)
+        side_z_ok = (
+            abs(float(left_pos_env[0, 2].item()) - side_z_target) < float(cfg.side_book_z_thresh)
+            and abs(float(right_pos_env[0, 2].item()) - side_z_target) < float(cfg.side_book_z_thresh)
+        )
+        side_upright_ok = bool(
+            (
+                uw._rigid_upright_ok(uw.left_neighbor_book, float(cfg.side_book_upright_dot_thresh))[0]
+                & uw._rigid_upright_ok(uw.right_neighbor_book, float(cfg.side_book_upright_dot_thresh))[0]
+            ).item()
+        )
+        side_on_shelf = bool(
+            (
+                uw._book_supported_on_shelf(left_pos_env, left_lowest_z)
+                & uw._book_supported_on_shelf(right_pos_env, right_lowest_z)
+            )[0].item()
+        )
+        side_books_ok = all(
+            (side_disp_ok, side_yaw_ok, side_speed_ok, side_ang_ok, side_z_ok, side_upright_ok, side_on_shelf)
+        )
+
+        side_details = [
+            ("side_y_disp", f"L={left_disp:+.4f} R={right_disp:+.4f}", f"limit={float(cfg.side_book_max_y_disp):.4f}", side_disp_ok),
+            ("side_yaw", f"L={left_yaw:.2f}deg R={right_yaw:.2f}deg", f"limit={_math.degrees(float(cfg.side_book_max_yaw)):.1f}deg", side_yaw_ok),
+            ("side_lin_speed", f"L={left_speed:.3f} R={right_speed:.3f}", f"limit={float(cfg.side_book_max_speed):.3f}", side_speed_ok),
+            ("side_ang_speed", f"L={left_ang_speed:.3f} R={right_ang_speed:.3f}", f"limit={float(cfg.side_book_max_ang_speed):.3f}", side_ang_ok),
+            ("side_z", f"L={float(left_pos_env[0, 2].item()):.4f} R={float(right_pos_env[0, 2].item()):.4f}", f"target={side_z_target:.4f} +/- {float(cfg.side_book_z_thresh):.4f}", side_z_ok),
+            ("side_upright", "both", f"thresh={float(cfg.side_book_upright_dot_thresh):.2f}", side_upright_ok),
+            ("side_on_shelf", "both", "required", side_on_shelf),
+        ]
+
     def tick(ok): return "OK" if ok else "FAIL"
 
     print(f"[status] mode={mode_name} (need PUSH)  {'OK' if in_push else 'FAIL'}")
+    if missing_idx is not None:
+        print(f"  missing_slot   = {missing_idx}")
     print(f"  rear_to_mouth  = {rear:+.4f}  range=[{cfg.success_rear_to_mouth_min:.4f}, {cfg.success_rear_to_mouth_max:.4f}]  {tick(rear_ok)}")
     print(f"  front_to_back  = {front:+.4f}  range=[{float(cfg.success_front_clear_min):.4f}, {float(cfg.success_front_clear_max):.4f}] (+/-eps)  {tick(front_ok)}")
-    print(f"  lat_extent     = {lat:.4f}   limit={lat_limit + lat_eps:.4f}  {tick(lat_ok)}")
+    if dynamic_gap:
+        print(f"  gap_width      = {gap_width:.4f}  margin={gap_margin:+.4f}  center_err={gap_center_err:+.4f}")
+        print(f"  left_clearance = {left_clear:+.4f}  min={-gap_eps:+.4f}  {tick(left_clear >= -gap_eps)}")
+        print(f"  right_clearance= {right_clear:+.4f}  min={-gap_eps:+.4f}  {tick(right_clear >= -gap_eps)}")
+        print(f"  gap_ok         = {tick(lat_ok)}")
+    else:
+        print(f"  lat_extent     = {lat:.4f}   limit={lat_limit + lat_eps:.4f}  {tick(lat_ok)}")
     print(f"  z_err          = {z_err:+.4f}  thresh={cfg.success_z_thresh:.4f}  {tick(z_ok)}")
     print(f"  yaw_err        = {yaw_e:.2f}deg   thresh={_math.degrees(float(cfg.success_yaw_thresh)):.1f}deg  {tick(yaw_ok)}")
     print(f"  upright        = {tick(upright)}")
+    print(f"  stable_lin     = {tick(stable_lin)}")
+    print(f"  stable_ang     = {tick(stable_ang)}")
+    for name, value, limit, ok in side_details:
+        print(f"  {name:<15}= {value}  {limit}  {tick(ok)}")
     print(f"  ready          = {tick(ready)}")
-    all_ok = in_push and rear_ok and front_ok and lat_ok and z_ok and yaw_ok and upright and ready
+    all_ok = all((in_push, rear_ok, front_ok, lat_ok, z_ok, yaw_ok, upright, stable_lin, stable_ang, side_books_ok, ready))
     print(f"  --> SUCCESS GATE: {'OPEN (counting)' if all_ok else 'CLOSED'}")
 
 
@@ -197,6 +295,10 @@ def main():
         env_cfg.episode_length_s = float(DEFAULT_EPISODE_LENGTH_S)
     if DEFAULT_DEBUG_TERMINATE and hasattr(env_cfg, "debug_print_terminate_reason"):
         env_cfg.debug_print_terminate_reason = True
+    if args_cli.missing_book_index is not None:
+        if not hasattr(env_cfg, "forced_missing_book_index"):
+            raise RuntimeError("--missing_book_index is only supported by envs with forced_missing_book_index, e.g. Bookshelf-Direct-v5.")
+        env_cfg.forced_missing_book_index = int(args_cli.missing_book_index)
 
     env = gym.make(args_cli.task, cfg=env_cfg)
 
@@ -210,6 +312,8 @@ def main():
     if record_path is not None:
         print(f"[INFO] Recording demos. First file: {record_path}")
         print("[INFO] Each successful episode is saved immediately and the filename auto-increments.")
+        if args_cli.missing_book_index is not None:
+            print(f"[INFO] Forced missing-book slot index: {args_cli.missing_book_index}")
         if not args_cli.record_idle:
             print("[INFO] Recording only command steps. Use --record_idle to include idle/wait steps.")
         if not args_cli.record_scripted:
@@ -220,25 +324,44 @@ def main():
     num_envs = int(env.unwrapped.num_envs)
     zero_action = torch.zeros((num_envs, action_dim), device=env.unwrapped.device, dtype=torch.float32)
     last_nudge = zero_action.clone()
-    # Bookshelf v4: action[4] is release_trigger; idle should default to "do not release".
+    # Release trigger is the final action dim; idle should default to "do not release".
     last_release_trigger = -1.0
     release_trigger_dim = action_dim >= 5
     if release_trigger_dim:
         last_nudge[..., -1] = last_release_trigger
 
-    # Named action aliases (5-dim: dx dy dz dyaw release_trigger)
+    def _alias(
+        dx: float = 0.0,
+        dy: float = 0.0,
+        dz: float = 0.0,
+        dyaw: float = 0.0,
+        dpitch: float = 0.0,
+        release: float = -1.0,
+    ) -> list[float]:
+        vals = [dx, dy, dz, dyaw]
+        if action_dim >= 6:
+            vals.append(dpitch)
+        vals.append(release)
+        return vals
+
     ACTION_ALIASES: dict[str, list[float]] = {
-        "u":      [ 0.0,  0.0,  1.0,  0.0, -1.0],
-        "d":    [ 0.0,  0.0, -1.0,  0.0, -1.0],
-        "b": [-1.0,  0.0,  0.0,  0.0, -1.0],
-        "f":    [ 1.0,  0.0,  0.0,  0.0, -1.0],
-        "r":   [ 0.0,  1.0,  0.0,  0.0, -1.0],
-        "l":    [ 0.0, -1.0,  0.0,  0.0, -1.0],
-        "o":    [ 0.0,  0.0,  0.0,  0.0,  1.0],
-        "c":   [ 0.0,  0.0,  0.0,  0.0, -1.0],
-        # "c":       [ 0.0,  0.0,  0.0,  0.0, -1.0],
+        "u": _alias(dz=1.0),
+        "d": _alias(dz=-1.0),
+        "b": _alias(dx=-1.0),
+        "f": _alias(dx=1.0),
+        "r": _alias(dy=1.0),
+        "l": _alias(dy=-1.0),
+        "yr": _alias(dyaw=1.0),
+        "yl": _alias(dyaw=-1.0),
+        "cw": _alias(dyaw=-1.0),
+        "ccw": _alias(dyaw=1.0),
+        "pu": _alias(dpitch=1.0),
+        "pd": _alias(dpitch=-1.0),
+        "o": _alias(release=1.0),
+        "c": _alias(release=-1.0),
     }
-    print("[INFO] Named aliases: up, down, forward, back, right, left, open, close")
+    print("[INFO] Named aliases: up, down, forward, back, right, left, yaw-right, yaw-left, pitch-up, pitch-down, open, close")
+    print("[INFO] Short aliases: u d f b r l yr yl cw ccw pu pd o c")
     print("[INFO] Type 's' or 'status' to print success sub-conditions.")
 
     # Optional USD Xform sync (so gizmo matches the moving book when Fabric is enabled).
@@ -477,6 +600,7 @@ def main():
                         "action_dim": int(env.action_space.shape[-1]),
                         "record_idle": bool(args_cli.record_idle),
                         "record_scripted": bool(args_cli.record_scripted),
+                        "forced_missing_book_index": args_cli.missing_book_index,
                         "num_steps": len(episode_steps),
                         "steps": episode_steps,
                     }

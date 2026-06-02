@@ -54,7 +54,7 @@ import bookshelf.tasks  # noqa: F401
 # ---------------------------------------------------------------------------
 
 class BCPolicy(nn.Module):
-    """Small MLP: obs (10D) -> action (5D)."""
+    """Small MLP policy."""
 
     def __init__(self, obs_dim: int = 10, action_dim: int = 5, hidden: int = 256):
         super().__init__()
@@ -70,7 +70,7 @@ class BCPolicy(nn.Module):
         return self.net(obs)
 
 
-def load_policy(checkpoint_path: str, device: torch.device) -> BCPolicy:
+def load_policy(checkpoint_path: str, device: torch.device):
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     policy = BCPolicy(
         obs_dim=ckpt.get("obs_dim", 10),
@@ -79,9 +79,14 @@ def load_policy(checkpoint_path: str, device: torch.device) -> BCPolicy:
     )
     policy.load_state_dict(ckpt["model_state_dict"])
     policy.to(device).eval()
+    obs_mean = ckpt.get("obs_mean", None)
+    obs_std = ckpt.get("obs_std", None)
+    if obs_mean is not None and obs_std is not None:
+        obs_mean = obs_mean.to(device)
+        obs_std = obs_std.to(device)
     print(f"[BC] Loaded checkpoint from {checkpoint_path}  "
           f"(epoch {ckpt.get('epoch', '?')}, val_loss {ckpt.get('val_loss', '?'):.4f})")
-    return policy
+    return policy, obs_mean, obs_std
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +135,7 @@ def main():
     device = torch.device(args_cli.device if hasattr(args_cli, "device") else "cuda")
 
     # --- Load policy ---
-    policy = load_policy(args_cli.checkpoint, device)
+    policy, obs_mean, obs_std = load_policy(args_cli.checkpoint, device)
 
     # --- Build env ---
     env_cfg = parse_env_cfg(
@@ -147,7 +152,7 @@ def main():
     with torch.no_grad():
         obs_dict, _ = env.reset()
 
-    # obs_dict is a dict with key "policy"; shape (1, 10)
+    # obs_dict is a dict with key "policy".
     obs = obs_dict["policy"]
 
     ep_steps = 0
@@ -167,11 +172,13 @@ def main():
         # internal buffers as inference tensors, which causes env.reset() to
         # fail when it tries to write to them outside inference_mode.
         with torch.no_grad():
-            # Forward pass: obs shape (1, 10) -> action shape (1, 5)
-            action = policy(obs)
+            obs_in = obs
+            if obs_mean is not None and obs_std is not None:
+                obs_in = (obs_in - obs_mean) / obs_std
+            action = policy(obs_in)
 
             obs_dict, reward, terminated, truncated, _ = env.step(action)
-            obs = obs_dict["policy"]  # (1, 10)
+            obs = obs_dict["policy"]
 
         ep_steps += 1
         ep_reward += reward.item()
