@@ -50,6 +50,24 @@ parser.add_argument(
     default=False,
     help="Use a slower SB3 wrapper but keep all the extra training info.",
 )
+parser.add_argument(
+    "--print_residual_components",
+    action="store_true",
+    default=False,
+    help="For residual envs, print nominal/residual/final action components during play.",
+)
+parser.add_argument(
+    "--print_residual_interval",
+    type=int,
+    default=30,
+    help="Print residual components every N sim steps when --print_residual_components is set.",
+)
+parser.add_argument(
+    "--print_residual_env_index",
+    type=int,
+    default=0,
+    help="Environment index to print when --print_residual_components is set.",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -110,6 +128,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if hasattr(env_cfg, "debug_print_residual_components"):
+        env_cfg.debug_print_residual_components = bool(args_cli.print_residual_components)
+        env_cfg.debug_print_residual_interval = int(args_cli.print_residual_interval)
+        env_cfg.debug_print_residual_env_index = int(args_cli.print_residual_env_index)
 
     # directory for logging into
     log_root_path = os.path.join("logs", "sb3", train_task_name)
