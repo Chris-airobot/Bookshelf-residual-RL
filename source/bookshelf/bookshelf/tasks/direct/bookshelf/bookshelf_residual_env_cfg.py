@@ -84,7 +84,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     residual_curriculum_3_frac = 0.30
     residual_curriculum_clearance_1 = (0.008, 0.008)
     residual_curriculum_clearance_2 = (0.006, 0.006)
-    residual_curriculum_clearance_3 = (0.004, 0.006)
+    residual_curriculum_clearance_3 = (0.003, 0.005)
     residual_curriculum_clearance_final = (0.003, 0.003)
 
     enable_residual_reset_curriculum = True
