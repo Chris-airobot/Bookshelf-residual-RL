@@ -156,3 +156,11 @@ Manual Testing
 ```
 python scripts/manual_step.py --task=Bookshelf-Direct-v0 --num_envs 1 --sync_usd_xform
 ```
+
+
+### Residual RL
+
+Nominal Controller testing： only work in ideal case
+```
+PYTHONPATH=$PWD/source/bookshelf ~/isaacsim/python.sh scripts/zero_agent.py   --task Bookshelf-Residual-Direct-v0   --num_envs 1   --slot_clearance 0.002   --missing_index 4   --ideal   --nominal_release_assist
+```

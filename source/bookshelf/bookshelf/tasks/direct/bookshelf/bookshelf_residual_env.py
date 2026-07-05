@@ -834,14 +834,6 @@ class BookshelfEnv(BookshelfEnvV5):
         inside_fraction = torch.clamp((front_x - mouth_x) / book_depth_x, 0.0, 1.0)
         tilt_x = self._book_tilt_x()
 
-        target_tool_pos, target_yaw, target_pitch = self._planned_tool_release_pose()
-        tool_pos = self._ee_tool_pos_env()
-        _, ee_quat_b = self._ee_pose_in_base()
-        _, ee_pitch_b, ee_yaw_b = math_utils.euler_xyz_from_quat(ee_quat_b)
-        pos_ready = torch.linalg.norm(target_tool_pos - tool_pos, dim=-1) < float(self.cfg.nominal_plan_pos_thresh)
-        yaw_ready = torch.abs(_wrap_to_pi(target_yaw - ee_yaw_b)) < float(self.cfg.nominal_plan_yaw_thresh)
-        pitch_ready = torch.abs(_wrap_to_pi(target_pitch - ee_pitch_b)) < float(self.cfg.nominal_plan_pitch_thresh)
-
         return (
             (self._mode == _MODE_INSERT)
             & (torch.abs(metrics["lat_err"]) < float(self.cfg.nominal_release_lat_thresh))
@@ -850,9 +842,6 @@ class BookshelfEnv(BookshelfEnvV5):
             & (torch.abs(tilt_x) < float(self.cfg.nominal_release_tilt_x_thresh))
             & (inside_fraction >= float(self.cfg.nominal_release_inside_fraction))
             & (metrics["front_to_back"] >= float(self.cfg.nominal_release_front_to_back_min))
-            & pos_ready
-            & yaw_ready
-            & pitch_ready
         )
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
@@ -1032,7 +1021,12 @@ class BookshelfEnv(BookshelfEnvV5):
         self._refresh_debug_markers()
 
         if bool(getattr(self.cfg, "debug_hold_book_fixed_to_tool", False)):
-            self._write_book_from_fixed_tool_transform(self._env_ids)
+            # Ideal grasp is only a pre-release debug aid. Stop overwriting the
+            # book immediately when release is requested so opening/retreat and
+            # the subsequent push operate on the physical book.
+            hold_ids = self._env_ids[(mode == _MODE_INSERT) & ~self._release_request]
+            if hold_ids.numel() > 0:
+                self._write_book_from_fixed_tool_transform(hold_ids)
 
         if self._apply_debug_curobo_plan():
             return
@@ -1141,14 +1135,22 @@ class BookshelfEnv(BookshelfEnvV5):
         self.robot.set_joint_position_target(joint_pos_des, joint_ids=self._arm_joint_ids)
 
         if len(self._finger_joint_ids) > 0:
-            c = float(self.cfg.gripper_closed_joint_pos)
+            hold_width = float(self.cfg.gripper_closed_joint_pos)
+            push_closed = float(getattr(self.cfg, "gripper_push_closed_joint_pos", 0.0))
             o = float(self.cfg.gripper_open_joint_pos)
             script_open_retreat = int(self.cfg.script_open_steps) + int(self.cfg.script_retreat_steps)
             gripper_should_open = (mode == _MODE_SCRIPTED) & (self._script_step_buf < script_open_retreat)
+            gripper_should_close = (mode == _MODE_PUSH) | (
+                (mode == _MODE_SCRIPTED) & (self._script_step_buf >= script_open_retreat)
+            )
             finger_cmd = torch.where(
                 gripper_should_open,
                 torch.full((self.num_envs,), o, device=self.device, dtype=torch.float32),
-                torch.full((self.num_envs,), c, device=self.device, dtype=torch.float32),
+                torch.where(
+                    gripper_should_close,
+                    torch.full((self.num_envs,), push_closed, device=self.device, dtype=torch.float32),
+                    torch.full((self.num_envs,), hold_width, device=self.device, dtype=torch.float32),
+                ),
             )
             finger_des = finger_cmd.unsqueeze(-1).expand(self.num_envs, len(self._finger_joint_ids))
             self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids)

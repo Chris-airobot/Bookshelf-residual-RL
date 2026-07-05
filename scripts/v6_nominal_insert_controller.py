@@ -84,6 +84,12 @@ parser.add_argument(
     default=False,
     help="Kinematically glue the book to the tool during insertion; disabled automatically when scripted release fires.",
 )
+parser.add_argument(
+    "--ideal",
+    action="store_true",
+    default=False,
+    help="Use ideal nominal-controller conditions: fixed orientation/book and no reset randomization.",
+)
 parser.add_argument("--dy_limit", type=float, default=0.0015, help="Max lateral delta per env step, meters.")
 parser.add_argument("--dz_limit", type=float, default=0.0015, help="Max vertical delta per env step, meters.")
 parser.add_argument("--dyaw_limit_deg", type=float, default=0.35, help="Max yaw delta per env step, degrees.")
@@ -124,6 +130,10 @@ parser.add_argument("--status_interval", type=int, default=60, help="Print statu
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.ideal:
+    args_cli.position_only = True
+    args_cli.hold_book_fixed_to_tool = True
+    args_cli.randomize_reset = False
 
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
