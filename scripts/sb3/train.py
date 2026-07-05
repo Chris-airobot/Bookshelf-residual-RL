@@ -354,7 +354,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         name_prefix="model_vecnormalize",
         verbose=2,
     )
-    episode_metrics_callback = EpisodeMetricsCsvCallback(log_dir=log_dir)
+    episode_metrics_callback = EpisodeMetricsCsvCallback(
+        log_dir=log_dir,
+        log_every_timesteps=args_cli.log_interval,
+    )
     callbacks = [
         checkpoint_callback,
         vecnormalize_checkpoint_callback,

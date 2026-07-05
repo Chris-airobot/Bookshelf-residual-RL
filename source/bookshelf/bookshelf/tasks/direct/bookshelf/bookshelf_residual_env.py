@@ -168,24 +168,57 @@ class BookshelfEnv(BookshelfEnvV5):
                 float(getattr(self.cfg, "slot_lateral_clearance_max", self.cfg.slot_lateral_clearance)),
             )
 
-        progress = self._residual_curriculum_progress()
-        frac1 = float(getattr(self.cfg, "residual_curriculum_1_frac", 0.10))
-        frac2 = float(getattr(self.cfg, "residual_curriculum_2_frac", 0.20))
-        frac3 = float(getattr(self.cfg, "residual_curriculum_3_frac", 0.30))
-
-        if progress < frac1:
-            bounds = getattr(self.cfg, "residual_curriculum_clearance_1", (0.006, 0.006))
-        elif progress < frac2:
-            bounds = getattr(self.cfg, "residual_curriculum_clearance_2", (0.004, 0.006))
-        elif progress < frac3:
-            bounds = getattr(self.cfg, "residual_curriculum_clearance_3", (0.002, 0.004))
-        else:
-            bounds = getattr(self.cfg, "residual_curriculum_clearance_final", (0.002, 0.002))
+        stage = self._residual_curriculum_stage()
+        bounds = (
+            getattr(self.cfg, "residual_curriculum_clearance_1", (0.010, 0.010)),
+            getattr(self.cfg, "residual_curriculum_clearance_2", (0.006, 0.006)),
+            getattr(self.cfg, "residual_curriculum_clearance_3", (0.004, 0.006)),
+            getattr(self.cfg, "residual_curriculum_clearance_final", (0.002, 0.002)),
+        )[stage]
         return float(bounds[0]), float(bounds[1])
 
     def _residual_curriculum_progress(self) -> float:
         total = max(1.0, float(getattr(self.cfg, "residual_curriculum_total_steps", 1)))
         return min(1.0, max(0.0, float(getattr(self, "common_step_counter", 0)) / total))
+
+    def _residual_curriculum_stage(self) -> int:
+        progress = self._residual_curriculum_progress()
+        if progress < float(getattr(self.cfg, "residual_curriculum_1_frac", 0.10)):
+            return 0
+        if progress < float(getattr(self.cfg, "residual_curriculum_2_frac", 0.20)):
+            return 1
+        if progress < float(getattr(self.cfg, "residual_curriculum_3_frac", 0.30)):
+            return 2
+        return 3
+
+    def _residual_action_scale(self) -> float:
+        if not bool(getattr(self.cfg, "enable_residual_action_scale_curriculum", False)):
+            return 1.0
+        stage = self._residual_curriculum_stage()
+        return float(
+            (
+                getattr(self.cfg, "residual_curriculum_action_scale_1", 0.30),
+                getattr(self.cfg, "residual_curriculum_action_scale_2", 0.50),
+                getattr(self.cfg, "residual_curriculum_action_scale_3", 0.75),
+                getattr(self.cfg, "residual_curriculum_action_scale_final", 1.00),
+            )[stage]
+        )
+
+    def _apply_residual_reset_curriculum(self) -> None:
+        if not bool(getattr(self.cfg, "enable_residual_reset_curriculum", False)):
+            return
+        stage = self._residual_curriculum_stage()
+        joint, x_jitter, y_jitter, z_jitter, yaw_jitter = (
+            getattr(self.cfg, "residual_curriculum_reset_1"),
+            getattr(self.cfg, "residual_curriculum_reset_2"),
+            getattr(self.cfg, "residual_curriculum_reset_3"),
+            getattr(self.cfg, "residual_curriculum_reset_final"),
+        )[stage]
+        self.cfg.reset_arm_joint_pos_noise = float(joint)
+        self.cfg.book_grasp_x_jitter = float(x_jitter)
+        self.cfg.book_grasp_y_jitter = float(y_jitter)
+        self.cfg.book_grasp_z_jitter = float(z_jitter)
+        self.cfg.book_grasp_yaw_jitter = float(yaw_jitter)
 
     def _nominal_release_assist_enabled(self) -> bool:
         if not bool(getattr(self.cfg, "enable_nominal_release_assist", False)):
@@ -196,6 +229,7 @@ class BookshelfEnv(BookshelfEnvV5):
         cmin, cmax = self._residual_curriculum_clearance_range()
         self.cfg.slot_lateral_clearance_min = cmin
         self.cfg.slot_lateral_clearance_max = cmax
+        self._apply_residual_reset_curriculum()
         super()._reset_idx(env_ids)
         env_ids_t = self._env_ids if env_ids is None else torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
         if bool(getattr(self.cfg, "debug_start_from_default_grasp_pose", False)):
@@ -946,15 +980,12 @@ class BookshelfEnv(BookshelfEnvV5):
             -float(self.cfg.nominal_dy_limit),
             float(self.cfg.nominal_dy_limit),
         )
+        insert_z_err = metrics["z_err"] - float(getattr(self.cfg, "nominal_insert_z_offset", 0.0))
         insert_dz = torch.clamp(
-            -float(self.cfg.nominal_height_gain) * metrics["z_err"],
+            -float(self.cfg.nominal_height_gain) * insert_z_err,
             -float(self.cfg.nominal_dz_limit),
             float(self.cfg.nominal_dz_limit),
         )
-        lift = (metrics["rear_to_mouth"] < float(self.cfg.nominal_lift_rear_to_mouth)) & (
-            metrics["z_err"] < float(self.cfg.nominal_align_z_thresh)
-        )
-        insert_dz = torch.where(lift, torch.full_like(insert_dz, float(self.cfg.nominal_lift_dz)), insert_dz)
         insert_dyaw = torch.clamp(
             -float(self.cfg.nominal_yaw_gain) * metrics["yaw_err"],
             -float(self.cfg.nominal_dyaw_limit),
@@ -1044,6 +1075,7 @@ class BookshelfEnv(BookshelfEnvV5):
             ),
             dim=-1,
         )
+        residual = residual * self._residual_action_scale()
         nominal = self._nominal_cartesian_delta(mode)
         delta = nominal + residual
         delta[:, 0] = torch.clamp(delta[:, 0], -float(self.cfg.final_dx_limit), float(self.cfg.final_dx_limit))

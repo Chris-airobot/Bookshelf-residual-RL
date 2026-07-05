@@ -27,7 +27,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     slot_x_back = 0.83 + bookshelf_x_offset
 
     # --- Debug geometry validation ---
-    gripper_closed_joint_pos = 0.0177
+    gripper_closed_joint_pos = 0.0165
     gripper_push_closed_joint_pos = 0.0
     debug_freeze_nominal_controller = False
     debug_disable_nominal_release = True
@@ -76,15 +76,28 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
 
     # Fast curriculum for residual PPO.  The schedule is based on the global
     # environment step counter, so with N envs it advances every N transitions.
-    enable_residual_clearance_curriculum = False
-    residual_curriculum_total_steps = 50_000_000
+    enable_residual_clearance_curriculum = True
+    # 4069 PPO iterations * 32 rollout steps. This counter is independent of num_envs.
+    residual_curriculum_total_steps = 130_208
     residual_curriculum_1_frac = 0.10
     residual_curriculum_2_frac = 0.20
     residual_curriculum_3_frac = 0.30
-    residual_curriculum_clearance_1 = (0.006, 0.006)
-    residual_curriculum_clearance_2 = (0.004, 0.006)
-    residual_curriculum_clearance_3 = (0.002, 0.004)
-    residual_curriculum_clearance_final = (0.002, 0.002)
+    residual_curriculum_clearance_1 = (0.008, 0.008)
+    residual_curriculum_clearance_2 = (0.006, 0.006)
+    residual_curriculum_clearance_3 = (0.004, 0.006)
+    residual_curriculum_clearance_final = (0.003, 0.003)
+
+    enable_residual_reset_curriculum = True
+    residual_curriculum_reset_1 = (math.radians(1.0), 0.002, 0.002, 0.002, math.radians(2.0))
+    residual_curriculum_reset_2 = (math.radians(2.0), 0.004, 0.003, 0.002, math.radians(4.0))
+    residual_curriculum_reset_3 = (math.radians(3.0), 0.008, 0.006, 0.003, math.radians(8.0))
+    residual_curriculum_reset_final = residual_curriculum_reset_3
+
+    enable_residual_action_scale_curriculum = True
+    residual_curriculum_action_scale_1 = 0.30
+    residual_curriculum_action_scale_2 = 0.50
+    residual_curriculum_action_scale_3 = 0.75
+    residual_curriculum_action_scale_final = 1.00
     enable_nominal_release_assist = True
     nominal_release_assist_until_frac = 0.30
 
@@ -107,6 +120,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     nominal_push_dx = 0.0008
     nominal_lateral_gain = 0.25
     nominal_height_gain = 0.18
+    nominal_insert_z_offset = 0.006
     nominal_yaw_gain = 0.14
     nominal_pitch_gain = 0.020
     nominal_push_lateral_gain = 0.35
@@ -126,8 +140,6 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     nominal_dyaw_limit = math.radians(0.35)
     nominal_dpitch_limit = math.radians(0.25)
     nominal_slow_rear_to_mouth = -0.035
-    nominal_lift_rear_to_mouth = -0.060
-    nominal_lift_dz = 0.0008
     nominal_release_inside_fraction = 0.50
     nominal_plan_position_gain = 0.35
     nominal_plan_yaw_gain = 0.50
