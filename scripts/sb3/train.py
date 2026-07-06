@@ -177,6 +177,34 @@ def _checkpoint_custom_objects(observation_space, action_space, learning_rate=No
     return custom_objects
 
 
+def _vecnormalize_stats_path(vec_norm_path: Path) -> Path:
+    return vec_norm_path.with_name(f"{vec_norm_path.stem}_stats.npz")
+
+
+def _load_vecnormalize_stats(stats_path: Path, env, norm_args: dict, agent_cfg: dict):
+    if not stats_path.exists():
+        raise FileNotFoundError(f"VecNormalize stats fallback file not found: {stats_path}")
+    print(f"Loading VecNormalize stats fallback: {stats_path}")
+    env = VecNormalize(
+        env,
+        training=True,
+        norm_obs=bool(norm_args.get("normalize_input", True)),
+        norm_reward=bool(norm_args.get("normalize_value", False)),
+        clip_obs=norm_args.get("clip_obs", 100.0),
+        gamma=agent_cfg["gamma"],
+        clip_reward=np.inf,
+    )
+    stats = np.load(stats_path)
+    env.obs_rms.mean = stats["obs_mean"].astype(np.float64)
+    env.obs_rms.var = stats["obs_var"].astype(np.float64)
+    env.obs_rms.count = float(stats["obs_count"])
+    if "ret_mean" in stats and hasattr(env, "ret_rms"):
+        env.ret_rms.mean = stats["ret_mean"].astype(np.float64)
+        env.ret_rms.var = stats["ret_var"].astype(np.float64)
+        env.ret_rms.count = float(stats["ret_count"])
+    return env
+
+
 def _load_actor_warm_start(agent: PPO, checkpoint_path: str, device: str):
     """Copy actor weights from an SB3 checkpoint without importing its PPO hyperparameters."""
     source_agent = PPO.load(
@@ -369,7 +397,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if not vec_norm_path.exists():
             raise FileNotFoundError(f"Full resume requires matching VecNormalize state: {vec_norm_path}")
         print(f"Resuming normalization from: {vec_norm_path}")
-        env = VecNormalize.load(vec_norm_path, env)
+        try:
+            env = VecNormalize.load(vec_norm_path, env)
+        except Exception as exc:
+            stats_path = _vecnormalize_stats_path(vec_norm_path)
+            print(f"VecNormalize pickle load failed ({type(exc).__name__}: {exc}).")
+            env = _load_vecnormalize_stats(stats_path, env, norm_args, agent_cfg)
         env.training = True
         env.norm_reward = bool(norm_args.get("normalize_value", False))
     elif norm_args and norm_args.get("normalize_input"):
