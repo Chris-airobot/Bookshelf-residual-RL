@@ -158,9 +158,38 @@ def _safe_git_info() -> dict[str, str]:
         return {"git_commit": "unknown", "git_dirty": "unknown"}
 
 
+def _constant_schedule(value: float):
+    return lambda _: float(value)
+
+
+def _checkpoint_custom_objects(observation_space, action_space, learning_rate=None, clip_range=None) -> dict:
+    """Avoid deserializing fragile Gym/NumPy objects from checkpoints across machines."""
+    custom_objects = {
+        "observation_space": observation_space,
+        "action_space": action_space,
+    }
+    if learning_rate is not None:
+        custom_objects["learning_rate"] = float(learning_rate)
+        custom_objects["lr_schedule"] = _constant_schedule(float(learning_rate))
+    if clip_range is not None:
+        custom_objects["clip_range"] = _constant_schedule(float(clip_range))
+    custom_objects["clip_range_vf"] = None
+    return custom_objects
+
+
 def _load_actor_warm_start(agent: PPO, checkpoint_path: str, device: str):
     """Copy actor weights from an SB3 checkpoint without importing its PPO hyperparameters."""
-    source_agent = PPO.load(checkpoint_path, device=device, print_system_info=True)
+    source_agent = PPO.load(
+        checkpoint_path,
+        device=device,
+        print_system_info=True,
+        custom_objects=_checkpoint_custom_objects(
+            observation_space=agent.observation_space,
+            action_space=agent.action_space,
+            learning_rate=0.0,
+            clip_range=0.0,
+        ),
+    )
     source_state = source_agent.policy.state_dict()
     target_state = agent.policy.state_dict()
 
@@ -378,6 +407,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             device=agent_cfg.get("device", "auto"),
             tensorboard_log=log_dir,
             print_system_info=True,
+            custom_objects=_checkpoint_custom_objects(
+                observation_space=env.observation_space,
+                action_space=env.action_space,
+                learning_rate=agent_cfg.get("learning_rate"),
+                clip_range=agent_cfg.get("clip_range"),
+            ),
         )
         agent.verbose = 1
     else:
