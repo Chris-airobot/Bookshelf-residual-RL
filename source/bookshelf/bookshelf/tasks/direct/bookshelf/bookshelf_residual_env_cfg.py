@@ -27,7 +27,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     slot_x_back = 0.83 + bookshelf_x_offset
 
     # --- Debug geometry validation ---
-    gripper_closed_joint_pos = 0.0177
+    gripper_closed_joint_pos = 0.0165
     gripper_push_closed_joint_pos = 0.0
     debug_freeze_nominal_controller = False
     debug_disable_nominal_release = True

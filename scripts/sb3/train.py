@@ -43,6 +43,18 @@ parser.add_argument(
     help="Continue training from a .zip checkpoint (same obs/action dims). "
     "VecNormalize stats are always reset (fresh) for curriculum/reward shifts; only policy weights load.",
 )
+parser.add_argument(
+    "--resume",
+    action="store_true",
+    default=False,
+    help="Fully resume PPO from --checkpoint, including critic, optimizer, timestep counter, and VecNormalize state.",
+)
+parser.add_argument(
+    "--fixed_clearance",
+    type=float,
+    default=None,
+    help="Train at one fixed slot clearance and disable residual curricula/release assist.",
+)
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument("--mlflow", action="store_true", default=False, help="Enable MLflow logging.")
@@ -61,6 +73,8 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.resume and args_cli.checkpoint is None:
+    parser.error("--resume requires --checkpoint")
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -218,6 +232,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.fixed_clearance is not None:
+        if hasattr(env_cfg, "enable_residual_clearance_curriculum"):
+            env_cfg.enable_residual_clearance_curriculum = False
+        if hasattr(env_cfg, "enable_residual_reset_curriculum"):
+            env_cfg.enable_residual_reset_curriculum = False
+        if hasattr(env_cfg, "enable_residual_action_scale_curriculum"):
+            env_cfg.enable_residual_action_scale_curriculum = False
+        if hasattr(env_cfg, "enable_nominal_release_assist"):
+            env_cfg.enable_nominal_release_assist = False
+        env_cfg.slot_lateral_clearance_min = float(args_cli.fixed_clearance)
+        env_cfg.slot_lateral_clearance_max = float(args_cli.fixed_clearance)
 
     # directory for logging into
     run_info = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -310,7 +335,15 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if key in agent_cfg:
             norm_args[key] = agent_cfg.pop(key)
 
-    if norm_args and norm_args.get("normalize_input"):
+    if args_cli.resume:
+        vec_norm_path = Path(args_cli.checkpoint.replace("/model", "/model_vecnormalize").replace(".zip", ".pkl"))
+        if not vec_norm_path.exists():
+            raise FileNotFoundError(f"Full resume requires matching VecNormalize state: {vec_norm_path}")
+        print(f"Resuming normalization from: {vec_norm_path}")
+        env = VecNormalize.load(vec_norm_path, env)
+        env.training = True
+        env.norm_reward = bool(norm_args.get("normalize_value", False))
+    elif norm_args and norm_args.get("normalize_input"):
         print(f"Normalizing input, {norm_args=}")
         env = VecNormalize(
             env,
@@ -336,11 +369,22 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env.obs_rms.count = 1e6
                 print(f"[INFO] VecNormalize warm-started from {stats_path}")
 
-    # Intentionally do not load old VecNormalize.pkl when resuming: reward distribution often shifts (curriculum).
-
-    # create agent from stable baselines
-    agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
-    if args_cli.checkpoint is not None:
+    # create or restore agent
+    if args_cli.resume:
+        print(f"Fully resuming PPO from: {args_cli.checkpoint}")
+        agent = PPO.load(
+            args_cli.checkpoint,
+            env=env,
+            device=agent_cfg.get("device", "auto"),
+            tensorboard_log=log_dir,
+            print_system_info=True,
+        )
+        agent.verbose = 1
+    else:
+        # Intentionally do not load old VecNormalize.pkl when warm-starting:
+        # reward distribution often shifts across curriculum experiments.
+        agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
+    if args_cli.checkpoint is not None and not args_cli.resume:
         _load_actor_warm_start(agent, args_cli.checkpoint, device=agent_cfg.get("device", "auto"))
 
     # callbacks for agent
@@ -374,6 +418,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             callback=callbacks,
             progress_bar=True,
             log_interval=None,
+            reset_num_timesteps=not args_cli.resume,
         )
     # save the final model
     agent.save(os.path.join(log_dir, "model"))
