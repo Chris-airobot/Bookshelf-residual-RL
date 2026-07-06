@@ -76,7 +76,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
 
     # Fast curriculum for residual PPO.  The schedule is based on the global
     # environment step counter, so with N envs it advances every N transitions.
-    enable_residual_clearance_curriculum = True
+    enable_residual_clearance_curriculum = False
     # 4069 PPO iterations * 32 rollout steps. This counter is independent of num_envs.
     residual_curriculum_total_steps = 130_208
     residual_curriculum_1_frac = 0.10
@@ -87,18 +87,18 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     residual_curriculum_clearance_3 = (0.004, 0.006)
     residual_curriculum_clearance_final = (0.002, 0.002)
 
-    enable_residual_reset_curriculum = True
+    enable_residual_reset_curriculum = False
     residual_curriculum_reset_1 = (math.radians(1.0), 0.002, 0.002, 0.002, math.radians(2.0))
     residual_curriculum_reset_2 = (math.radians(2.0), 0.004, 0.003, 0.002, math.radians(4.0))
     residual_curriculum_reset_3 = (math.radians(3.0), 0.008, 0.006, 0.003, math.radians(8.0))
     residual_curriculum_reset_final = residual_curriculum_reset_3
 
-    enable_residual_action_scale_curriculum = True
+    enable_residual_action_scale_curriculum = False
     residual_curriculum_action_scale_1 = 0.30
     residual_curriculum_action_scale_2 = 0.50
     residual_curriculum_action_scale_3 = 0.75
     residual_curriculum_action_scale_final = 1.00
-    enable_nominal_release_assist = True
+    enable_nominal_release_assist = False
     nominal_release_assist_until_frac = 0.30
 
     # PPO outputs residual corrections, not full motion commands.  Keep these
