@@ -34,6 +34,18 @@ parser.add_argument(
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
+    "--eval_slot_clearance",
+    type=float,
+    default=None,
+    help="Evaluate at a fixed clearance with full randomization/residual authority and no release assistance.",
+)
+parser.add_argument(
+    "--eval_episodes",
+    type=int,
+    default=0,
+    help="Stop after this many completed episodes; 0 runs until manually stopped.",
+)
+parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
@@ -132,6 +144,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.debug_print_residual_components = bool(args_cli.print_residual_components)
         env_cfg.debug_print_residual_interval = int(args_cli.print_residual_interval)
         env_cfg.debug_print_residual_env_index = int(args_cli.print_residual_env_index)
+    if args_cli.eval_slot_clearance is not None:
+        if hasattr(env_cfg, "enable_residual_clearance_curriculum"):
+            env_cfg.enable_residual_clearance_curriculum = False
+        if hasattr(env_cfg, "enable_residual_reset_curriculum"):
+            env_cfg.enable_residual_reset_curriculum = False
+        if hasattr(env_cfg, "enable_residual_action_scale_curriculum"):
+            env_cfg.enable_residual_action_scale_curriculum = False
+        if hasattr(env_cfg, "enable_nominal_release_assist"):
+            env_cfg.enable_nominal_release_assist = False
+        env_cfg.slot_lateral_clearance_min = float(args_cli.eval_slot_clearance)
+        env_cfg.slot_lateral_clearance_max = float(args_cli.eval_slot_clearance)
 
     # directory for logging into
     log_root_path = os.path.join("logs", "sb3", train_task_name)
@@ -244,6 +267,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         f"success {n_success}/{total} ({100*n_success/max(total,1):.0f}%)  "
                         f"drop {n_drop}  timeout {n_timeout}"
                     )
+
+        if args_cli.eval_episodes > 0 and n_episodes >= args_cli.eval_episodes:
+            break
 
         if args_cli.video:
             timestep += 1
