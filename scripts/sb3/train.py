@@ -162,6 +162,10 @@ def _constant_schedule(value: float):
     return lambda _: float(value)
 
 
+def _as_schedule(value):
+    return value if callable(value) else _constant_schedule(float(value))
+
+
 def _checkpoint_custom_objects(observation_space, action_space, learning_rate=None, clip_range=None) -> dict:
     """Avoid deserializing fragile Gym/NumPy objects from checkpoints across machines."""
     custom_objects = {
@@ -169,10 +173,10 @@ def _checkpoint_custom_objects(observation_space, action_space, learning_rate=No
         "action_space": action_space,
     }
     if learning_rate is not None:
-        custom_objects["learning_rate"] = float(learning_rate)
-        custom_objects["lr_schedule"] = _constant_schedule(float(learning_rate))
+        custom_objects["learning_rate"] = learning_rate
+        custom_objects["lr_schedule"] = _as_schedule(learning_rate)
     if clip_range is not None:
-        custom_objects["clip_range"] = _constant_schedule(float(clip_range))
+        custom_objects["clip_range"] = _as_schedule(clip_range)
     custom_objects["clip_range_vf"] = None
     return custom_objects
 

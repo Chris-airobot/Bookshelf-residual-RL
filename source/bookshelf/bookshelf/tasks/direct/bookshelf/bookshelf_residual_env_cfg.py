@@ -27,8 +27,13 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     slot_x_back = 0.83 + bookshelf_x_offset
 
     # --- Debug geometry validation ---
-    gripper_closed_joint_pos = 0.0165
+    gripper_closed_joint_pos = 0.015
     gripper_push_closed_joint_pos = 0.0
+    reset_arm_joint_pos_noise = math.radians(1.5)
+    book_grasp_x_jitter = 0.003
+    book_grasp_y_jitter = 0.003
+    book_grasp_z_jitter = 0.0015
+    book_grasp_yaw_jitter = math.radians(3.0)
     debug_freeze_nominal_controller = False
     debug_disable_nominal_release = True
     debug_spawn_at_target_tool_pose = False
@@ -71,8 +76,8 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     target_ee_marker_axis_length = 0.20
     target_ee_marker_axis_thickness = 0.006
 
-    slot_lateral_clearance_min = 0.0020
-    slot_lateral_clearance_max = 0.0020
+    slot_lateral_clearance_min = 0.0030
+    slot_lateral_clearance_max = 0.0030
 
     # Fast curriculum for residual PPO.  The schedule is based on the global
     # environment step counter, so with N envs it advances every N transitions.
@@ -82,15 +87,15 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     residual_curriculum_1_frac = 0.10
     residual_curriculum_2_frac = 0.20
     residual_curriculum_3_frac = 0.30
-    residual_curriculum_clearance_1 = (0.010, 0.010)
+    residual_curriculum_clearance_1 = (0.08, 0.010)
     residual_curriculum_clearance_2 = (0.006, 0.006)
     residual_curriculum_clearance_3 = (0.004, 0.006)
-    residual_curriculum_clearance_final = (0.002, 0.002)
+    residual_curriculum_clearance_final = (0.003, 0.003)
 
     enable_residual_reset_curriculum = False
-    residual_curriculum_reset_1 = (math.radians(1.0), 0.002, 0.002, 0.002, math.radians(2.0))
-    residual_curriculum_reset_2 = (math.radians(2.0), 0.004, 0.003, 0.002, math.radians(4.0))
-    residual_curriculum_reset_3 = (math.radians(3.0), 0.008, 0.006, 0.003, math.radians(8.0))
+    residual_curriculum_reset_1 = (math.radians(0.75), 0.0015, 0.0015, 0.0010, math.radians(1.5))
+    residual_curriculum_reset_2 = (math.radians(1.0), 0.0020, 0.0020, 0.0012, math.radians(2.0))
+    residual_curriculum_reset_3 = (math.radians(1.5), 0.0030, 0.0030, 0.0015, math.radians(3.0))
     residual_curriculum_reset_final = residual_curriculum_reset_3
 
     enable_residual_action_scale_curriculum = False
@@ -120,7 +125,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     nominal_push_dx = 0.0008
     nominal_lateral_gain = 0.25
     nominal_height_gain = 0.18
-    nominal_insert_z_offset = 0.004
+    nominal_insert_z_offset = 0.006
     nominal_yaw_gain = 0.14
     nominal_pitch_gain = 0.020
     nominal_push_lateral_gain = 0.35
