@@ -19,7 +19,7 @@ from .bookshelf_env_cfg_v5 import BookshelfEnvCfg as BookshelfEnvCfgV5
 
 @configclass
 class BookshelfEnvCfg(BookshelfEnvCfgV5):
-    """Residual-RL config with a fast curriculum toward tight 2 mm slots."""
+    """Residual-RL config with fixed 3 mm clearance and reset-noise curriculum."""
 
     # Move the whole shelf/slot target farther from the robot for planner debugging.
     bookshelf_x_offset = 0
@@ -79,23 +79,24 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     slot_lateral_clearance_min = 0.0030
     slot_lateral_clearance_max = 0.0030
 
-    # Fast curriculum for residual PPO.  The schedule is based on the global
-    # environment step counter, so with N envs it advances every N transitions.
+    # Curriculum for residual PPO.  The schedule is based on the global
+    # environment step counter, so it is independent of the number of envs.
     enable_residual_clearance_curriculum = False
-    # 4069 PPO iterations * 32 rollout steps. This counter is independent of num_envs.
-    residual_curriculum_total_steps = 130_208
-    residual_curriculum_1_frac = 0.10
-    residual_curriculum_2_frac = 0.20
-    residual_curriculum_3_frac = 0.30
+    # 8138 PPO iterations * 32 rollout steps.
+    residual_curriculum_total_steps = 260_416
+    residual_curriculum_1_frac = 0.20
+    residual_curriculum_2_frac = 0.50
+    residual_curriculum_3_frac = 1.00
     residual_curriculum_clearance_1 = (0.08, 0.010)
     residual_curriculum_clearance_2 = (0.006, 0.006)
     residual_curriculum_clearance_3 = (0.004, 0.006)
     residual_curriculum_clearance_final = (0.003, 0.003)
 
-    enable_residual_reset_curriculum = False
-    residual_curriculum_reset_1 = (math.radians(0.75), 0.0015, 0.0015, 0.0010, math.radians(1.5))
-    residual_curriculum_reset_2 = (math.radians(1.0), 0.0020, 0.0020, 0.0012, math.radians(2.0))
-    residual_curriculum_reset_3 = (math.radians(1.5), 0.0030, 0.0030, 0.0015, math.radians(3.0))
+    enable_residual_reset_curriculum = True
+    # tuple: arm joint noise, grasp x/y/z jitter, grasp yaw jitter
+    residual_curriculum_reset_1 = (math.radians(1.5), 0.0030, 0.0030, 0.0015, math.radians(3.0))
+    residual_curriculum_reset_2 = (math.radians(2.0), 0.0050, 0.0040, 0.0020, math.radians(5.0))
+    residual_curriculum_reset_3 = (math.radians(3.0), 0.0080, 0.0060, 0.0030, math.radians(8.0))
     residual_curriculum_reset_final = residual_curriculum_reset_3
 
     enable_residual_action_scale_curriculum = False

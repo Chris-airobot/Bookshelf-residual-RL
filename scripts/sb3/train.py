@@ -296,12 +296,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.fixed_clearance is not None:
         if hasattr(env_cfg, "enable_residual_clearance_curriculum"):
             env_cfg.enable_residual_clearance_curriculum = False
-        if hasattr(env_cfg, "enable_residual_reset_curriculum"):
-            env_cfg.enable_residual_reset_curriculum = False
-        if hasattr(env_cfg, "enable_residual_action_scale_curriculum"):
-            env_cfg.enable_residual_action_scale_curriculum = False
-        if hasattr(env_cfg, "enable_nominal_release_assist"):
-            env_cfg.enable_nominal_release_assist = False
         env_cfg.slot_lateral_clearance_min = float(args_cli.fixed_clearance)
         env_cfg.slot_lateral_clearance_max = float(args_cli.fixed_clearance)
 
