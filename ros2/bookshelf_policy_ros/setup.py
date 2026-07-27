@@ -7,7 +7,7 @@ package_name = 'bookshelf_policy_ros'
 setup(
     name=package_name,
     version='0.0.0',
-    packages=find_packages(exclude=['test']),
+    packages=['bookshelf_policy_ros'],
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/bookshelf_policy_ros']),
         ('share/bookshelf_policy_ros', ['package.xml']),
@@ -37,6 +37,8 @@ setup(
             'observation_debug_node = bookshelf_policy_ros.observation_debug_node:main',
             'policy_dry_run_node = bookshelf_policy_ros.policy_dry_run_node:main',
             'policy_to_robot_node = bookshelf_policy_ros.policy_to_robot_node:main',
+            'external_camera_calibrator_node = bookshelf_policy_ros.external_camera_calibrator_node:main',
+            'book_center_tf_node = bookshelf_policy_ros.book_center_tf_node:main',
         ],
     },
 )

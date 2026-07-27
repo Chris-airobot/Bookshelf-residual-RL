@@ -1,0 +1,19 @@
+pre-insertion:
+  units: radians
+  source: rviz_joint_sliders_degrees
+  degrees:
+    joint1: 111.0
+    joint2: 84.0
+    joint3: 285.0
+    joint4: 26.0
+    joint5: 199.0
+    joint6: 48.0
+    joint7: 256.0
+  joints:
+    joint1: 1.937315469714
+    joint2: 1.466076571675
+    joint3: 4.974188368184
+    joint4: 0.453785605519
+    joint5: 3.473205211469
+    joint6: 0.837758040957
+    joint7: 4.468042885105

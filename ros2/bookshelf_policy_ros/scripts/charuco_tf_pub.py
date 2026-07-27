@@ -57,19 +57,26 @@ class CharucoTFPublisher(Node):
         self.camera_frame = camera_frame
         self.board_frame = board_frame
 
-        # Your real printed ChArUco board parameters
-        self.squares_x = 5
-        self.squares_y = 7
-        self.square_length = 0.040
-        self.marker_length = 0.030
+        # Printed ChArUco board parameters
+        self.squares_x = 14
+        self.squares_y = 4
+        self.square_length = 0.015
+        self.marker_length = 0.011
+        self.start_id = 40
 
-        self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+        self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
+        self.ids = np.arange(
+            self.start_id,
+            self.start_id + (self.squares_x * self.squares_y) // 2,
+            dtype=np.int32,
+        )
 
         self.board = cv2.aruco.CharucoBoard(
             (self.squares_x, self.squares_y),
             self.square_length,
             self.marker_length,
-            self.dictionary
+            self.dictionary,
+            self.ids,
         )
 
         self.detector_params = cv2.aruco.DetectorParameters()
@@ -115,18 +122,21 @@ class CharucoTFPublisher(Node):
             self.board
         )
 
-        if retval < 4:
+        if retval < 6:
             return
 
-        ok, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
-            charuco_corners,
-            charuco_ids,
-            self.board,
-            self.K,
-            self.D,
-            None,
-            None
-        )
+        try:
+            ok, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
+                charuco_corners,
+                charuco_ids,
+                self.board,
+                self.K,
+                self.D,
+                None,
+                None
+            )
+        except cv2.error:
+            return
 
         if not ok:
             return

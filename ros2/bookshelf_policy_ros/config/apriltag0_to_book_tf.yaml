@@ -1,0 +1,25 @@
+# Averaged from 250 RealSense frames on 2026-06-28.
+# Source: data/marker_to_book_calibration_250.json
+# Parent frame is the detected AprilTag 36h11 id 0 marker frame.
+# Child frame is the calibrated book center frame.
+parent_frame: apriltag_36h11_0
+child_frame: calibrated_book_center
+translation_xyz_m:
+  x: -0.044188468734586754
+  y: -0.019233968272364746
+  z: -0.2167544560075749
+rotation_xyzw:
+  x: 0.7235523907813395
+  y: -0.012252765490307429
+  z: -0.6901601779617551
+  w: 0.0008580724014047088
+sample_count: 250
+stability:
+  translation_std_m:
+    x: 0.005486775117023794
+    y: 0.0010556258218439296
+    z: 0.00013493317619696783
+  translation_error_mean_m: 0.004700369515171019
+  translation_error_max_m: 0.010350540709479779
+  rotation_error_mean_deg: 1.1890654932850178
+  rotation_error_max_deg: 2.6510778048421346

@@ -27,14 +27,16 @@ class MoveToJointPose(Node):
             "joint7",
         ]
 
+        # Pre-insertion pose recorded from RViz joint sliders:
+        # [111, 84, 285, 26, 199, 48, 256] degrees.
         self.target_positions = [
-            -2.1387282432172583e-05,
-            0.45204615237185575,
-            -8.855606925539661e-05,
-            1.1051906493842676,
-            -3.6100247879922165e-05,
-            -0.9463594873801702,
-            -9.686126306007736e-05,
+            1.937315469714,
+            1.466076571675,
+            4.974188368184,
+            0.453785605519,
+            3.473205211469,
+            0.837758040957,
+            4.468042885105,
         ]
 
         self.client = ActionClient(self, FollowJointTrajectory, self.action_name)
