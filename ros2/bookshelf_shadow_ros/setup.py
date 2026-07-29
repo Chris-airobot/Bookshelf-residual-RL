@@ -27,6 +27,8 @@ setup(
         "console_scripts": [
             "policy_observation_adapter = "
             "bookshelf_shadow_ros.policy_observation_adapter_node:main",
+            "policy_shadow_inference = "
+            "bookshelf_shadow_ros.policy_shadow_inference_node:main",
             "rgbd_slot_detector = bookshelf_shadow_ros.rgbd_slot_detector:main",
             "sim_rgb_camera_viewer = bookshelf_shadow_ros.sim_rgb_camera_viewer:main",
         ],

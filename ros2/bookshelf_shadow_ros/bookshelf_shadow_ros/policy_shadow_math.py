@@ -1,0 +1,270 @@
+"""Pure NumPy helpers for read-only bookshelf policy shadow inference."""
+
+from dataclasses import dataclass
+import hashlib
+import json
+import math
+from pathlib import Path
+
+import numpy as np
+
+
+POLICY_OBSERVATION_SIZE = 12
+POLICY_ACTION_SIZE = 6
+MOTION_ACTION_SIZE = 5
+
+POLICY_ACTION_LABELS = (
+    "residual_dx",
+    "residual_dy",
+    "residual_dz",
+    "residual_dyaw",
+    "residual_dpitch",
+    "release",
+)
+MOTION_LABELS = ("dx", "dy", "dz", "dyaw", "dpitch")
+
+
+@dataclass(frozen=True)
+class ResidualMotionConfig:
+    action_scales: tuple[float, ...] = (
+        0.0020,
+        0.0010,
+        0.0015,
+        math.radians(0.35),
+        math.radians(0.30),
+    )
+    final_limits: tuple[float, ...] = (
+        0.0080,
+        0.0030,
+        0.0070,
+        math.radians(0.8),
+        math.radians(0.6),
+    )
+    release_threshold: float = 0.5
+
+
+@dataclass(frozen=True)
+class NominalInsertConfig:
+    insert_dx: float = 0.0010
+    insert_dx_near_mouth: float = 0.0007
+    lateral_gain: float = 0.25
+    height_gain: float = 0.18
+    insert_z_offset: float = 0.006
+    yaw_gain: float = 0.14
+    pitch_gain: float = 0.020
+    align_lat_thresh: float = 0.006
+    align_z_thresh: float = 0.010
+    align_yaw_thresh: float = math.radians(6.0)
+    align_tilt_x_thresh: float = 0.10
+    unaligned_dx_scale: float = 0.0
+    dy_limit: float = 0.0015
+    dz_limit: float = 0.0018
+    dyaw_limit: float = math.radians(0.35)
+    dpitch_limit: float = math.radians(0.25)
+    slow_rear_to_mouth: float = -0.035
+
+
+def _vector(value, expected_size: int, name: str) -> np.ndarray:
+    array = np.asarray(value, dtype=np.float32).reshape(-1)
+    if array.shape != (expected_size,):
+        raise ValueError(f"{name} must have shape ({expected_size},), got {array.shape}.")
+    if not np.all(np.isfinite(array)):
+        raise ValueError(f"{name} contains non-finite values.")
+    return array
+
+
+def compute_insert_nominal_delta(
+    raw_metrics,
+    config: NominalInsertConfig = NominalInsertConfig(),
+) -> np.ndarray:
+    """Reproduce the simulator's nominal INSERT controller from raw 12D metrics."""
+
+    raw = _vector(raw_metrics, POLICY_OBSERVATION_SIZE, "raw_metrics")
+    mode_observation = float(raw[0])
+    if not math.isclose(mode_observation, 0.0, abs_tol=1.0e-4):
+        raise ValueError(
+            "Exact nominal diagnostics currently support INSERT mode only "
+            f"(mode observation 0.0), got {mode_observation:.4f}."
+        )
+
+    rear_to_mouth = float(raw[1])
+    lat_err = float(raw[3])
+    z_err = float(raw[4])
+    yaw_err = float(raw[5])
+    tilt_x = float(raw[10])
+
+    aligned = (
+        abs(lat_err) < config.align_lat_thresh
+        and abs(z_err) < config.align_z_thresh
+        and abs(yaw_err) < config.align_yaw_thresh
+        and abs(tilt_x) < config.align_tilt_x_thresh
+    )
+    dx = (
+        config.insert_dx_near_mouth
+        if rear_to_mouth > config.slow_rear_to_mouth
+        else config.insert_dx
+    )
+    if not aligned:
+        dx *= config.unaligned_dx_scale
+
+    delta = np.array(
+        [
+            dx,
+            np.clip(config.lateral_gain * lat_err, -config.dy_limit, config.dy_limit),
+            np.clip(
+                -config.height_gain * (z_err - config.insert_z_offset),
+                -config.dz_limit,
+                config.dz_limit,
+            ),
+            np.clip(-config.yaw_gain * yaw_err, -config.dyaw_limit, config.dyaw_limit),
+            np.clip(-config.pitch_gain * tilt_x, -config.dpitch_limit, config.dpitch_limit),
+        ],
+        dtype=np.float32,
+    )
+    return delta
+
+
+def scale_residual_action(
+    policy_action,
+    config: ResidualMotionConfig = ResidualMotionConfig(),
+) -> np.ndarray:
+    """Apply the same action clamp and residual scales used by the simulator."""
+
+    action = _vector(policy_action, POLICY_ACTION_SIZE, "policy_action")
+    action = np.clip(action, -1.0, 1.0)
+    scales = _vector(config.action_scales, MOTION_ACTION_SIZE, "action_scales")
+    return (action[:MOTION_ACTION_SIZE] * scales).astype(np.float32)
+
+
+def combine_motion_delta(
+    nominal_delta,
+    residual_delta,
+    config: ResidualMotionConfig = ResidualMotionConfig(),
+) -> np.ndarray:
+    nominal = _vector(nominal_delta, MOTION_ACTION_SIZE, "nominal_delta")
+    residual = _vector(residual_delta, MOTION_ACTION_SIZE, "residual_delta")
+    limits = _vector(config.final_limits, MOTION_ACTION_SIZE, "final_limits")
+    return np.clip(nominal + residual, -limits, limits).astype(np.float32)
+
+
+class NumpyActorBundle:
+    """Portable deterministic PPO actor and VecNormalize observation statistics."""
+
+    SCHEMA_VERSION = 1
+    REQUIRED_KEYS = {
+        "schema_version",
+        "observation_size",
+        "action_size",
+        "activation",
+        "obs_mean",
+        "obs_var",
+        "obs_epsilon",
+        "obs_clip",
+        "action_low",
+        "action_high",
+        "policy_0_weight",
+        "policy_0_bias",
+        "policy_1_weight",
+        "policy_1_bias",
+        "action_weight",
+        "action_bias",
+        "metadata_json",
+    }
+
+    def __init__(self, path):
+        self.path = Path(path).expanduser().resolve()
+        if not self.path.is_file():
+            raise FileNotFoundError(f"Policy bundle not found: {self.path}")
+
+        with np.load(self.path, allow_pickle=False) as bundle:
+            missing = self.REQUIRED_KEYS.difference(bundle.files)
+            if missing:
+                raise ValueError(f"Policy bundle is missing keys: {sorted(missing)}")
+            values = {key: np.array(bundle[key], copy=True) for key in bundle.files}
+
+        version = int(values["schema_version"].item())
+        if version != self.SCHEMA_VERSION:
+            raise ValueError(
+                f"Unsupported policy bundle schema {version}; expected {self.SCHEMA_VERSION}."
+            )
+        if int(values["observation_size"].item()) != POLICY_OBSERVATION_SIZE:
+            raise ValueError("Policy bundle does not use the trained 12D observation.")
+        if int(values["action_size"].item()) != POLICY_ACTION_SIZE:
+            raise ValueError("Policy bundle does not produce the trained 6D action.")
+        if str(values["activation"].item()).lower() != "relu":
+            raise ValueError("Only the checkpoint's ReLU actor is supported.")
+
+        self.obs_mean = _vector(values["obs_mean"], POLICY_OBSERVATION_SIZE, "obs_mean")
+        self.obs_var = _vector(values["obs_var"], POLICY_OBSERVATION_SIZE, "obs_var")
+        if np.any(self.obs_var < 0.0):
+            raise ValueError("obs_var contains negative values.")
+        self.obs_epsilon = float(values["obs_epsilon"].item())
+        self.obs_clip = float(values["obs_clip"].item())
+        if self.obs_epsilon <= 0.0 or self.obs_clip <= 0.0:
+            raise ValueError("Observation epsilon and clip must be positive.")
+
+        self.action_low = _vector(values["action_low"], POLICY_ACTION_SIZE, "action_low")
+        self.action_high = _vector(values["action_high"], POLICY_ACTION_SIZE, "action_high")
+        if np.any(self.action_low >= self.action_high):
+            raise ValueError("Policy action limits are invalid.")
+
+        self.policy_0_weight = self._matrix(values["policy_0_weight"], (256, 12), "policy_0_weight")
+        self.policy_0_bias = _vector(values["policy_0_bias"], 256, "policy_0_bias")
+        self.policy_1_weight = self._matrix(values["policy_1_weight"], (256, 256), "policy_1_weight")
+        self.policy_1_bias = _vector(values["policy_1_bias"], 256, "policy_1_bias")
+        self.action_weight = self._matrix(values["action_weight"], (6, 256), "action_weight")
+        self.action_bias = _vector(values["action_bias"], 6, "action_bias")
+
+        try:
+            self.metadata = json.loads(str(values["metadata_json"].item()))
+        except (TypeError, json.JSONDecodeError) as error:
+            raise ValueError(f"Invalid policy bundle metadata: {error}") from error
+
+    @staticmethod
+    def _matrix(value, shape: tuple[int, int], name: str) -> np.ndarray:
+        array = np.asarray(value, dtype=np.float32)
+        if array.shape != shape:
+            raise ValueError(f"{name} must have shape {shape}, got {array.shape}.")
+        if not np.all(np.isfinite(array)):
+            raise ValueError(f"{name} contains non-finite values.")
+        return array
+
+    @property
+    def sha256(self) -> str:
+        digest = hashlib.sha256()
+        with self.path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def normalize_observation(self, observation) -> np.ndarray:
+        observation = _vector(
+            observation,
+            POLICY_OBSERVATION_SIZE,
+            "observation",
+        )
+        normalized = (observation - self.obs_mean) / np.sqrt(
+            self.obs_var + self.obs_epsilon
+        )
+        return np.clip(normalized, -self.obs_clip, self.obs_clip).astype(np.float32)
+
+    def predict(self, observation) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return normalized observation, actor mean, and environment-clamped action."""
+
+        normalized = self.normalize_observation(observation)
+        hidden = np.maximum(
+            self.policy_0_weight @ normalized + self.policy_0_bias,
+            0.0,
+        )
+        hidden = np.maximum(
+            self.policy_1_weight @ hidden + self.policy_1_bias,
+            0.0,
+        )
+        actor_mean = self.action_weight @ hidden + self.action_bias
+        sb3_action = np.clip(actor_mean, self.action_low, self.action_high)
+        environment_action = np.clip(sb3_action, -1.0, 1.0)
+        return (
+            normalized.astype(np.float32),
+            actor_mean.astype(np.float32),
+            environment_action.astype(np.float32),
+        )

@@ -9,7 +9,11 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     default_config = PathJoinSubstitution(
-        [FindPackageShare("bookshelf_shadow_ros"), "config", "policy_observation_adapter.yaml"]
+        [
+            FindPackageShare("bookshelf_shadow_ros"),
+            "config",
+            "policy_observation_adapter_markerless_smoke.yaml",
+        ]
     )
 
     config_argument = DeclareLaunchArgument(
@@ -47,6 +51,7 @@ def generate_launch_description():
             LogInfo(
                 msg=(
                     "Starting SHADOW-ONLY bookshelf perception and observation. "
+                    "The markerless smoke config uses an approximate fixed EEF-to-book transform. "
                     "No policy execution or robot command node is launched."
                 )
             ),

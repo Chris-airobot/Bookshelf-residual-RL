@@ -3,7 +3,7 @@
 <package format="3">
   <name>bookshelf_shadow_ros</name>
   <version>0.1.0</version>
-  <description>Read-only RGB-D slot detection and policy observation adaptation.</description>
+  <description>Read-only RGB-D perception, policy observation adaptation, and shadow inference.</description>
   <maintainer email="tianyuli19981009@gmail.com">chris</maintainer>
   <license>Apache-2.0</license>
 
