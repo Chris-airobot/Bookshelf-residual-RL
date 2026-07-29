@@ -73,6 +73,9 @@ class PolicyObservationAdapterNode(Node):
         self.ee_frame = str(self.get_parameter("ee_frame").value)
         self.target_book_frame = str(self.get_parameter("target_book_frame").value)
         self.book_pose_source = str(self.get_parameter("book_pose_source").value).strip().lower()
+        self.eef_book_transform_status = str(
+            self.get_parameter("eef_book_transform_status").value
+        ).strip()
         if self.book_pose_source not in ("auto", "marker", "eef_fixed"):
             raise ValueError("book_pose_source must be auto, marker, or eef_fixed.")
 
@@ -198,6 +201,7 @@ class PolicyObservationAdapterNode(Node):
         self.declare_parameter("use_configured_eef_book_transform", False)
         self.declare_parameter("eef_book_translation_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("eef_book_quaternion_xyzw", [0.0, 0.0, 0.0, 1.0])
+        self.declare_parameter("eef_book_transform_status", "unconfigured")
 
         self.declare_parameter("rear_to_mouth_obs_scale", 0.08)
         self.declare_parameter("front_to_back_obs_scale", 0.08)
@@ -474,6 +478,7 @@ class PolicyObservationAdapterNode(Node):
             "shadow_only": True,
             "mode": _MODE_NAMES[self.mode],
             "book_pose_source": book_source,
+            "eef_book_transform_status": self.eef_book_transform_status,
             "slot_width_m": self.latest_slot_width,
             "slot_confidence": self.latest_confidence,
             "raw_metrics": {

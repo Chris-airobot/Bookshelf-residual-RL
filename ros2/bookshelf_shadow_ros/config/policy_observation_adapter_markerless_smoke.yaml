@@ -1,19 +1,19 @@
-# Read-only adapter configuration. This package never commands the robot.
+# Markerless integration configuration. This package never commands the robot.
+#
+# The fixed link_eef-to-book transform below is an approximate smoke-test value.
+# Calibrate it before treating the resulting observation as geometrically exact.
 policy_observation_adapter:
   ros__parameters:
-    # Read-only real-robot frames confirmed by the 2026-07-27 AU audit.
     base_frame: link_base
     ee_frame: link_eef
     target_book_frame: target_book_center
 
-    # Prefer the marker pose. During INSERT only, a marker observation can latch
-    # the rigid EEF-to-book relationship and bridge later marker occlusion.
-    book_pose_source: auto
-    latch_eef_book_from_marker: true
-    use_configured_eef_book_transform: false
-    eef_book_translation_xyz: [0.0, 0.0, 0.0]
+    book_pose_source: eef_fixed
+    latch_eef_book_from_marker: false
+    use_configured_eef_book_transform: true
+    eef_book_translation_xyz: [0.0, 0.0, 0.075]
     eef_book_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]
-    eef_book_transform_status: unconfigured
+    eef_book_transform_status: approximate_smoke_only
 
     slot_pose_topic: /slot_detector/slot_pose
     slot_width_topic: /slot_detector/slot_width
@@ -28,25 +28,18 @@ policy_observation_adapter:
     book_pose_base_topic: /bookshelf_policy/book_pose_base
     debug_topic: /bookshelf_policy/adapter_debug
 
-    # ROS target_book_center uses local X=depth, Y=thickness, Z=height.
     book_size_xyz: [0.156, 0.034, 0.236]
     slot_depth_m: 0.20
-
-    # The detector origin is the fitted mouth-plane centre. Calibrate these
-    # offsets only after comparing slot_pose_base against the physical shelf.
     slot_target_offset_xyz: [0.0, 0.0, 0.0]
     tool_offset_xyz: [0.0, 0.0, 0.0]
     minimum_slot_width_m: 0.020
     maximum_slot_width_m: 0.090
     minimum_confidence: 0.60
 
-    # xArm gripper semantics from the AU /joint_states audit:
-    # drive_joint=0.0 is open and approximately 0.85 is closed.
     gripper_joint_name: drive_joint
     gripper_open_joint_position: 0.0
     gripper_closed_joint_position: 0.85
 
-    # These are the exact pre-VecNormalize scales used by the trained task.
     rear_to_mouth_obs_scale: 0.08
     front_to_back_obs_scale: 0.08
     lat_err_obs_scale: 0.05

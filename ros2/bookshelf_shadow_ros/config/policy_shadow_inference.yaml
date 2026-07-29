@@ -1,0 +1,50 @@
+policy_shadow_inference:
+  ros__parameters:
+    deterministic: true
+    inference_rate_hz: 20.0
+    message_max_age_s: 0.50
+    pair_max_skew_s: 0.10
+
+    observation_topic: /bookshelf_policy/observation_12d
+    raw_metrics_topic: /bookshelf_policy/raw_metrics
+    observation_valid_topic: /bookshelf_policy/observation_valid
+
+    # Deliberately isolated from every robot command namespace.
+    inference_valid_topic: /bookshelf_shadow/inference_valid
+    policy_action_topic: /bookshelf_shadow/residual_policy_action
+    residual_delta_topic: /bookshelf_shadow/residual_delta
+    nominal_delta_topic: /bookshelf_shadow/nominal_delta
+    final_delta_topic: /bookshelf_shadow/final_delta
+    debug_topic: /bookshelf_shadow/policy_debug
+
+    # Exact scales from Bookshelf-Residual-Direct-v0.
+    dx_action_scale: 0.0020
+    dy_action_scale: 0.0010
+    dz_action_scale: 0.0015
+    dyaw_action_scale: 0.006108652381980153
+    dpitch_action_scale: 0.005235987755982988
+    release_threshold: 0.5
+
+    nominal_insert_dx: 0.0010
+    nominal_insert_dx_near_mouth: 0.0007
+    nominal_lateral_gain: 0.25
+    nominal_height_gain: 0.18
+    nominal_insert_z_offset: 0.006
+    nominal_yaw_gain: 0.14
+    nominal_pitch_gain: 0.020
+    nominal_align_lat_thresh: 0.006
+    nominal_align_z_thresh: 0.010
+    nominal_align_yaw_thresh: 0.10471975511965978
+    nominal_align_tilt_x_thresh: 0.10
+    nominal_unaligned_dx_scale: 0.0
+    nominal_dy_limit: 0.0015
+    nominal_dz_limit: 0.0018
+    nominal_dyaw_limit: 0.006108652381980153
+    nominal_dpitch_limit: 0.004363323129985824
+    nominal_slow_rear_to_mouth: -0.035
+
+    final_dx_limit: 0.0080
+    final_dy_limit: 0.0030
+    final_dz_limit: 0.0070
+    final_dyaw_limit: 0.013962634015954637
+    final_dpitch_limit: 0.010471975511965976
