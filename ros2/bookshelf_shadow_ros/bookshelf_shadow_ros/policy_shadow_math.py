@@ -73,6 +73,51 @@ def _vector(value, expected_size: int, name: str) -> np.ndarray:
     return array
 
 
+def validate_shadow_inputs(
+    observation,
+    raw_metrics,
+    *,
+    observation_valid: bool,
+    valid_age_s,
+    observation_age_s,
+    raw_metrics_age_s,
+    pair_skew_s,
+    maximum_age_s=0.50,
+    maximum_pair_skew_s=0.10,
+) -> str | None:
+    """Validate paired shadow-inference inputs without running the actor."""
+
+    if not observation_valid:
+        return "upstream observation_valid is false"
+    if maximum_age_s > 0.0:
+        if valid_age_s is None or valid_age_s > maximum_age_s:
+            return "observation_valid message is stale"
+        if observation_age_s is None or observation_age_s > maximum_age_s:
+            return "12D observation is missing or stale"
+        if raw_metrics_age_s is None or raw_metrics_age_s > maximum_age_s:
+            return "raw metrics are missing or stale"
+
+    if observation is None:
+        return "12D observation is missing or stale"
+    if raw_metrics is None:
+        return "raw metrics are missing or stale"
+    observation = np.asarray(observation, dtype=np.float32)
+    raw_metrics = np.asarray(raw_metrics, dtype=np.float32)
+    if observation.shape != (POLICY_OBSERVATION_SIZE,):
+        return f"expected 12D observation, got {observation.shape}"
+    if raw_metrics.shape != (POLICY_OBSERVATION_SIZE,):
+        return f"expected 12D raw metrics, got {raw_metrics.shape}"
+    if not np.all(np.isfinite(observation)):
+        return "12D observation contains non-finite values"
+    if not np.all(np.isfinite(raw_metrics)):
+        return "raw metrics contain non-finite values"
+    if pair_skew_s is None or not math.isfinite(float(pair_skew_s)):
+        return "observation/raw metric skew is non-finite"
+    if float(pair_skew_s) > maximum_pair_skew_s:
+        return f"observation/raw metric skew is {float(pair_skew_s):.3f} s"
+    return None
+
+
 def compute_insert_nominal_delta(
     raw_metrics,
     config: NominalInsertConfig = NominalInsertConfig(),
