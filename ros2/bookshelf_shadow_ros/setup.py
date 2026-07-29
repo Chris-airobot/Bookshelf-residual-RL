@@ -31,6 +31,10 @@ setup(
             "bookshelf_shadow_ros.policy_shadow_inference_node:main",
             "rgbd_slot_detector = bookshelf_shadow_ros.rgbd_slot_detector:main",
             "sim_rgb_camera_viewer = bookshelf_shadow_ros.sim_rgb_camera_viewer:main",
+            "slot_detection_audit = "
+            "bookshelf_shadow_ros.slot_detection_audit_node:main",
+            "policy_stream_audit = "
+            "bookshelf_shadow_ros.policy_stream_audit_node:main",
         ],
     },
 )

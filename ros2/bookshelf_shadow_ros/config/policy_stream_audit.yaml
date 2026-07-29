@@ -1,0 +1,25 @@
+# Subscriber-only audit of the complete perception-to-policy shadow stream.
+policy_stream_audit:
+  ros__parameters:
+    confidence_topic: /slot_detector/confidence
+    slot_width_topic: /slot_detector/slot_width
+    slot_pose_base_topic: /bookshelf_policy/slot_pose_base
+    book_pose_base_topic: /bookshelf_policy/book_pose_base
+    raw_metrics_topic: /bookshelf_policy/raw_metrics
+    observation_topic: /bookshelf_policy/observation_12d
+    observation_valid_topic: /bookshelf_policy/observation_valid
+    adapter_debug_topic: /bookshelf_policy/adapter_debug
+    inference_valid_topic: /bookshelf_shadow/inference_valid
+    policy_action_topic: /bookshelf_shadow/residual_policy_action
+    nominal_delta_topic: /bookshelf_shadow/nominal_delta
+    residual_delta_topic: /bookshelf_shadow/residual_delta
+    final_delta_topic: /bookshelf_shadow/final_delta
+    policy_debug_topic: /bookshelf_shadow/policy_debug
+
+    expected_base_frame: link_base
+    pair_max_age_s: 0.20
+    target_samples: 1200
+
+    # Set this after one manual measurement. Zero means no physical ground truth.
+    reference_slot_width_m: 0.0
+    output_dir: /tmp/bookshelf_policy_stream_audit

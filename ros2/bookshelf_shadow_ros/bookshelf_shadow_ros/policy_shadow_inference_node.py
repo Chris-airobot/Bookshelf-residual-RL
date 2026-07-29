@@ -19,6 +19,7 @@ from .policy_shadow_math import (
     combine_motion_delta,
     compute_insert_nominal_delta,
     scale_residual_action,
+    validate_shadow_inputs,
 )
 
 
@@ -231,27 +232,27 @@ class PolicyShadowInferenceNode(Node):
         return (self._now_ns() - timestamp_ns) * 1.0e-9 <= maximum_age
 
     def _input_error(self):
-        if not self.observation_valid:
-            return "upstream observation_valid is false"
-        if not self._fresh(self.latest_valid_ns):
-            return "observation_valid message is stale"
-        if not self._fresh(self.latest_observation_ns):
-            return "12D observation is missing or stale"
-        if not self._fresh(self.latest_raw_metrics_ns):
-            return "raw metrics are missing or stale"
-        if self.latest_observation.shape != (POLICY_OBSERVATION_SIZE,):
-            return f"expected 12D observation, got {self.latest_observation.shape}"
-        if self.latest_raw_metrics.shape != (POLICY_OBSERVATION_SIZE,):
-            return f"expected 12D raw metrics, got {self.latest_raw_metrics.shape}"
-        if not np.all(np.isfinite(self.latest_observation)):
-            return "12D observation contains non-finite values"
-        if not np.all(np.isfinite(self.latest_raw_metrics)):
-            return "raw metrics contain non-finite values"
+        now_ns = self._now_ns()
 
-        skew = abs(self.latest_observation_ns - self.latest_raw_metrics_ns) * 1.0e-9
-        if skew > float(self.get_parameter("pair_max_skew_s").value):
-            return f"observation/raw metric skew is {skew:.3f} s"
-        return None
+        def age(timestamp_ns):
+            if timestamp_ns is None:
+                return None
+            return (now_ns - timestamp_ns) * 1.0e-9
+
+        skew = None
+        if self.latest_observation_ns is not None and self.latest_raw_metrics_ns is not None:
+            skew = abs(self.latest_observation_ns - self.latest_raw_metrics_ns) * 1.0e-9
+        return validate_shadow_inputs(
+            self.latest_observation,
+            self.latest_raw_metrics,
+            observation_valid=self.observation_valid,
+            valid_age_s=age(self.latest_valid_ns),
+            observation_age_s=age(self.latest_observation_ns),
+            raw_metrics_age_s=age(self.latest_raw_metrics_ns),
+            pair_skew_s=skew,
+            maximum_age_s=float(self.get_parameter("message_max_age_s").value),
+            maximum_pair_skew_s=float(self.get_parameter("pair_max_skew_s").value),
+        )
 
     def _timer_callback(self):
         error = self._input_error()

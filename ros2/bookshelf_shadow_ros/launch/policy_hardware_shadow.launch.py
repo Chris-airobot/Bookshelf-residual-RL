@@ -2,8 +2,10 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -14,6 +16,9 @@ def generate_launch_description():
     )
     default_inference_config = PathJoinSubstitution(
         [package_share, "config", "policy_shadow_inference.yaml"]
+    )
+    default_audit_config = PathJoinSubstitution(
+        [package_share, "config", "policy_stream_audit.yaml"]
     )
 
     adapter_config_argument = DeclareLaunchArgument(
@@ -29,6 +34,31 @@ def generate_launch_description():
     bundle_argument = DeclareLaunchArgument(
         "policy_bundle",
         description="Verified portable .npz actor and VecNormalize bundle.",
+    )
+    audit_config_argument = DeclareLaunchArgument(
+        "audit_config",
+        default_value=default_audit_config,
+        description="Complete shadow-stream audit parameter file.",
+    )
+    enable_audit_argument = DeclareLaunchArgument(
+        "enable_audit",
+        default_value="true",
+        description="Record the read-only observation and policy stream.",
+    )
+    audit_output_argument = DeclareLaunchArgument(
+        "audit_output_dir",
+        default_value="/tmp/bookshelf_policy_stream_audit",
+        description="Directory for policy stream CSV and JSON reports.",
+    )
+    audit_samples_argument = DeclareLaunchArgument(
+        "audit_samples",
+        default_value="1200",
+        description="Number of policy-debug cycles to audit.",
+    )
+    reference_width_argument = DeclareLaunchArgument(
+        "reference_slot_width_m",
+        default_value="0.0",
+        description="Optional manually measured physical slot width in metres.",
     )
 
     detector = Node(
@@ -62,20 +92,48 @@ def generate_launch_description():
             {"policy_bundle_path": LaunchConfiguration("policy_bundle")},
         ],
     )
+    audit = Node(
+        package="bookshelf_shadow_ros",
+        executable="policy_stream_audit",
+        name="policy_stream_audit",
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("enable_audit")),
+        parameters=[
+            LaunchConfiguration("audit_config"),
+            {
+                "output_dir": LaunchConfiguration("audit_output_dir"),
+                "target_samples": ParameterValue(
+                    LaunchConfiguration("audit_samples"),
+                    value_type=int,
+                ),
+                "reference_slot_width_m": ParameterValue(
+                    LaunchConfiguration("reference_slot_width_m"),
+                    value_type=float,
+                ),
+            },
+        ],
+    )
 
     return LaunchDescription(
         [
             adapter_config_argument,
             inference_config_argument,
             bundle_argument,
+            audit_config_argument,
+            enable_audit_argument,
+            audit_output_argument,
+            audit_samples_argument,
+            reference_width_argument,
             LogInfo(
                 msg=(
                     "Starting FULL SHADOW pipeline: RGB-D detector -> markerless 12D adapter "
-                    "-> VecNormalize -> PPO actor diagnostics. No robot-command node is launched."
+                    "-> VecNormalize -> PPO actor diagnostics -> subscriber-only audit. "
+                    "No robot-command node is launched."
                 )
             ),
             detector,
             adapter,
             inference,
+            audit,
         ]
     )

@@ -21,6 +21,7 @@ from .policy_observation_math import (
     invert_transform,
     make_transform,
     matrix_to_quaternion_xyzw,
+    validate_detector_measurement,
 )
 
 
@@ -391,26 +392,30 @@ class PolicyObservationAdapterNode(Node):
         )
 
     def _validate_detector_values(self):
-        if self.latest_slot_width is None or self.latest_confidence is None:
-            return "waiting for slot width/confidence"
-        if not self._arrival_is_fresh(self.latest_slot_width_arrival_ns):
-            return "slot width callback is stale"
-        if not self._arrival_is_fresh(self.latest_confidence_arrival_ns):
-            return "slot confidence callback is stale"
+        now_ns = self._now_nanoseconds()
+        width_age = (
+            None
+            if self.latest_slot_width_arrival_ns is None
+            else (now_ns - self.latest_slot_width_arrival_ns) * 1.0e-9
+        )
+        confidence_age = (
+            None
+            if self.latest_confidence_arrival_ns is None
+            else (now_ns - self.latest_confidence_arrival_ns) * 1.0e-9
+        )
         minimum_width = float(self.get_parameter("minimum_slot_width_m").value)
         maximum_width = float(self.get_parameter("maximum_slot_width_m").value)
-        if not minimum_width <= self.latest_slot_width <= maximum_width:
-            return (
-                f"slot width {self.latest_slot_width:.4f} m is outside "
-                f"[{minimum_width:.4f}, {maximum_width:.4f}] m"
-            )
         minimum_confidence = float(self.get_parameter("minimum_confidence").value)
-        if self.latest_confidence < minimum_confidence:
-            return (
-                f"slot confidence {self.latest_confidence:.3f} is below "
-                f"{minimum_confidence:.3f}"
-            )
-        return None
+        return validate_detector_measurement(
+            self.latest_slot_width,
+            self.latest_confidence,
+            slot_width_age_s=width_age,
+            confidence_age_s=confidence_age,
+            maximum_age_s=float(self.get_parameter("message_max_age_s").value),
+            minimum_slot_width=minimum_width,
+            maximum_slot_width=maximum_width,
+            minimum_confidence=minimum_confidence,
+        )
 
     def _timer_callback(self):
         if self.mode not in _MODE_OBSERVATIONS:

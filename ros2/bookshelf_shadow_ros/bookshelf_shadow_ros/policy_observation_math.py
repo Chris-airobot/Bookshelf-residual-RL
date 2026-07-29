@@ -21,6 +21,18 @@ OBSERVATION_LABELS = (
     "tilt_y",
 )
 
+# Isaac's cuboid root is (depth, height, thickness). The real-world policy
+# adapter uses the more useful semantic frame (depth, thickness, height).
+# This rotation maps policy-book coordinates into simulator-root coordinates.
+SIMULATOR_ROOT_FROM_POLICY_BOOK_ROTATION = np.array(
+    [
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, -1.0, 0.0],
+    ],
+    dtype=np.float64,
+)
+
 
 @dataclass(frozen=True)
 class ObservationScales:
@@ -124,6 +136,19 @@ def invert_transform(transform) -> np.ndarray:
     return inverse
 
 
+def simulator_root_to_policy_book_transform(transform_slot_simulator_root) -> np.ndarray:
+    """Convert Isaac's cuboid-root pose to the semantic policy-book pose."""
+
+    transform_slot_simulator_root = _validated_transform(
+        transform_slot_simulator_root
+    )
+    transform_simulator_root_policy_book = np.eye(4, dtype=np.float64)
+    transform_simulator_root_policy_book[:3, :3] = (
+        SIMULATOR_ROOT_FROM_POLICY_BOOK_ROTATION
+    )
+    return transform_slot_simulator_root @ transform_simulator_root_policy_book
+
+
 def _validated_transform(transform) -> np.ndarray:
     transform = np.asarray(transform, dtype=np.float64)
     if transform.shape != (4, 4):
@@ -160,6 +185,48 @@ def _book_corners_in_slot(transform_slot_book: np.ndarray, book_size) -> np.ndar
 
 def wrap_to_pi(angle: float) -> float:
     return (float(angle) + math.pi) % (2.0 * math.pi) - math.pi
+
+
+def validate_detector_measurement(
+    slot_width,
+    confidence,
+    *,
+    slot_width_age_s=0.0,
+    confidence_age_s=0.0,
+    maximum_age_s=0.50,
+    minimum_slot_width=0.020,
+    maximum_slot_width=0.090,
+    minimum_confidence=0.60,
+) -> str | None:
+    """Return a fail-closed reason for invalid slot-detector scalar outputs."""
+
+    if slot_width is None or confidence is None:
+        return "waiting for slot width/confidence"
+    if maximum_age_s > 0.0:
+        if slot_width_age_s is None or slot_width_age_s > maximum_age_s:
+            return "slot width callback is stale"
+        if confidence_age_s is None or confidence_age_s > maximum_age_s:
+            return "slot confidence callback is stale"
+
+    slot_width = float(slot_width)
+    confidence = float(confidence)
+    if not math.isfinite(slot_width):
+        return "slot width is non-finite"
+    if not math.isfinite(confidence):
+        return "slot confidence is non-finite"
+    if minimum_slot_width > maximum_slot_width:
+        return "slot width limits are invalid"
+    if not minimum_slot_width <= slot_width <= maximum_slot_width:
+        return (
+            f"slot width {slot_width:.4f} m is outside "
+            f"[{minimum_slot_width:.4f}, {maximum_slot_width:.4f}] m"
+        )
+    if confidence < minimum_confidence:
+        return (
+            f"slot confidence {confidence:.3f} is below "
+            f"{minimum_confidence:.3f}"
+        )
+    return None
 
 
 def compute_policy_observation(
