@@ -20,6 +20,28 @@ def test_plan_checker_source_has_no_execution_client():
         assert token not in source
 
 
+def test_plan_checker_reports_frame_chain_on_workspace_rejection():
+    source = (
+        Path(__file__).parents[1]
+        / "bookshelf_guarded_control_ros"
+        / "policy_tool_planner_base.py"
+    ).read_text(encoding="utf-8")
+    required_diagnostics = (
+        '"runtime_source_file"',
+        '"slot_pose_base"',
+        '"current_tcp_base"',
+        '"current_policy_tool_base"',
+        '"current_policy_tool_slot"',
+        '"target_policy_tool_slot"',
+        '"target_policy_tool_base"',
+        '"target_tcp_base"',
+        '"tcp_policy_tool"',
+        "self._publish_invalid(error, report=report)",
+    )
+    for token in required_diagnostics:
+        assert token in source
+
+
 def test_committed_executor_configuration_is_non_executable():
     config = (
         Path(__file__).parents[1]

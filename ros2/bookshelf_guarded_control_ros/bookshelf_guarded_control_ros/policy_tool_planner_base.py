@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import math
+from pathlib import Path
 
 from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.msg import (
@@ -425,6 +426,7 @@ class PolicyToolPlannerBase(Node):
                 self.latest_delta,
                 command_scale=float(self.get_parameter("command_scale").value),
             )
+            report = self._base_report(target)
             error = target_safety_error(
                 target,
                 self.latest_delta,
@@ -434,7 +436,7 @@ class PolicyToolPlannerBase(Node):
             self._publish_invalid(f"target geometry error: {exception}")
             return
         if error:
-            self._publish_invalid(error)
+            self._publish_invalid(error, report=report)
             return
 
         self._publish_target_poses(target)
@@ -447,7 +449,7 @@ class PolicyToolPlannerBase(Node):
 
         request = self._motion_plan_request(target)
         self.pending_target = target
-        self.pending_report = self._base_report(target)
+        self.pending_report = report
         self.plan_pending = True
         self.last_requested_target_id = target.target_id
         future = self.plan_client.call_async(request)
@@ -590,11 +592,31 @@ class PolicyToolPlannerBase(Node):
             "hardware_commanded": False,
             "gripper_command_interface": False,
             "target_id": target.target_id,
+            "runtime_source_file": str(Path(__file__).resolve()),
+            "base_frame": self.base_frame,
+            "tcp_frame": self.tcp_frame,
             "command_scale": float(self.get_parameter("command_scale").value),
             "unscaled_delta": [float(value) for value in self.latest_delta],
             "scaled_delta": [float(value) for value in target.scaled_delta],
             "tcp_translation_step_m": target.tcp_translation_step_m,
             "tcp_rotation_step_deg": math.degrees(target.tcp_rotation_step_rad),
+            "slot_pose_base": transform_to_dict(
+                _pose_to_transform(self.latest_slot_pose.pose)
+            ),
+            "current_tcp_base": transform_to_dict(
+                target.transform_base_policy_tool_current
+                @ np.linalg.inv(self._tool_transform())
+            ),
+            "current_policy_tool_base": transform_to_dict(
+                target.transform_base_policy_tool_current
+            ),
+            "current_policy_tool_slot": transform_to_dict(
+                target.transform_slot_policy_tool_current
+            ),
+            "target_policy_tool_slot": transform_to_dict(
+                target.transform_slot_policy_tool_target
+            ),
+            "tcp_policy_tool": transform_to_dict(self._tool_transform()),
             "target_policy_tool_base": transform_to_dict(
                 target.transform_base_policy_tool_target
             ),

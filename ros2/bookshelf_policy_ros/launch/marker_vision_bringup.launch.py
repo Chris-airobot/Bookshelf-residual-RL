@@ -1,20 +1,30 @@
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    IncludeLaunchDescription,
+    LogInfo,
+    TimerAction,
+)
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
 
 
 BOOK_QXYZW = [0.5, 0.5, -0.5, 0.5]
 
 
-def marker_to_book_center_tf(name, parent_frame, child_frame, xyz):
+def marker_to_book_center_tf(name, parent_frame, child_frame, xyz, condition=None):
     return Node(
         package="tf2_ros",
         executable="static_transform_publisher",
         name=name,
         output="screen",
+        condition=condition,
         arguments=[
             "--x", str(xyz[0]),
             "--y", str(xyz[1]),
@@ -37,10 +47,72 @@ def generate_launch_description():
     camera_launch = launch_dir / "camera_setup.launch.py"
     handeye_tf_launch = launch_dir / "publish_handeye_camera_link.launch.py"
     aruco_script = pkg_dir / "scripts" / "multi_aruco_tf_pub.py"
+    legacy_condition = IfCondition(
+        LaunchConfiguration("enable_legacy_three_book_detection")
+    )
+    calibrated_condition = IfCondition(
+        LaunchConfiguration("enable_calibrated_book_detection")
+    )
+    robot_condition = IfCondition(LaunchConfiguration("enable_robot_control"))
+
+    calibrated_book_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution(
+                [
+                    FindPackageShare("bookshelf_shadow_ros"),
+                    "launch",
+                    "marker_book_bag_calibration.launch.py",
+                ]
+            )
+        ),
+        condition=calibrated_condition,
+        launch_arguments={
+            "output_dir": LaunchConfiguration("calibration_output_dir"),
+            "target_samples": LaunchConfiguration("calibration_target_samples"),
+            # The real-xArm bringup owns the single old-style MoveIt RViz.
+            "enable_rviz": "false",
+        }.items(),
+    )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            "enable_robot_control",
+            default_value="true",
+            description=(
+                "Start the existing real-xArm MoveIt and manual planner bringup. "
+                "This does not start the bookshelf policy executor."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "enable_calibrated_book_detection",
+            default_value="true",
+            description="Detect calibrated ArUco Original ID 0 on the held book.",
+        ),
+        DeclareLaunchArgument(
+            "enable_legacy_three_book_detection",
+            default_value="false",
+            description=(
+                "Enable the old ID 0/1/2 shelf-book detector. Keep false while "
+                "using calibrated held-book ID 0 detection."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "calibration_output_dir",
+            default_value="/tmp/bookshelf_marker_book_live_check",
+        ),
+        DeclareLaunchArgument(
+            "calibration_target_samples",
+            default_value="250",
+        ),
+        LogInfo(
+            msg=(
+                "Starting marker vision, calibrated book RViz, and optional "
+                "manual xArm/MoveIt bringup. No bookshelf policy executor is launched."
+            )
+        ),
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(str(robot_launch))
+            PythonLaunchDescriptionSource(str(robot_launch)),
+            condition=robot_condition,
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(camera_launch))
@@ -48,29 +120,34 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(handeye_tf_launch))
         ),
+        calibrated_book_launch,
         marker_to_book_center_tf(
             "target_book_center_static_tf",
             "target_book_marker",
             "target_book_center",
             [0.0, -0.097, -0.078],
+            condition=legacy_condition,
         ),
         marker_to_book_center_tf(
             "left_side_book_center_static_tf",
             "left_side_book_marker",
             "left_side_book_center",
             [0.0, 0.0, -0.0895],
+            condition=legacy_condition,
         ),
         marker_to_book_center_tf(
             "right_side_book_center_static_tf",
             "right_side_book_marker",
             "right_side_book_center",
             [0.0, 0.0, -0.0895],
+            condition=legacy_condition,
         ),
         Node(
             package="bookshelf_policy_ros",
             executable="book_center_tf_node",
             name="book_center_tf_node",
             output="screen",
+            condition=legacy_condition,
             arguments=[
                 "--target_marker_frame", "target_book_marker",
                 "--left_marker_frame", "left_side_book_marker",
@@ -106,6 +183,7 @@ def generate_launch_description():
         ),
         TimerAction(
             period=3.0,
+            condition=legacy_condition,
             actions=[
                 ExecuteProcess(
                     cmd=[
