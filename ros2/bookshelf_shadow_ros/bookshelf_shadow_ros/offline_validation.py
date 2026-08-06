@@ -174,6 +174,9 @@ class PolicyStreamAuditAccumulator:
         self.invalid_reasons = {}
         self.book_pose_sources = {}
         self.eef_book_transform_statuses = {}
+        self.policy_tool_transform_statuses = {}
+        self.slot_pose_sources = {}
+        self.static_slot_transform_statuses = {}
 
     def add_invalid(self, reason):
         reason = str(reason or "unspecified")
@@ -196,6 +199,9 @@ class PolicyStreamAuditAccumulator:
         final_delta,
         book_pose_source,
         eef_book_transform_status,
+        slot_pose_source="unknown",
+        static_slot_transform_status="unknown",
+        policy_tool_transform_status="unknown",
     ):
         vectors = {
             "slot_position": (slot_position, 3),
@@ -256,6 +262,13 @@ class PolicyStreamAuditAccumulator:
             "eef_book_transform_status": str(
                 eef_book_transform_status or "unknown"
             ),
+            "policy_tool_transform_status": str(
+                policy_tool_transform_status or "unknown"
+            ),
+            "slot_pose_source": str(slot_pose_source or "unknown"),
+            "static_slot_transform_status": str(
+                static_slot_transform_status or "unknown"
+            ),
         }
         self.rows.append(row)
         source = row["book_pose_source"]
@@ -263,6 +276,18 @@ class PolicyStreamAuditAccumulator:
         self.book_pose_sources[source] = self.book_pose_sources.get(source, 0) + 1
         self.eef_book_transform_statuses[status] = (
             self.eef_book_transform_statuses.get(status, 0) + 1
+        )
+        tool_status = row["policy_tool_transform_status"]
+        self.policy_tool_transform_statuses[tool_status] = (
+            self.policy_tool_transform_statuses.get(tool_status, 0) + 1
+        )
+        slot_source = row["slot_pose_source"]
+        slot_status = row["static_slot_transform_status"]
+        self.slot_pose_sources[slot_source] = (
+            self.slot_pose_sources.get(slot_source, 0) + 1
+        )
+        self.static_slot_transform_statuses[slot_status] = (
+            self.static_slot_transform_statuses.get(slot_status, 0) + 1
         )
         return True
 
@@ -279,6 +304,13 @@ class PolicyStreamAuditAccumulator:
             "book_pose_sources": dict(sorted(self.book_pose_sources.items())),
             "eef_book_transform_statuses": dict(
                 sorted(self.eef_book_transform_statuses.items())
+            ),
+            "policy_tool_transform_statuses": dict(
+                sorted(self.policy_tool_transform_statuses.items())
+            ),
+            "slot_pose_sources": dict(sorted(self.slot_pose_sources.items())),
+            "static_slot_transform_statuses": dict(
+                sorted(self.static_slot_transform_statuses.items())
             ),
             "reference_slot_width_m": (
                 self.reference_slot_width_m
@@ -354,8 +386,15 @@ class PolicyStreamAuditAccumulator:
                 "confidence": row["confidence"],
                 "slot_width_m": row["slot_width_m"],
                 "book_pose_source": row["book_pose_source"],
+                "slot_pose_source": row["slot_pose_source"],
+                "static_slot_transform_status": row[
+                    "static_slot_transform_status"
+                ],
                 "eef_book_transform_status": row[
                     "eef_book_transform_status"
+                ],
+                "policy_tool_transform_status": row[
+                    "policy_tool_transform_status"
                 ],
             }
             for prefix in ("slot_position", "book_position"):

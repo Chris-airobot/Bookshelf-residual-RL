@@ -74,11 +74,52 @@ class PolicyObservationAdapterNode(Node):
         self.ee_frame = str(self.get_parameter("ee_frame").value)
         self.target_book_frame = str(self.get_parameter("target_book_frame").value)
         self.book_pose_source = str(self.get_parameter("book_pose_source").value).strip().lower()
+        self.slot_pose_source = str(self.get_parameter("slot_pose_source").value).strip().lower()
         self.eef_book_transform_status = str(
             self.get_parameter("eef_book_transform_status").value
         ).strip()
+        self.policy_tool_transform_status = str(
+            self.get_parameter("policy_tool_transform_status").value
+        ).strip()
+        self.static_slot_transform_status = str(
+            self.get_parameter("static_slot_transform_status").value
+        ).strip()
         if self.book_pose_source not in ("auto", "marker", "eef_fixed"):
             raise ValueError("book_pose_source must be auto, marker, or eef_fixed.")
+        if self.slot_pose_source not in ("live", "configured_static"):
+            raise ValueError("slot_pose_source must be live or configured_static.")
+        if (
+            self.slot_pose_source == "configured_static"
+            and not bool(self.get_parameter("allow_configured_static_slot").value)
+        ):
+            raise ValueError(
+                "configured_static slot source requires allow_configured_static_slot=true."
+            )
+        if (
+            self.slot_pose_source == "configured_static"
+            and self.static_slot_transform_status.lower()
+            in ("", "unknown", "unconfigured")
+        ):
+            raise ValueError(
+                "configured_static slot source requires an explicit "
+                "static_slot_transform_status."
+            )
+        if (
+            bool(self.get_parameter("use_configured_eef_book_transform").value)
+            and self.eef_book_transform_status.lower()
+            in ("", "unknown", "unconfigured")
+        ):
+            raise ValueError(
+                "A configured EEF-to-book transform requires an explicit "
+                "eef_book_transform_status."
+            )
+        if bool(self.get_parameter("require_verified_policy_tool_transform").value):
+            status = self.policy_tool_transform_status.lower()
+            if not status.startswith(("verified_", "validated_")):
+                self.get_logger().warning(
+                    "Policy observations will fail closed until the policy-tool "
+                    f"transform is verified; current status={self.policy_tool_transform_status}"
+                )
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -166,12 +207,17 @@ class PolicyObservationAdapterNode(Node):
             f"Book source={self.book_pose_source}, base={self.base_frame}, "
             f"tool={self.ee_frame}, target_book={self.target_book_frame}"
         )
+        self.get_logger().info(
+            f"Slot source={self.slot_pose_source}, "
+            f"status={self.static_slot_transform_status}"
+        )
 
     def _declare_parameters(self):
         self.declare_parameter("base_frame", "link_base")
         self.declare_parameter("ee_frame", "link_eef")
         self.declare_parameter("target_book_frame", "target_book_center")
         self.declare_parameter("book_pose_source", "auto")
+        self.declare_parameter("slot_pose_source", "live")
         self.declare_parameter("default_mode", 0)
 
         self.declare_parameter("slot_pose_topic", "/slot_detector/slot_pose")
@@ -189,7 +235,18 @@ class PolicyObservationAdapterNode(Node):
         self.declare_parameter("book_size_xyz", [0.156, 0.034, 0.236])
         self.declare_parameter("slot_depth_m", 0.20)
         self.declare_parameter("slot_target_offset_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter("allow_configured_static_slot", False)
+        self.declare_parameter("configured_static_slot_translation_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter(
+            "configured_static_slot_quaternion_xyzw", [0.0, 0.0, 0.0, 1.0]
+        )
+        self.declare_parameter("configured_static_slot_width_m", 0.0)
+        self.declare_parameter("configured_static_slot_confidence", 0.0)
+        self.declare_parameter("static_slot_transform_status", "unconfigured")
         self.declare_parameter("tool_offset_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter("tool_offset_quaternion_xyzw", [0.0, 0.0, 0.0, 1.0])
+        self.declare_parameter("policy_tool_transform_status", "unconfigured")
+        self.declare_parameter("require_verified_policy_tool_transform", False)
         self.declare_parameter("minimum_slot_width_m", 0.020)
         self.declare_parameter("maximum_slot_width_m", 0.090)
         self.declare_parameter("minimum_confidence", 0.60)
@@ -287,6 +344,20 @@ class PolicyObservationAdapterNode(Node):
         return _transform_message_to_matrix(message), None
 
     def _slot_transform_in_base(self):
+        if self.slot_pose_source == "configured_static":
+            if not bool(self.get_parameter("allow_configured_static_slot").value):
+                return None, "configured static slot is not explicitly allowed"
+            transform_base_slot = make_transform(
+                self._three_vector_parameter(
+                    "configured_static_slot_translation_xyz"
+                ),
+                self._four_vector_parameter(
+                    "configured_static_slot_quaternion_xyzw"
+                ),
+            )
+            offset = self._three_vector_parameter("slot_target_offset_xyz")
+            return transform_base_slot @ make_transform(offset), None
+
         if self.latest_slot_pose is None:
             return None, "waiting for slot pose"
         if not self._arrival_is_fresh(self.latest_slot_arrival_ns):
@@ -391,7 +462,30 @@ class PolicyObservationAdapterNode(Node):
             tool_to_book=float(self.get_parameter("tool_to_book_obs_scale").value),
         )
 
-    def _validate_detector_values(self):
+    def _slot_measurement(self):
+        if self.slot_pose_source == "configured_static":
+            width = float(
+                self.get_parameter("configured_static_slot_width_m").value
+            )
+            confidence = float(
+                self.get_parameter("configured_static_slot_confidence").value
+            )
+            error = validate_detector_measurement(
+                width,
+                confidence,
+                maximum_age_s=0.0,
+                minimum_slot_width=float(
+                    self.get_parameter("minimum_slot_width_m").value
+                ),
+                maximum_slot_width=float(
+                    self.get_parameter("maximum_slot_width_m").value
+                ),
+                minimum_confidence=float(
+                    self.get_parameter("minimum_confidence").value
+                ),
+            )
+            return width, confidence, error
+
         now_ns = self._now_nanoseconds()
         width_age = (
             None
@@ -406,7 +500,7 @@ class PolicyObservationAdapterNode(Node):
         minimum_width = float(self.get_parameter("minimum_slot_width_m").value)
         maximum_width = float(self.get_parameter("maximum_slot_width_m").value)
         minimum_confidence = float(self.get_parameter("minimum_confidence").value)
-        return validate_detector_measurement(
+        error = validate_detector_measurement(
             self.latest_slot_width,
             self.latest_confidence,
             slot_width_age_s=width_age,
@@ -416,15 +510,25 @@ class PolicyObservationAdapterNode(Node):
             maximum_slot_width=maximum_width,
             minimum_confidence=minimum_confidence,
         )
+        return self.latest_slot_width, self.latest_confidence, error
 
     def _timer_callback(self):
         if self.mode not in _MODE_OBSERVATIONS:
             self._publish_invalid(f"invalid mode {self.mode}")
             return
 
-        detector_error = self._validate_detector_values()
-        if detector_error:
-            self._publish_invalid(detector_error)
+        if bool(self.get_parameter("require_verified_policy_tool_transform").value):
+            status = self.policy_tool_transform_status.lower()
+            if not status.startswith(("verified_", "validated_")):
+                self._publish_invalid(
+                    "policy-tool transform is not verified: "
+                    f"{self.policy_tool_transform_status}"
+                )
+                return
+
+        slot_width, slot_confidence, slot_error = self._slot_measurement()
+        if slot_error:
+            self._publish_invalid(slot_error)
             return
 
         transform_base_slot, error = self._slot_transform_in_base()
@@ -448,7 +552,12 @@ class PolicyObservationAdapterNode(Node):
             return
 
         tool_offset = self._three_vector_parameter("tool_offset_xyz")
-        transform_base_tool = transform_base_eef @ make_transform(tool_offset)
+        tool_quaternion = self._four_vector_parameter(
+            "tool_offset_quaternion_xyzw"
+        )
+        transform_base_tool = transform_base_eef @ make_transform(
+            tool_offset, tool_quaternion
+        )
         transform_slot_base = invert_transform(transform_base_slot)
         transform_slot_book = transform_slot_base @ transform_base_book
         transform_slot_tool = transform_slot_base @ transform_base_tool
@@ -482,10 +591,13 @@ class PolicyObservationAdapterNode(Node):
             "valid": True,
             "shadow_only": True,
             "mode": _MODE_NAMES[self.mode],
+            "slot_pose_source": self.slot_pose_source,
+            "static_slot_transform_status": self.static_slot_transform_status,
             "book_pose_source": book_source,
             "eef_book_transform_status": self.eef_book_transform_status,
-            "slot_width_m": self.latest_slot_width,
-            "slot_confidence": self.latest_confidence,
+            "policy_tool_transform_status": self.policy_tool_transform_status,
+            "slot_width_m": slot_width,
+            "slot_confidence": slot_confidence,
             "raw_metrics": {
                 label: round(float(value), 7)
                 for label, value in zip(OBSERVATION_LABELS, raw)
@@ -510,8 +622,8 @@ class PolicyObservationAdapterNode(Node):
         self._log_status_once(
             f"valid:{book_source}",
             f"Valid 12D observation using {book_source}; "
-            f"slot={self.latest_slot_width * 1000.0:.1f} mm, "
-            f"confidence={self.latest_confidence:.2f}",
+            f"slot={slot_width * 1000.0:.1f} mm, "
+            f"confidence={slot_confidence:.2f}, source={self.slot_pose_source}",
         )
 
     def _publish_invalid(self, reason: str):
@@ -520,6 +632,11 @@ class PolicyObservationAdapterNode(Node):
             "valid": False,
             "shadow_only": True,
             "mode": _MODE_NAMES.get(self.mode, "invalid"),
+            "slot_pose_source": self.slot_pose_source,
+            "static_slot_transform_status": self.static_slot_transform_status,
+            "book_pose_source": self.book_pose_source,
+            "eef_book_transform_status": self.eef_book_transform_status,
+            "policy_tool_transform_status": self.policy_tool_transform_status,
             "reason": reason,
             "vecnormalize_applied": False,
         }

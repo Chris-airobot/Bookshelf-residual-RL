@@ -1,0 +1,46 @@
+# Subscriber-only audit of xArm gripper TF candidates against the simulator's
+# policy-tool-to-book distance. Candidate ranking never authorizes selection.
+policy_tool_frame_audit:
+  ros__parameters:
+    ee_frame: link_eef
+    eef_book_translation_xyz:
+      - 0.008124357683356356
+      - -0.010156856549182705
+      - 0.12425871757162561
+    eef_book_quaternion_xyzw:
+      - 0.47569361268145194
+      - 0.46802866719711034
+      - 0.5317004002617697
+      - 0.5214973038254745
+    eef_book_transform_status: measured_aruco_original_id0_static_grasp
+
+    # Source values: ik_body_offset_pos.z and book_grasp_offset_hand.z.
+    sim_hand_to_tool_m: 0.107
+    sim_hand_to_book_m: 0.075
+    training_tool_to_book_norm_min_m: 0.020
+    training_tool_to_book_norm_max_m: 0.050
+
+    candidate_frames:
+      - link_eef
+      - link_tcp
+      - xarm_gripper_base_link
+      - left_finger
+      - right_finger
+      - left_finger_link
+      - right_finger_link
+      - left_inner_finger
+      - right_inner_finger
+      - left_inner_finger_link
+      - right_inner_finger_link
+    midpoint_pairs:
+      - left_finger,right_finger
+      - left_finger_link,right_finger_link
+      - left_inner_finger,right_inner_finger
+      - left_inner_finger_link,right_inner_finger_link
+    discover_gripper_frames: true
+    tf_lookup_timeout_s: 0.03
+    tf_max_age_s: 0.50
+    audit_rate_hz: 1.0
+    output_dir: /tmp/bookshelf_policy_tool_audit
+    valid_topic: /bookshelf_shadow/policy_tool_audit_valid
+    debug_topic: /bookshelf_shadow/policy_tool_audit_debug

@@ -219,13 +219,17 @@ class PolicyStreamAuditNode(Node):
                 raise ValueError("observation_valid is false")
             if not self._recent("inference_valid", now):
                 raise ValueError("inference_valid is false")
-            confidence = self._recent("confidence", now)
-            slot_width = self._recent("slot_width", now)
+            adapter_debug = self._recent("adapter_debug", now)
+            confidence = adapter_debug.get("slot_confidence")
+            slot_width = adapter_debug.get("slot_width_m")
+            if confidence is None:
+                confidence = self._recent("confidence", now)
+            if slot_width is None:
+                slot_width = self._recent("slot_width", now)
             slot_pose = self._recent("slot_pose", now)
             book_pose = self._recent("book_pose", now)
             self._recent("raw_metrics", now)
             self._recent("observation", now)
-            adapter_debug = self._recent("adapter_debug", now)
             self._recent("policy_action", now)
             self._recent("nominal_delta", now)
             self._recent("residual_delta", now)
@@ -325,6 +329,13 @@ class PolicyStreamAuditNode(Node):
             eef_book_transform_status=adapter_debug.get(
                 "eef_book_transform_status", "unknown"
             ),
+            policy_tool_transform_status=adapter_debug.get(
+                "policy_tool_transform_status", "unknown"
+            ),
+            slot_pose_source=adapter_debug.get("slot_pose_source", "unknown"),
+            static_slot_transform_status=adapter_debug.get(
+                "static_slot_transform_status", "unknown"
+            ),
         )
         self._maybe_report()
 
@@ -361,13 +372,14 @@ class PolicyStreamAuditNode(Node):
             ),
             "pairing_strategy": (
                 "adapter and policy debug observations must match; all numeric "
-                "topics and base-frame poses must be fresh within pair_max_age_s"
+                "topics and base-frame poses must be fresh within pair_max_age_s; "
+                "configured slot width/confidence may come directly from adapter_debug"
             ),
             "policy_stream": self.accumulator.summary(),
             "limitations": [
                 "Policy outputs are diagnostics and were not executed.",
                 "Slot pose accuracy is unverified without a physical reference.",
-                "The configured EEF-to-book transform remains approximate unless calibrated.",
+                "Transform status fields distinguish measured calibration from approximate inputs.",
                 "Pose topics are paired by arrival-time freshness because they have no shared sequence ID.",
             ],
         }
@@ -377,6 +389,28 @@ class PolicyStreamAuditNode(Node):
             encoding="utf-8",
         )
         self.get_logger().info(f"Policy stream audit written to {summary_path}")
+        stream = summary["policy_stream"]
+        width = stream.get("slot_width_m", {}).get("mean")
+        width_text = "n/a" if width is None else f"{width * 1000.0:.3f} mm"
+        self.get_logger().info(
+            "CALIBRATED SHADOW SUMMARY: "
+            f"complete={stream['complete_samples']}/{stream['samples']} "
+            f"({100.0 * stream['complete_fraction']:.1f}%), "
+            f"slot_width={width_text}, "
+            f"observation_clip_fraction="
+            f"{stream.get('observation_clip_fraction', float('nan')):.4f}"
+        )
+        self.get_logger().info(
+            "PROVENANCE: "
+            f"slot_sources={stream['slot_pose_sources']}, "
+            f"slot_statuses={stream['static_slot_transform_statuses']}, "
+            f"book_sources={stream['book_pose_sources']}, "
+            f"book_statuses={stream['eef_book_transform_statuses']}"
+        )
+        self.get_logger().info(
+            "POLICY TOOL PROVENANCE: "
+            f"{stream['policy_tool_transform_statuses']}"
+        )
 
 
 def main(args=None):

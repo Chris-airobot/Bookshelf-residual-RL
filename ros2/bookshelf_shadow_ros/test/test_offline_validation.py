@@ -116,6 +116,8 @@ def _add_complete_policy_sample(audit, *, width=0.0384, lateral=0.001):
         final_delta=[0.0012, 0.00005, 0.00153, -0.002, 0.002],
         book_pose_source="configured_eef_book",
         eef_book_transform_status="approximate_smoke_only",
+        slot_pose_source="configured_static",
+        static_slot_transform_status="measured_rgbd_static_no_absolute_ground_truth",
     )
 
 
@@ -140,6 +142,10 @@ def test_policy_stream_audit_reports_base_axes_and_reference_width_error():
         atol=1.0e-12,
     )
     assert summary["book_pose_sources"] == {"configured_eef_book": 5}
+    assert summary["slot_pose_sources"] == {"configured_static": 5}
+    assert summary["static_slot_transform_statuses"] == {
+        "measured_rgbd_static_no_absolute_ground_truth": 5
+    }
     assert summary["observation_clip_fraction"] == 0.0
     assert len(list(audit.csv_rows())) == 5
 
