@@ -6,20 +6,22 @@ marker_black_size_m: 0.039
 # Semantic policy frame: X=depth, Y=thickness/lateral, Z=height/up.
 book_size_xyz_m: [0.156, 0.034, 0.236]
 
-# Measurements from the black marker border.
-spine_edge_to_marker_black_edge_m: 0.035
-top_edge_to_marker_black_edge_m: 0.035
+# The cardboard tab is coplanar with the narrow spine face and extends toward
+# book +Y (image-left when looking at the spine). Measurements are to the black
+# marker border; these are the newest physical measurements.
+spine_edge_to_marker_black_edge_m: 0.040
+top_edge_to_marker_black_edge_m: 0.032
 cardboard_thickness_m: 0.002
 
 # Marker origin is the centre of its black square, expressed in the book frame.
 marker_center_in_book_m:
-  x: -0.0235
-  y: -0.0190
-  z: 0.0635
+  x: -0.0800
+  y: 0.0375
+  z: 0.0665
 
 # Columns are marker +X, +Y, +Z expressed in the book frame.
-# Marker +X = book +X; marker +Y = book +Z; marker +Z = book -Y.
+# Marker +X = book -Y; marker +Y = book +Z; marker +Z = book -X.
 rotation_book_marker:
-  - [1.0, 0.0, 0.0]
   - [0.0, 0.0, -1.0]
+  - [-1.0, 0.0, 0.0]
   - [0.0, 1.0, 0.0]

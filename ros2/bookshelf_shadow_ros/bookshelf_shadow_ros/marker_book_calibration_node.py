@@ -12,14 +12,21 @@ import time
 
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
+from geometry_msgs.msg import TransformStamped
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from rclpy.time import Time
 from sensor_msgs.msg import CameraInfo, Image
 import tf2_ros
+from visualization_msgs.msg import Marker, MarkerArray
 import yaml
 
 from .marker_book_calibration import (
@@ -132,12 +139,24 @@ class MarkerBookCalibrationNode(Node):
             )
 
         self.dictionary = _dictionary_from_name(str(self.mount["dictionary"]))
-        self.detector_parameters = cv2.aruco.DetectorParameters_create()
+        if hasattr(cv2.aruco, "DetectorParameters_create"):
+            self.detector_parameters = cv2.aruco.DetectorParameters_create()
+        else:
+            self.detector_parameters = cv2.aruco.DetectorParameters()
         self.detector_parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         self.object_points = _marker_object_points(self.marker_size_m)
         self.bridge = CvBridge()
         self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=60.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.detected_tf_broadcaster = tf2_ros.TransformBroadcaster(self)
+        visualization_qos = QoSProfile(depth=2)
+        visualization_qos.reliability = ReliabilityPolicy.RELIABLE
+        visualization_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self.book_visualization_publisher = self.create_publisher(
+            MarkerArray,
+            str(self.get_parameter("visualization_topic").value),
+            visualization_qos,
+        )
 
         self.camera_info = None
         self.latest_depth = None
@@ -220,6 +239,14 @@ class MarkerBookCalibrationNode(Node):
         self.declare_parameter("maximum_rotation_deviation_deg", 5.0)
         self.declare_parameter("debug_stride", 50)
         self.declare_parameter("idle_finalize_s", 2.0)
+        self.declare_parameter(
+            "visualization_topic", "/bookshelf_policy/book_boxes"
+        )
+        self.declare_parameter("detected_marker_frame", "calibration_aruco0_marker")
+        self.declare_parameter("detected_book_frame", "calibration_detected_book")
+        # Long enough to bridge ordinary message jitter while still removing a
+        # stale visualization promptly after real detection loss.
+        self.declare_parameter("visualization_lifetime_s", 1.0)
 
     def _camera_info_callback(self, message: CameraInfo):
         self.camera_info = message
@@ -239,8 +266,6 @@ class MarkerBookCalibrationNode(Node):
         self.latest_depth_stamp_ns = _stamp_nanoseconds(message)
 
     def _image_callback(self, message: Image):
-        if self.completed:
-            return
         self.last_image_wall_time = time.monotonic()
         stamp_ns = _stamp_nanoseconds(message)
         if stamp_ns == self.last_processed_stamp_ns:
@@ -323,6 +348,13 @@ class MarkerBookCalibrationNode(Node):
             transform_camera_marker,
             self.transform_book_marker,
         )
+        self._publish_rviz_visualization(
+            message.header.stamp,
+            camera_frame,
+            transform_camera_marker,
+        )
+        if self.completed:
+            return
         sample = CalibrationSample(
             frame_index=self.frame_index,
             stamp_ns=stamp_ns,
@@ -356,6 +388,95 @@ class MarkerBookCalibrationNode(Node):
         target = max(int(self.get_parameter("target_samples").value), 1)
         if count >= target:
             self._finish("target sample count reached")
+
+    def _publish_rviz_visualization(
+        self,
+        stamp,
+        camera_frame: str,
+        transform_camera_marker: np.ndarray,
+    ):
+        marker_frame = str(self.get_parameter("detected_marker_frame").value)
+        book_frame = str(self.get_parameter("detected_book_frame").value)
+        transform_marker_book = invert_transform(self.transform_book_marker)
+        transforms = [
+            self._transform_message(
+                stamp,
+                camera_frame,
+                marker_frame,
+                transform_camera_marker,
+            ),
+            self._transform_message(
+                stamp,
+                marker_frame,
+                book_frame,
+                transform_marker_book,
+            ),
+        ]
+        self.detected_tf_broadcaster.sendTransform(transforms)
+
+        lifetime_s = max(
+            float(self.get_parameter("visualization_lifetime_s").value), 0.0
+        )
+        lifetime_sec = int(lifetime_s)
+        lifetime_nanosec = int((lifetime_s % 1.0) * 1.0e9)
+
+        book_marker = Marker()
+        # Keep the marker in the same detected-book frame as the diagnostic TF.
+        # A zero timestamp asks RViz for the latest transform, avoiding a race
+        # between the TF and MarkerArray subscriptions.
+        book_marker.header.frame_id = book_frame
+        book_marker.ns = "bookshelf_books"
+        book_marker.id = 0
+        book_marker.type = Marker.CUBE
+        book_marker.action = Marker.ADD
+        book_marker.pose.orientation.w = 1.0
+        book_marker.scale.x = float(self.book_size_xyz_m[0])
+        book_marker.scale.y = float(self.book_size_xyz_m[1])
+        book_marker.scale.z = float(self.book_size_xyz_m[2])
+        book_marker.color.r = 0.0
+        book_marker.color.g = 0.85
+        book_marker.color.b = 1.0
+        book_marker.color.a = 0.45
+        book_marker.frame_locked = True
+        book_marker.lifetime.sec = lifetime_sec
+        book_marker.lifetime.nanosec = lifetime_nanosec
+
+        detected_marker = Marker()
+        detected_marker.header.frame_id = marker_frame
+        detected_marker.ns = "bookshelf_books"
+        detected_marker.id = 1
+        detected_marker.type = Marker.CUBE
+        detected_marker.action = Marker.ADD
+        detected_marker.pose.orientation.w = 1.0
+        detected_marker.scale.x = float(self.marker_size_m)
+        detected_marker.scale.y = float(self.marker_size_m)
+        detected_marker.scale.z = 0.001
+        detected_marker.color.r = 1.0
+        detected_marker.color.g = 0.1
+        detected_marker.color.b = 0.8
+        detected_marker.color.a = 0.85
+        detected_marker.frame_locked = True
+        detected_marker.lifetime.sec = lifetime_sec
+        detected_marker.lifetime.nanosec = lifetime_nanosec
+        self.book_visualization_publisher.publish(
+            MarkerArray(markers=[book_marker, detected_marker])
+        )
+
+    @staticmethod
+    def _transform_message(stamp, parent: str, child: str, transform: np.ndarray):
+        message = TransformStamped()
+        message.header.stamp = stamp
+        message.header.frame_id = parent
+        message.child_frame_id = child
+        message.transform.translation.x = float(transform[0, 3])
+        message.transform.translation.y = float(transform[1, 3])
+        message.transform.translation.z = float(transform[2, 3])
+        quaternion = matrix_to_quaternion_xyzw(transform[:3, :3])
+        message.transform.rotation.x = float(quaternion[0])
+        message.transform.rotation.y = float(quaternion[1])
+        message.transform.rotation.z = float(quaternion[2])
+        message.transform.rotation.w = float(quaternion[3])
+        return message
 
     def _find_marker_index(self, ids):
         if ids is None:
@@ -564,7 +685,10 @@ class MarkerBookCalibrationNode(Node):
             "mount": self.mount,
             "frame_convention": {
                 "book": "+X depth/insertion, +Y thickness/lateral, +Z up",
-                "marker_mapping": "+X marker = +X book; +Y marker = +Z book; +Z marker = -Y book",
+                "marker_mapping": (
+                    "+X marker = -Y book; +Y marker = +Z book; "
+                    "+Z marker = -X book"
+                ),
                 "transform_output": "T_eef_book (book pose expressed in link_eef)",
             },
             "result": self._serialise_result(result),

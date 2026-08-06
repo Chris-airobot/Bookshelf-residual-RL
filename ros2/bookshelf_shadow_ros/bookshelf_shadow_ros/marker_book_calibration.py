@@ -15,12 +15,13 @@ from .policy_observation_math import (
 )
 
 
-# The marker is on the left cover. Its printed right direction follows book
-# depth, its printed top follows book height, and its outward normal is -book Y.
+# The marker is on a cardboard tab coplanar with the narrow spine face. Looking
+# at the spine, its printed right direction is -book Y, its printed top is
+# +book Z, and its outward normal is -book X.
 DEFAULT_BOOK_FROM_MARKER_ROTATION = np.array(
     [
-        [1.0, 0.0, 0.0],
         [0.0, 0.0, -1.0],
+        [-1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
     ],
     dtype=np.float64,

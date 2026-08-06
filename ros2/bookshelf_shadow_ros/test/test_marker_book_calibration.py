@@ -1,6 +1,8 @@
 import math
+from pathlib import Path
 
 import numpy as np
+import yaml
 
 from bookshelf_shadow_ros.marker_book_calibration import (
     CalibrationSample,
@@ -26,12 +28,31 @@ def _sample(index, transform):
     )
 
 
-def test_marker_axis_mapping_matches_left_cover_mount():
+def test_marker_axis_mapping_matches_spine_cardboard_mount():
     rotation = DEFAULT_BOOK_FROM_MARKER_ROTATION
-    np.testing.assert_allclose(rotation @ [1.0, 0.0, 0.0], [1.0, 0.0, 0.0])
+    np.testing.assert_allclose(rotation @ [1.0, 0.0, 0.0], [0.0, -1.0, 0.0])
     np.testing.assert_allclose(rotation @ [0.0, 1.0, 0.0], [0.0, 0.0, 1.0])
-    np.testing.assert_allclose(rotation @ [0.0, 0.0, 1.0], [0.0, -1.0, 0.0])
+    np.testing.assert_allclose(rotation @ [0.0, 0.0, 1.0], [-1.0, 0.0, 0.0])
     assert np.linalg.det(rotation) == 1.0
+
+
+def test_committed_marker_center_matches_physical_edge_measurements():
+    config = Path(__file__).parents[1] / "config" / "real_book_aruco0_mount.yaml"
+    mount = yaml.safe_load(config.read_text(encoding="utf-8"))
+    depth, thickness, height = mount["book_size_xyz_m"]
+    marker_size = mount["marker_black_size_m"]
+    expected = [
+        -0.5 * depth - mount["cardboard_thickness_m"],
+        0.5 * thickness
+        + mount["spine_edge_to_marker_black_edge_m"]
+        - 0.5 * marker_size,
+        0.5 * height
+        - mount["top_edge_to_marker_black_edge_m"]
+        - 0.5 * marker_size,
+    ]
+    center = mount["marker_center_in_book_m"]
+    actual = [center["x"], center["y"], center["z"]]
+    np.testing.assert_allclose(actual, expected, atol=1.0e-12)
 
 
 def test_transform_chain_recovers_known_eef_book_pose():

@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -31,6 +32,11 @@ def generate_launch_description():
             default_value="250",
             description="Number of accepted marker poses to collect.",
         ),
+        DeclareLaunchArgument(
+            "enable_rviz",
+            default_value="true",
+            description="Start diagnostics-only RViz book visualization.",
+        ),
     ]
     calibrator = Node(
         package="bookshelf_shadow_ros",
@@ -47,6 +53,23 @@ def generate_launch_description():
             }
         ],
     )
+    rviz = Node(
+        package="rviz2",
+        executable="rviz2",
+        name="marker_book_calibration_rviz",
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("enable_rviz")),
+        arguments=[
+            "-d",
+            PathJoinSubstitution(
+                [
+                    FindPackageShare("bookshelf_shadow_ros"),
+                    "rviz",
+                    "marker_book_calibration.rviz",
+                ]
+            ),
+        ],
+    )
     return LaunchDescription(
         arguments
         + [
@@ -57,5 +80,6 @@ def generate_launch_description():
                 )
             ),
             calibrator,
+            rviz,
         ]
     )
