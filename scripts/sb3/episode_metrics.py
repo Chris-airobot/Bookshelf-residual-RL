@@ -116,13 +116,18 @@ class EpisodeMetricsCsvCallback(BaseCallback):
         window_size: int = 1000,
         summary_every_episodes: int = 1000,
         flush_every_episodes: int = 100,
+        log_every_timesteps: int = 100_000,
     ):
         super().__init__()
         self.log_dir = Path(log_dir)
         self.window_size = int(window_size)
         self.summary_every_episodes = int(summary_every_episodes)
         self.flush_every_episodes = int(flush_every_episodes)
+        self.log_every_timesteps = int(log_every_timesteps)
         self.episode_count = 0
+        self._interval_episode_count = 0
+        self._interval_success_count = 0
+        self._last_log_timestep = 0
         self._returns = None
         self._lengths = None
         self._window = deque(maxlen=self.window_size)
@@ -183,6 +188,8 @@ class EpisodeMetricsCsvCallback(BaseCallback):
             self._episode_writer.writerow(row)
             self._window.append(row)
             self.episode_count += 1
+            self._interval_episode_count += 1
+            self._interval_success_count += int(row["success"])
             self._returns[env_idx] = 0.0
             self._lengths[env_idx] = 0
 
@@ -192,6 +199,17 @@ class EpisodeMetricsCsvCallback(BaseCallback):
                 self._summary_file.flush()
             elif self.episode_count % self.flush_every_episodes == 0:
                 self._episode_file.flush()
+
+        if self.num_timesteps - self._last_log_timestep >= self.log_every_timesteps:
+            interval_episodes = self._interval_episode_count
+            interval_successes = self._interval_success_count
+            success_rate = interval_successes / interval_episodes if interval_episodes > 0 else 0.0
+            self.logger.record("rollout/episodes_since_last_log", interval_episodes)
+            self.logger.record("rollout/successes_since_last_log", interval_successes)
+            self.logger.record("rollout/success_rate_since_last_log", success_rate)
+            self._interval_episode_count = 0
+            self._interval_success_count = 0
+            self._last_log_timestep = self.num_timesteps
 
         return True
 

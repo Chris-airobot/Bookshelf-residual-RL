@@ -93,6 +93,16 @@ gym.register(
     },
 )
 
+gym.register(
+    id="Bookshelf-PPO-Direct-v0",
+    entry_point=f"{__name__}.bookshelf_residual_env:BookshelfEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.bookshelf_ppo_env_cfg:BookshelfEnvCfg",
+        "sb3_cfg_entry_point": f"{agents.__name__}:sb3_ppo_cfg.yaml",
+    },
+)
+
 # v4 book-only variant: fixed grasp / book-only ablations (see bookshelf_env_book_only).
 gym.register(
     id="Bookshelf-Direct-v4-insert-only",

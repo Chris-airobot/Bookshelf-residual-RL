@@ -15,6 +15,7 @@ setup(
         ("share/bookshelf_shadow_ros", ["package.xml"]),
         (os.path.join("share", package_name, "launch"), glob("launch/*.py")),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
+        (os.path.join("share", package_name, "rviz"), glob("rviz/*.rviz")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -35,6 +36,12 @@ setup(
             "bookshelf_shadow_ros.slot_detection_audit_node:main",
             "policy_stream_audit = "
             "bookshelf_shadow_ros.policy_stream_audit_node:main",
+            "marker_book_calibrator = "
+            "bookshelf_shadow_ros.marker_book_calibration_node:main",
+            "calibrated_preinsert_target = "
+            "bookshelf_shadow_ros.calibrated_preinsert_target_node:main",
+            "policy_tool_frame_audit = "
+            "bookshelf_shadow_ros.policy_tool_frame_audit_node:main",
         ],
     },
 )

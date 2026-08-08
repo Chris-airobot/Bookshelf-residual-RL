@@ -34,6 +34,24 @@ parser.add_argument(
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
 parser.add_argument(
+    "--eval_slot_clearance",
+    type=float,
+    default=None,
+    help="Evaluate at a fixed clearance with full randomization/residual authority and no release assistance.",
+)
+parser.add_argument(
+    "--eval_old_reset_noise",
+    action="store_true",
+    default=False,
+    help="Evaluate with the older larger reset/grasp noise: 3 deg arm, 8/6/3 mm grasp xyz, 8 deg yaw.",
+)
+parser.add_argument(
+    "--eval_episodes",
+    type=int,
+    default=0,
+    help="Stop after this many completed episodes; 0 runs until manually stopped.",
+)
+parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
@@ -88,6 +106,7 @@ simulation_app = app_launcher.app
 import os
 import random
 import time
+import math
 
 import gymnasium as gym
 import torch
@@ -111,6 +130,36 @@ from isaaclab_tasks.utils.parse_cfg import get_checkpoint_path
 import bookshelf.tasks  # noqa: F401
 
 
+def _scalar(value, env_idx: int | None = None, default=None):
+    if value is None:
+        return default
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if env_idx is not None and hasattr(value, "__len__") and not isinstance(value, (str, bytes, dict)):
+            value = value[env_idx]
+        if hasattr(value, "item"):
+            return value.item()
+        return value
+    except Exception:
+        return default
+
+
+def _episode_metric(infos, env_idx: int, key: str, default=None):
+    if isinstance(infos, dict):
+        metrics = infos.get("episode_metrics")
+        if isinstance(metrics, dict) and key in metrics:
+            return _scalar(metrics.get(key), env_idx, default)
+        return _scalar(infos.get(f"episode_metric_{key}"), env_idx, default)
+    if isinstance(infos, (list, tuple)) and env_idx < len(infos) and isinstance(infos[env_idx], dict):
+        info = infos[env_idx]
+        metrics = info.get("episode_metrics")
+        if isinstance(metrics, dict) and key in metrics:
+            return _scalar(metrics.get(key), None, default)
+        return _scalar(info.get(f"episode_metric_{key}"), None, default)
+    return default
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Play with stable-baselines agent."""
@@ -132,6 +181,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.debug_print_residual_components = bool(args_cli.print_residual_components)
         env_cfg.debug_print_residual_interval = int(args_cli.print_residual_interval)
         env_cfg.debug_print_residual_env_index = int(args_cli.print_residual_env_index)
+    if args_cli.eval_slot_clearance is not None:
+        if hasattr(env_cfg, "enable_residual_clearance_curriculum"):
+            env_cfg.enable_residual_clearance_curriculum = False
+        if hasattr(env_cfg, "enable_residual_reset_curriculum"):
+            env_cfg.enable_residual_reset_curriculum = False
+        if hasattr(env_cfg, "enable_residual_action_scale_curriculum"):
+            env_cfg.enable_residual_action_scale_curriculum = False
+        if hasattr(env_cfg, "enable_nominal_release_assist"):
+            env_cfg.enable_nominal_release_assist = False
+        env_cfg.slot_lateral_clearance_min = float(args_cli.eval_slot_clearance)
+        env_cfg.slot_lateral_clearance_max = float(args_cli.eval_slot_clearance)
+    if args_cli.eval_old_reset_noise:
+        if hasattr(env_cfg, "enable_residual_reset_curriculum"):
+            env_cfg.enable_residual_reset_curriculum = False
+        env_cfg.reset_arm_joint_pos_noise = math.radians(3.0)
+        env_cfg.book_grasp_x_jitter = 0.008
+        env_cfg.book_grasp_y_jitter = 0.006
+        env_cfg.book_grasp_z_jitter = 0.003
+        env_cfg.book_grasp_yaw_jitter = math.radians(8.0)
 
     # directory for logging into
     log_root_path = os.path.join("logs", "sb3", train_task_name)
@@ -228,7 +296,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             ep_reward[i] += float(rewards[i])
             if dones[i]:
                 r = ep_reward[i]
-                if r > SUCCESS_REWARD_THRESH:
+                metric_success = _episode_metric(infos, i, "success", default=None)
+                failure_code = _episode_metric(infos, i, "failure_code", default=None)
+                if metric_success is not None:
+                    if bool(metric_success):
+                        n_success += 1
+                    elif int(failure_code or 0) == 3:
+                        n_timeout += 1
+                    else:
+                        n_drop += 1
+                elif r > SUCCESS_REWARD_THRESH:
                     n_success += 1
                 elif r < -10.0:
                     n_drop += 1
@@ -244,6 +321,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                         f"success {n_success}/{total} ({100*n_success/max(total,1):.0f}%)  "
                         f"drop {n_drop}  timeout {n_timeout}"
                     )
+
+        if args_cli.eval_episodes > 0 and n_episodes >= args_cli.eval_episodes:
+            break
 
         if args_cli.video:
             timestep += 1

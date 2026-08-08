@@ -38,7 +38,7 @@ _SHELF_BASE_BACK = 0.81
 SHELF_OFFSET_X = -0.01
 
 # Manipuland cuboid (L, H, T) in meters; neighbor kinematic books use the same dimensions.
-_BOOK_LWH = (0.152, 0.229, 0.02)
+_BOOK_LWH = (0.156, 0.236, 0.034)
 
 # Pre-insertion arm pose (captured from sim / joint readout).
 ROBOT_PRE_INSERTION_JOINT_POS = {

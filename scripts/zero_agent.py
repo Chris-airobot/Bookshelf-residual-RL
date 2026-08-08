@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import math
 
 from isaaclab.app import AppLauncher
 
@@ -29,6 +30,30 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="If supported, let the nominal release condition trigger scripted release for nominal-only testing.",
+)
+parser.add_argument(
+    "--ideal",
+    action="store_true",
+    default=False,
+    help="Use position-only control, fix the book to the tool, and disable reset randomization.",
+)
+parser.add_argument(
+    "--light_randomization",
+    action="store_true",
+    default=False,
+    help="Use small realistic reset noise without fixing the book to the tool.",
+)
+parser.add_argument(
+    "--slot_clearance",
+    type=float,
+    default=None,
+    help="Use a fixed slot clearance in meters and disable the clearance curriculum.",
+)
+parser.add_argument(
+    "--missing_index",
+    type=int,
+    default=None,
+    help="Fix the missing slot index; omit it to keep random slot selection.",
 )
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
@@ -69,6 +94,37 @@ def main():
             env_cfg.debug_disable_nominal_release = False
         else:
             print("[WARN]: --nominal_release_assist was set, but this task config does not support it.")
+    if args_cli.ideal:
+        if hasattr(env_cfg, "enable_residual_reset_curriculum"):
+            env_cfg.enable_residual_reset_curriculum = False
+        if hasattr(env_cfg, "debug_position_only_target_ee"):
+            env_cfg.debug_position_only_target_ee = True
+        if hasattr(env_cfg, "debug_hold_book_fixed_to_tool"):
+            env_cfg.debug_hold_book_fixed_to_tool = True
+        for name in (
+            "reset_arm_joint_pos_noise",
+            "book_grasp_x_jitter",
+            "book_grasp_y_jitter",
+            "book_grasp_z_jitter",
+            "book_grasp_yaw_jitter",
+        ):
+            if hasattr(env_cfg, name):
+                setattr(env_cfg, name, 0.0)
+    elif args_cli.light_randomization:
+        if hasattr(env_cfg, "enable_residual_reset_curriculum"):
+            env_cfg.enable_residual_reset_curriculum = False
+        env_cfg.reset_arm_joint_pos_noise = math.radians(1.0)
+        env_cfg.book_grasp_x_jitter = 0.002
+        env_cfg.book_grasp_y_jitter = 0.002
+        env_cfg.book_grasp_z_jitter = 0.002
+        env_cfg.book_grasp_yaw_jitter = math.radians(2.0)
+    if args_cli.slot_clearance is not None:
+        if hasattr(env_cfg, "enable_residual_clearance_curriculum"):
+            env_cfg.enable_residual_clearance_curriculum = False
+        env_cfg.slot_lateral_clearance_min = args_cli.slot_clearance
+        env_cfg.slot_lateral_clearance_max = args_cli.slot_clearance
+    if args_cli.missing_index is not None:
+        env_cfg.forced_missing_book_index = args_cli.missing_index
     # create environment
     env = gym.make(args_cli.task, cfg=env_cfg)
 

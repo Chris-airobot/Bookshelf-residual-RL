@@ -43,6 +43,18 @@ parser.add_argument(
     help="Continue training from a .zip checkpoint (same obs/action dims). "
     "VecNormalize stats are always reset (fresh) for curriculum/reward shifts; only policy weights load.",
 )
+parser.add_argument(
+    "--resume",
+    action="store_true",
+    default=False,
+    help="Fully resume PPO from --checkpoint, including critic, optimizer, timestep counter, and VecNormalize state.",
+)
+parser.add_argument(
+    "--fixed_clearance",
+    type=float,
+    default=None,
+    help="Train at one fixed slot clearance and disable residual curricula/release assist.",
+)
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument("--mlflow", action="store_true", default=False, help="Enable MLflow logging.")
@@ -61,6 +73,8 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.resume and args_cli.checkpoint is None:
+    parser.error("--resume requires --checkpoint")
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -144,9 +158,70 @@ def _safe_git_info() -> dict[str, str]:
         return {"git_commit": "unknown", "git_dirty": "unknown"}
 
 
+def _constant_schedule(value: float):
+    return lambda _: float(value)
+
+
+def _as_schedule(value):
+    return value if callable(value) else _constant_schedule(float(value))
+
+
+def _checkpoint_custom_objects(observation_space, action_space, learning_rate=None, clip_range=None) -> dict:
+    """Avoid deserializing fragile Gym/NumPy objects from checkpoints across machines."""
+    custom_objects = {
+        "observation_space": observation_space,
+        "action_space": action_space,
+    }
+    if learning_rate is not None:
+        custom_objects["learning_rate"] = learning_rate
+        custom_objects["lr_schedule"] = _as_schedule(learning_rate)
+    if clip_range is not None:
+        custom_objects["clip_range"] = _as_schedule(clip_range)
+    custom_objects["clip_range_vf"] = None
+    return custom_objects
+
+
+def _vecnormalize_stats_path(vec_norm_path: Path) -> Path:
+    return vec_norm_path.with_name(f"{vec_norm_path.stem}_stats.npz")
+
+
+def _load_vecnormalize_stats(stats_path: Path, env, norm_args: dict, agent_cfg: dict):
+    if not stats_path.exists():
+        raise FileNotFoundError(f"VecNormalize stats fallback file not found: {stats_path}")
+    print(f"Loading VecNormalize stats fallback: {stats_path}")
+    env = VecNormalize(
+        env,
+        training=True,
+        norm_obs=bool(norm_args.get("normalize_input", True)),
+        norm_reward=bool(norm_args.get("normalize_value", False)),
+        clip_obs=norm_args.get("clip_obs", 100.0),
+        gamma=agent_cfg["gamma"],
+        clip_reward=np.inf,
+    )
+    stats = np.load(stats_path)
+    env.obs_rms.mean = stats["obs_mean"].astype(np.float64)
+    env.obs_rms.var = stats["obs_var"].astype(np.float64)
+    env.obs_rms.count = float(stats["obs_count"])
+    if "ret_mean" in stats and hasattr(env, "ret_rms"):
+        env.ret_rms.mean = stats["ret_mean"].astype(np.float64)
+        env.ret_rms.var = stats["ret_var"].astype(np.float64)
+        env.ret_rms.count = float(stats["ret_count"])
+    return env
+
+
 def _load_actor_warm_start(agent: PPO, checkpoint_path: str, device: str):
     """Copy actor weights from an SB3 checkpoint without importing its PPO hyperparameters."""
-    source_agent = PPO.load(checkpoint_path, device=device, print_system_info=True)
+    source_agent = PPO.load(
+        checkpoint_path,
+        device=device,
+        print_system_info=True,
+        custom_objects=_checkpoint_custom_objects(
+            observation_space=agent.observation_space,
+            action_space=agent.action_space,
+            learning_rate=0.0,
+            clip_range=0.0,
+        ),
+    )
     source_state = source_agent.policy.state_dict()
     target_state = agent.policy.state_dict()
 
@@ -218,6 +293,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
+    if args_cli.fixed_clearance is not None:
+        if hasattr(env_cfg, "enable_residual_clearance_curriculum"):
+            env_cfg.enable_residual_clearance_curriculum = False
+        env_cfg.slot_lateral_clearance_min = float(args_cli.fixed_clearance)
+        env_cfg.slot_lateral_clearance_max = float(args_cli.fixed_clearance)
 
     # directory for logging into
     run_info = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -310,7 +390,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if key in agent_cfg:
             norm_args[key] = agent_cfg.pop(key)
 
-    if norm_args and norm_args.get("normalize_input"):
+    if args_cli.resume:
+        vec_norm_path = Path(args_cli.checkpoint.replace("/model", "/model_vecnormalize").replace(".zip", ".pkl"))
+        if not vec_norm_path.exists():
+            raise FileNotFoundError(f"Full resume requires matching VecNormalize state: {vec_norm_path}")
+        print(f"Resuming normalization from: {vec_norm_path}")
+        try:
+            env = VecNormalize.load(vec_norm_path, env)
+        except Exception as exc:
+            stats_path = _vecnormalize_stats_path(vec_norm_path)
+            print(f"VecNormalize pickle load failed ({type(exc).__name__}: {exc}).")
+            env = _load_vecnormalize_stats(stats_path, env, norm_args, agent_cfg)
+        env.training = True
+        env.norm_reward = bool(norm_args.get("normalize_value", False))
+    elif norm_args and norm_args.get("normalize_input"):
         print(f"Normalizing input, {norm_args=}")
         env = VecNormalize(
             env,
@@ -336,11 +429,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 env.obs_rms.count = 1e6
                 print(f"[INFO] VecNormalize warm-started from {stats_path}")
 
-    # Intentionally do not load old VecNormalize.pkl when resuming: reward distribution often shifts (curriculum).
-
-    # create agent from stable baselines
-    agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
-    if args_cli.checkpoint is not None:
+    # create or restore agent
+    if args_cli.resume:
+        print(f"Fully resuming PPO from: {args_cli.checkpoint}")
+        agent = PPO.load(
+            args_cli.checkpoint,
+            env=env,
+            device=agent_cfg.get("device", "auto"),
+            tensorboard_log=log_dir,
+            print_system_info=True,
+            custom_objects=_checkpoint_custom_objects(
+                observation_space=env.observation_space,
+                action_space=env.action_space,
+                learning_rate=agent_cfg.get("learning_rate"),
+                clip_range=agent_cfg.get("clip_range"),
+            ),
+        )
+        agent.verbose = 1
+    else:
+        # Intentionally do not load old VecNormalize.pkl when warm-starting:
+        # reward distribution often shifts across curriculum experiments.
+        agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
+    if args_cli.checkpoint is not None and not args_cli.resume:
         _load_actor_warm_start(agent, args_cli.checkpoint, device=agent_cfg.get("device", "auto"))
 
     # callbacks for agent
@@ -354,7 +464,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         name_prefix="model_vecnormalize",
         verbose=2,
     )
-    episode_metrics_callback = EpisodeMetricsCsvCallback(log_dir=log_dir)
+    episode_metrics_callback = EpisodeMetricsCsvCallback(
+        log_dir=log_dir,
+        log_every_timesteps=args_cli.log_interval,
+    )
     callbacks = [
         checkpoint_callback,
         vecnormalize_checkpoint_callback,
@@ -371,6 +484,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             callback=callbacks,
             progress_bar=True,
             log_interval=None,
+            reset_num_timesteps=not args_cli.resume,
         )
     # save the final model
     agent.save(os.path.join(log_dir, "model"))

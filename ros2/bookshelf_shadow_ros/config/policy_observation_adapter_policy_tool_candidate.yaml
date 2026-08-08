@@ -1,0 +1,93 @@
+# SHADOW-ONLY candidate configuration. This file never authorizes robot motion.
+#
+# The policy-tool transform was derived by matching the nominal simulator
+# policy tool-to-book transform to the recorded xArm link_tcp-to-book transform.
+# It has exact algebraic round-trip consistency, but no independent physical
+# validation. Never load this file into an execution or robot-command node.
+policy_observation_adapter:
+  ros__parameters:
+    base_frame: link_base
+    ee_frame: link_eef
+    target_book_frame: target_book_center
+
+    slot_pose_source: configured_static
+    allow_configured_static_slot: true
+    configured_static_slot_translation_xyz:
+      - 0.8741794456118123
+      - 0.0807494671987291
+      - 0.2473493846631505
+    configured_static_slot_quaternion_xyzw:
+      - 0.002228045026061973
+      - 0.0499056226703669
+      - 0.05101853094791474
+      - 0.9974475295177995
+    configured_static_slot_width_m: 0.036050625653429466
+    configured_static_slot_confidence: 0.730982856317
+    static_slot_transform_status: measured_rgbd_static_no_absolute_ground_truth
+
+    book_pose_source: eef_fixed
+    latch_eef_book_from_marker: false
+    use_configured_eef_book_transform: true
+    eef_book_translation_xyz:
+      - 0.008124357683356356
+      - -0.010156856549182705
+      - 0.12425871757162561
+    eef_book_quaternion_xyzw:
+      - 0.47569361268145194
+      - 0.46802866719711034
+      - 0.5317004002617697
+      - 0.5214973038254745
+    eef_book_transform_status: measured_aruco_original_id0_static_grasp
+
+    slot_pose_topic: /slot_detector/slot_pose
+    slot_width_topic: /slot_detector/slot_width
+    confidence_topic: /slot_detector/confidence
+    joint_states_topic: /joint_states
+    mode_topic: /bookshelf_policy/mode
+
+    raw_metrics_topic: /bookshelf_policy/raw_metrics
+    observation_topic: /bookshelf_policy/observation_12d
+    valid_topic: /bookshelf_policy/observation_valid
+    slot_pose_base_topic: /bookshelf_policy/slot_pose_base
+    book_pose_base_topic: /bookshelf_policy/book_pose_base
+    debug_topic: /bookshelf_policy/adapter_debug
+
+    book_size_xyz: [0.156, 0.034, 0.236]
+    slot_depth_m: 0.20
+    slot_target_offset_xyz: [0.0, 0.0, 0.0]
+
+    # T_link_eef_policy_tool = T_link_eef_link_tcp * T_link_tcp_policy_tool.
+    # T_link_eef_link_tcp translation was [0, 0, 0.172] m in the recorded TF.
+    tool_offset_xyz:
+      - 0.009119326451322136
+      - -0.04695895701970321
+      - 0.12260082121430517
+    tool_offset_quaternion_xyzw:
+      - -0.7018277662283674
+      - -0.03279647137253109
+      - -0.00294897656373922
+      - 0.7115851892455586
+    policy_tool_transform_status: derived_unverified_sim_to_xarm_nominal_2026_08_06
+    require_verified_policy_tool_transform: false
+
+    minimum_slot_width_m: 0.020
+    maximum_slot_width_m: 0.090
+    minimum_confidence: 0.60
+
+    gripper_joint_name: drive_joint
+    gripper_open_joint_position: 0.0
+    gripper_closed_joint_position: 0.85
+
+    rear_to_mouth_obs_scale: 0.08
+    front_to_back_obs_scale: 0.08
+    lat_err_obs_scale: 0.05
+    z_err_obs_scale: 0.05
+    yaw_err_obs_scale_deg: 30.0
+    tool_to_book_obs_scale: 0.25
+
+    default_mode: 0
+    publish_rate_hz: 20.0
+    message_max_age_s: 0.50
+    tf_max_age_s: 0.50
+    check_source_header_age: true
+    tf_lookup_timeout_s: 0.05
