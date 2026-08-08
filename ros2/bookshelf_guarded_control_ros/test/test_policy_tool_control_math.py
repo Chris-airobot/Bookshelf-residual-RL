@@ -1,4 +1,5 @@
 import math
+from dataclasses import replace
 
 import numpy as np
 
@@ -56,6 +57,132 @@ def test_pitch_and_yaw_are_applied_to_tool_rpy_in_slot_frame():
     np.testing.assert_allclose(
         target.transform_base_tcp_target[:3, :3], expected, atol=1.0e-12
     )
+
+
+def _recorded_riot_transforms():
+    """Return the static slot, live TCP, and candidate tool transforms from the audit."""
+
+    transform_base_slot = make_transform(
+        [0.8741794456118123, 0.0807494671987291, 0.2473493846631505],
+        [
+            0.002228045026061973,
+            0.0499056226703669,
+            0.05101853094791474,
+            0.9974475295177995,
+        ],
+    )
+    transform_base_tcp = make_transform(
+        [0.509, 0.064, 0.170],
+        [0.719, 0.024, 0.694, -0.026],
+    )
+    transform_tcp_policy_tool = make_transform(
+        [0.009119326451322136, -0.04695895701970321, -0.04939917878569483],
+        [
+            -0.7018277662283674,
+            -0.03279647137253109,
+            -0.00294897656373922,
+            0.7115851892455586,
+        ],
+    )
+    return transform_base_slot, transform_base_tcp, transform_tcp_policy_tool
+
+
+def _recorded_riot_limits():
+    return TargetSafetyLimits(
+        maximum_delta=(
+            0.008,
+            0.003,
+            0.007,
+            math.radians(0.8),
+            math.radians(0.6),
+        ),
+        maximum_tcp_translation_step_m=0.003,
+        maximum_tcp_rotation_step_rad=math.radians(0.25),
+        workspace_min_xyz=(0.20, -0.60, 0.05),
+        workspace_max_xyz=(1.00, 0.60, 1.00),
+    )
+
+
+def test_recorded_riot_zero_delta_preserves_current_tcp_exactly():
+    transform_base_slot, transform_base_tcp, transform_tcp_tool = (
+        _recorded_riot_transforms()
+    )
+
+    target = compute_policy_tool_target(
+        transform_base_slot,
+        transform_base_tcp,
+        transform_tcp_tool,
+        [0.0] * 5,
+        command_scale=0.1,
+    )
+
+    np.testing.assert_allclose(
+        target.transform_base_tcp_target,
+        transform_base_tcp,
+        atol=1.0e-12,
+    )
+    assert target.tcp_translation_step_m < 1.0e-12
+    assert target.tcp_rotation_step_rad < 1.0e-12
+    assert target_safety_error(target, [0.0] * 5, _recorded_riot_limits()) is None
+
+
+def test_recorded_riot_policy_delta_stays_near_current_tcp():
+    transform_base_slot, transform_base_tcp, transform_tcp_tool = (
+        _recorded_riot_transforms()
+    )
+    # Representative saturated shadow output from the static pre-insertion audit.
+    motion_delta = [-0.0020, 0.0004, 0.0033, 0.01222, -0.00960]
+
+    target = compute_policy_tool_target(
+        transform_base_slot,
+        transform_base_tcp,
+        transform_tcp_tool,
+        motion_delta,
+        command_scale=0.1,
+    )
+
+    assert target.tcp_translation_step_m < 0.001
+    assert target.tcp_rotation_step_rad < math.radians(0.15)
+    assert target_safety_error(target, motion_delta, _recorded_riot_limits()) is None
+    assert np.linalg.norm(
+        target.transform_base_tcp_target[:3, 3] - transform_base_tcp[:3, 3]
+    ) < 0.001
+
+    historical_bad_target = np.array(
+        [0.20633152100867308, 0.000057675413723541624, -0.05120369947506111]
+    )
+    assert np.linalg.norm(
+        target.transform_base_tcp_target[:3, 3] - historical_bad_target
+    ) > 0.30
+
+
+def test_historical_absolute_target_is_rejected_as_a_large_tcp_step():
+    transform_base_slot, transform_base_tcp, transform_tcp_tool = (
+        _recorded_riot_transforms()
+    )
+    target = compute_policy_tool_target(
+        transform_base_slot,
+        transform_base_tcp,
+        transform_tcp_tool,
+        [0.0] * 5,
+        command_scale=0.1,
+    )
+    historical_bad_transform = np.array(target.transform_base_tcp_target, copy=True)
+    historical_bad_transform[:3, 3] = [
+        0.20633152100867308,
+        0.000057675413723541624,
+        -0.05120369947506111,
+    ]
+    historical_step = np.linalg.inv(transform_base_tcp) @ historical_bad_transform
+    bad_target = replace(
+        target,
+        transform_base_tcp_target=historical_bad_transform,
+        tcp_translation_step_m=float(np.linalg.norm(historical_step[:3, 3])),
+    )
+
+    error = target_safety_error(bad_target, [0.0] * 5, _recorded_riot_limits())
+    assert error is not None
+    assert error.startswith("TCP translation step")
 
 
 def test_target_safety_rejects_unscaled_delta_and_workspace_violation():
@@ -147,4 +274,3 @@ def test_named_joint_drift_uses_names_not_message_order():
         [0.11, 0.19],
     )
     assert math.isclose(difference, 0.01, abs_tol=1.0e-12)
-
