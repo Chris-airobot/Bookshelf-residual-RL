@@ -193,6 +193,8 @@ class PolicyStreamAuditAccumulator:
         book_quaternion_xyzw,
         raw_metrics,
         observation,
+        normalized_observation,
+        actor_mean,
         policy_action,
         nominal_delta,
         residual_delta,
@@ -210,6 +212,11 @@ class PolicyStreamAuditAccumulator:
             "book_quaternion_xyzw": (book_quaternion_xyzw, 4),
             "raw_metrics": (raw_metrics, len(OBSERVATION_LABELS)),
             "observation": (observation, len(OBSERVATION_LABELS)),
+            "normalized_observation": (
+                normalized_observation,
+                len(OBSERVATION_LABELS),
+            ),
+            "actor_mean": (actor_mean, len(POLICY_ACTION_LABELS)),
             "policy_action": (policy_action, len(POLICY_ACTION_LABELS)),
             "nominal_delta": (nominal_delta, len(MOTION_LABELS)),
             "residual_delta": (residual_delta, len(MOTION_LABELS)),
@@ -254,6 +261,8 @@ class PolicyStreamAuditAccumulator:
             "book_quaternion_xyzw": parsed["book_quaternion_xyzw"],
             "raw_metrics": parsed["raw_metrics"],
             "observation": parsed["observation"],
+            "normalized_observation": parsed["normalized_observation"],
+            "actor_mean": parsed["actor_mean"],
             "policy_action": parsed["policy_action"],
             "nominal_delta": parsed["nominal_delta"],
             "residual_delta": parsed["residual_delta"],
@@ -349,6 +358,14 @@ class PolicyStreamAuditAccumulator:
                     [row["observation"] for row in self.rows],
                     OBSERVATION_LABELS,
                 ),
+                "normalized_observation": _labelled_vector_statistics(
+                    [row["normalized_observation"] for row in self.rows],
+                    OBSERVATION_LABELS,
+                ),
+                "actor_mean": _labelled_vector_statistics(
+                    [row["actor_mean"] for row in self.rows],
+                    POLICY_ACTION_LABELS,
+                ),
                 "policy_action": _labelled_vector_statistics(
                     [row["policy_action"] for row in self.rows],
                     POLICY_ACTION_LABELS,
@@ -368,8 +385,37 @@ class PolicyStreamAuditAccumulator:
             }
         )
         observations = np.asarray([row["observation"] for row in self.rows])
+        normalized = np.asarray(
+            [row["normalized_observation"] for row in self.rows]
+        )
+        actions = np.asarray([row["policy_action"] for row in self.rows])
         result["observation_clip_fraction"] = float(
             np.mean(np.abs(observations) >= 1.0 - 1.0e-7)
+        )
+        result["observation_clip_fraction_by_label"] = _fraction_by_label(
+            np.abs(observations) >= 1.0 - 1.0e-7,
+            OBSERVATION_LABELS,
+        )
+        result["normalized_abs_gt_3_fraction"] = float(
+            np.mean(np.abs(normalized) > 3.0)
+        )
+        result["normalized_abs_gt_3_fraction_by_label"] = _fraction_by_label(
+            np.abs(normalized) > 3.0,
+            OBSERVATION_LABELS,
+        )
+        result["normalized_abs_gt_5_fraction"] = float(
+            np.mean(np.abs(normalized) > 5.0)
+        )
+        result["normalized_abs_gt_5_fraction_by_label"] = _fraction_by_label(
+            np.abs(normalized) > 5.0,
+            OBSERVATION_LABELS,
+        )
+        result["policy_action_saturation_fraction"] = float(
+            np.mean(np.abs(actions) >= 1.0 - 1.0e-7)
+        )
+        result["policy_action_saturation_fraction_by_label"] = _fraction_by_label(
+            np.abs(actions) >= 1.0 - 1.0e-7,
+            POLICY_ACTION_LABELS,
         )
         if self.reference_slot_width_m > 0.0:
             error = width - self.reference_slot_width_m
@@ -413,6 +459,8 @@ class PolicyStreamAuditAccumulator:
             for prefix, labels in (
                 ("raw", OBSERVATION_LABELS),
                 ("obs", OBSERVATION_LABELS),
+                ("normalized", OBSERVATION_LABELS),
+                ("actor", POLICY_ACTION_LABELS),
                 ("action", POLICY_ACTION_LABELS),
                 ("nominal", MOTION_LABELS),
                 ("residual", MOTION_LABELS),
@@ -421,6 +469,8 @@ class PolicyStreamAuditAccumulator:
                 source_key = {
                     "raw": "raw_metrics",
                     "obs": "observation",
+                    "normalized": "normalized_observation",
+                    "actor": "actor_mean",
                     "action": "policy_action",
                     "nominal": "nominal_delta",
                     "residual": "residual_delta",
@@ -429,6 +479,98 @@ class PolicyStreamAuditAccumulator:
                 for label, value in zip(labels, row[source_key]):
                     output[f"{prefix}_{label}"] = float(value)
             yield output
+
+
+class PolicyActivationAuditAccumulator:
+    """Summarize the explicit global-planner to local-policy handoff stream."""
+
+    def __init__(self):
+        self.samples = 0
+        self.ready_samples = 0
+        self.instantaneous_ready_samples = 0
+        self.maximum_consecutive_ready_samples = 0
+        self.reason_counts = {}
+        self.normalized_outlier_counts = {}
+        self.envelope_outlier_counts = {}
+        self.geometry_rows = []
+        self.invalid_payloads = 0
+
+    def add(self, payload):
+        try:
+            ready = bool(payload["ready"])
+            instantaneous_ready = bool(payload["instantaneous_ready"])
+            consecutive = int(payload["consecutive_ready_samples"])
+            required = int(payload["required_stable_samples"])
+            reasons = [str(value) for value in payload.get("reasons", [])]
+            normalized_outliers = dict(payload.get("normalized_outliers", {}))
+            envelope_outliers = dict(payload.get("envelope_outliers", {}))
+            geometry = {
+                str(name): float(value)
+                for name, value in dict(payload.get("geometry", {})).items()
+            }
+            if consecutive < 0 or required < 1:
+                raise ValueError("activation sample counts are invalid")
+            if not all(math.isfinite(value) for value in geometry.values()):
+                raise ValueError("activation geometry contains non-finite values")
+        except (KeyError, TypeError, ValueError):
+            self.invalid_payloads += 1
+            return False
+
+        self.samples += 1
+        self.ready_samples += int(ready)
+        self.instantaneous_ready_samples += int(instantaneous_ready)
+        self.maximum_consecutive_ready_samples = max(
+            self.maximum_consecutive_ready_samples,
+            consecutive,
+        )
+        for reason in reasons:
+            self.reason_counts[reason] = self.reason_counts.get(reason, 0) + 1
+        for label in normalized_outliers:
+            self.normalized_outlier_counts[label] = (
+                self.normalized_outlier_counts.get(label, 0) + 1
+            )
+        for label in envelope_outliers:
+            self.envelope_outlier_counts[label] = (
+                self.envelope_outlier_counts.get(label, 0) + 1
+            )
+        if geometry:
+            self.geometry_rows.append(geometry)
+        return True
+
+    def summary(self):
+        total = self.samples
+        geometry = {}
+        if self.geometry_rows:
+            shared_labels = sorted(
+                set.intersection(*(set(row) for row in self.geometry_rows))
+            )
+            geometry = {
+                label: _scalar_statistics(
+                    [row[label] for row in self.geometry_rows]
+                )
+                for label in shared_labels
+            }
+        return {
+            "samples": total,
+            "invalid_payloads": self.invalid_payloads,
+            "ready_samples": self.ready_samples,
+            "ready_fraction": self.ready_samples / total if total else 0.0,
+            "instantaneous_ready_samples": self.instantaneous_ready_samples,
+            "instantaneous_ready_fraction": (
+                self.instantaneous_ready_samples / total if total else 0.0
+            ),
+            "maximum_consecutive_ready_samples": (
+                self.maximum_consecutive_ready_samples
+            ),
+            "reason_counts": dict(sorted(self.reason_counts.items())),
+            "normalized_outlier_counts": dict(
+                sorted(self.normalized_outlier_counts.items())
+            ),
+            "envelope_outlier_counts": dict(
+                sorted(self.envelope_outlier_counts.items())
+            ),
+            "geometry": geometry,
+        }
 
 
 def _scalar_statistics(values) -> dict:
@@ -445,6 +587,14 @@ def _labelled_vector_statistics(values, labels) -> dict:
     values = np.asarray(values, dtype=np.float64)
     return {
         label: _scalar_statistics(values[:, index])
+        for index, label in enumerate(labels)
+    }
+
+
+def _fraction_by_label(mask, labels) -> dict:
+    mask = np.asarray(mask, dtype=bool)
+    return {
+        label: float(np.mean(mask[:, index]))
         for index, label in enumerate(labels)
     }
 

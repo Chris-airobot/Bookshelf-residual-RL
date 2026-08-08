@@ -42,6 +42,8 @@ setup(
             "bookshelf_shadow_ros.calibrated_preinsert_target_node:main",
             "policy_tool_frame_audit = "
             "bookshelf_shadow_ros.policy_tool_frame_audit_node:main",
+            "experiment_logger = "
+            "bookshelf_shadow_ros.experiment_logger_node:main",
         ],
     },
 )

@@ -35,6 +35,16 @@ def generate_launch_description():
         "policy_bundle",
         description="Verified portable .npz actor and VecNormalize bundle.",
     )
+    activation_envelope_argument = DeclareLaunchArgument(
+        "activation_envelope",
+        default_value="",
+        description="Reviewed simulator-local activation-envelope JSON.",
+    )
+    require_activation_envelope_argument = DeclareLaunchArgument(
+        "require_activation_envelope",
+        default_value="true",
+        description="Fail closed unless the simulator activation envelope is loaded.",
+    )
     audit_config_argument = DeclareLaunchArgument(
         "audit_config",
         default_value=default_audit_config,
@@ -89,7 +99,16 @@ def generate_launch_description():
         output="screen",
         parameters=[
             LaunchConfiguration("inference_config"),
-            {"policy_bundle_path": LaunchConfiguration("policy_bundle")},
+            {
+                "policy_bundle_path": LaunchConfiguration("policy_bundle"),
+                "activation_envelope_path": LaunchConfiguration(
+                    "activation_envelope"
+                ),
+                "require_activation_envelope": ParameterValue(
+                    LaunchConfiguration("require_activation_envelope"),
+                    value_type=bool,
+                ),
+            },
         ],
     )
     audit = Node(
@@ -119,6 +138,8 @@ def generate_launch_description():
             adapter_config_argument,
             inference_config_argument,
             bundle_argument,
+            activation_envelope_argument,
+            require_activation_envelope_argument,
             audit_config_argument,
             enable_audit_argument,
             audit_output_argument,

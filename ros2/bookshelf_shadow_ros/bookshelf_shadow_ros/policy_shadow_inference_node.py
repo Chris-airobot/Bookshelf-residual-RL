@@ -8,6 +8,13 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32MultiArray, String
 
+from .policy_activation import (
+    PolicyActivationLimits,
+    PolicyActivationTracker,
+    activation_decision_dict,
+    evaluate_policy_activation,
+    load_activation_envelope,
+)
 from .policy_shadow_math import (
     MOTION_LABELS,
     NumpyActorBundle,
@@ -38,6 +45,14 @@ class PolicyShadowInferenceNode(Node):
             raise ValueError("policy_bundle_path is required.")
         self.bundle = NumpyActorBundle(bundle_path)
         self.bundle_sha256 = self.bundle.sha256
+        envelope_path = str(self.get_parameter("activation_envelope_path").value).strip()
+        self.activation_envelope = (
+            load_activation_envelope(envelope_path) if envelope_path else None
+        )
+        self.activation_limits = self._activation_limits()
+        self.activation_tracker = PolicyActivationTracker(
+            int(self.get_parameter("activation_stable_samples").value)
+        )
         self.motion_config = self._motion_config()
         self.nominal_config = self._nominal_config()
 
@@ -79,6 +94,16 @@ class PolicyShadowInferenceNode(Node):
             str(self.get_parameter("debug_topic").value),
             10,
         )
+        self.activation_ready_publisher = self.create_publisher(
+            Bool,
+            str(self.get_parameter("activation_ready_topic").value),
+            10,
+        )
+        self.activation_debug_publisher = self.create_publisher(
+            String,
+            str(self.get_parameter("activation_debug_topic").value),
+            10,
+        )
 
         self.create_subscription(
             Float32MultiArray,
@@ -117,6 +142,20 @@ class PolicyShadowInferenceNode(Node):
         self.declare_parameter("inference_rate_hz", 20.0)
         self.declare_parameter("message_max_age_s", 0.50)
         self.declare_parameter("pair_max_skew_s", 0.10)
+        self.declare_parameter("activation_envelope_path", "")
+        self.declare_parameter("require_activation_envelope", False)
+        self.declare_parameter("activation_stable_samples", 10)
+        self.declare_parameter("maximum_abs_normalized_observation", 5.0)
+        self.declare_parameter("activation_minimum_rear_to_mouth_m", -0.26)
+        self.declare_parameter("activation_maximum_rear_to_mouth_m", -0.10)
+        self.declare_parameter("activation_minimum_front_to_back_m", 0.12)
+        self.declare_parameter("activation_maximum_front_to_back_m", 0.32)
+        self.declare_parameter("activation_maximum_abs_lateral_error_m", 0.025)
+        self.declare_parameter("activation_maximum_abs_vertical_error_m", 0.030)
+        self.declare_parameter("activation_maximum_abs_yaw_error_rad", 0.3490658503988659)
+        self.declare_parameter("activation_maximum_gripper_open", 0.25)
+        self.declare_parameter("activation_required_mode", 0.0)
+        self.declare_parameter("activation_mode_tolerance", 1.0e-6)
 
         self.declare_parameter("observation_topic", "/bookshelf_policy/observation_12d")
         self.declare_parameter("raw_metrics_topic", "/bookshelf_policy/raw_metrics")
@@ -128,6 +167,12 @@ class PolicyShadowInferenceNode(Node):
         self.declare_parameter("nominal_delta_topic", "/bookshelf_shadow/nominal_delta")
         self.declare_parameter("final_delta_topic", "/bookshelf_shadow/final_delta")
         self.declare_parameter("debug_topic", "/bookshelf_shadow/policy_debug")
+        self.declare_parameter(
+            "activation_ready_topic", "/bookshelf_shadow/policy_activation_ready"
+        )
+        self.declare_parameter(
+            "activation_debug_topic", "/bookshelf_shadow/policy_activation_debug"
+        )
 
         self.declare_parameter("dx_action_scale", 0.0020)
         self.declare_parameter("dy_action_scale", 0.0010)
@@ -177,6 +222,43 @@ class PolicyShadowInferenceNode(Node):
                 float(self.get_parameter("final_dpitch_limit").value),
             ),
             release_threshold=float(self.get_parameter("release_threshold").value),
+        )
+
+    def _activation_limits(self) -> PolicyActivationLimits:
+        return PolicyActivationLimits(
+            maximum_abs_normalized_observation=float(
+                self.get_parameter("maximum_abs_normalized_observation").value
+            ),
+            minimum_rear_to_mouth_m=float(
+                self.get_parameter("activation_minimum_rear_to_mouth_m").value
+            ),
+            maximum_rear_to_mouth_m=float(
+                self.get_parameter("activation_maximum_rear_to_mouth_m").value
+            ),
+            minimum_front_to_back_m=float(
+                self.get_parameter("activation_minimum_front_to_back_m").value
+            ),
+            maximum_front_to_back_m=float(
+                self.get_parameter("activation_maximum_front_to_back_m").value
+            ),
+            maximum_abs_lateral_error_m=float(
+                self.get_parameter("activation_maximum_abs_lateral_error_m").value
+            ),
+            maximum_abs_vertical_error_m=float(
+                self.get_parameter("activation_maximum_abs_vertical_error_m").value
+            ),
+            maximum_abs_yaw_error_rad=float(
+                self.get_parameter("activation_maximum_abs_yaw_error_rad").value
+            ),
+            maximum_gripper_open=float(
+                self.get_parameter("activation_maximum_gripper_open").value
+            ),
+            required_mode=float(
+                self.get_parameter("activation_required_mode").value
+            ),
+            mode_tolerance=float(
+                self.get_parameter("activation_mode_tolerance").value
+            ),
         )
 
     def _nominal_config(self) -> NominalInsertConfig:
@@ -257,10 +339,56 @@ class PolicyShadowInferenceNode(Node):
     def _timer_callback(self):
         error = self._input_error()
         if error:
+            self.activation_tracker.reset()
             self._publish_invalid(error)
             return
 
         try:
+            normalized = self.bundle.normalize_observation(self.latest_observation)
+            activation_evaluation = evaluate_policy_activation(
+                self.latest_observation,
+                normalized,
+                self.latest_raw_metrics,
+                limits=self.activation_limits,
+                envelope=self.activation_envelope,
+                require_envelope=bool(
+                    self.get_parameter("require_activation_envelope").value
+                ),
+            )
+            activation = self.activation_tracker.update(activation_evaluation)
+            activation_debug = activation_decision_dict(activation)
+            activation_debug.update(
+                {
+                    "shadow_only": True,
+                    "hardware_commanded": False,
+                    "envelope_source": (
+                        self.activation_envelope.source
+                        if self.activation_envelope is not None
+                        else None
+                    ),
+                }
+            )
+            self._publish_activation(activation_debug)
+            if not activation.ready:
+                reason = (
+                    "; ".join(activation.evaluation.reasons)
+                    if activation.evaluation.reasons
+                    else (
+                        "waiting for stable activation samples "
+                        f"({activation.consecutive_ready_samples}/"
+                        f"{activation.required_stable_samples})"
+                    )
+                )
+                self._publish_invalid(
+                    f"policy activation not ready: {reason}",
+                    details={
+                        "policy_activation": activation_debug,
+                        "vecnormalize_applied": True,
+                        "observation_12d": self.latest_observation.round(7).tolist(),
+                        "normalized_observation": normalized.round(7).tolist(),
+                    },
+                )
+                return
             normalized, actor_mean, policy_action = self.bundle.predict(
                 self.latest_observation
             )
@@ -282,6 +410,7 @@ class PolicyShadowInferenceNode(Node):
         release_requested = release_action > self.motion_config.release_threshold
 
         self.inference_valid_publisher.publish(Bool(data=True))
+        self.activation_ready_publisher.publish(Bool(data=True))
         self.policy_action_publisher.publish(
             Float32MultiArray(data=policy_action.tolist())
         )
@@ -302,6 +431,8 @@ class PolicyShadowInferenceNode(Node):
             "bundle_sha256": self.bundle_sha256,
             "vecnormalize_applied": True,
             "deterministic": True,
+            "policy_activation_ready": True,
+            "policy_activation": activation_debug,
             "observation_12d": self.latest_observation.round(7).tolist(),
             "normalized_observation": normalized.round(7).tolist(),
             "actor_mean": actor_mean.round(7).tolist(),
@@ -331,8 +462,37 @@ class PolicyShadowInferenceNode(Node):
             "Valid shadow inference: VecNormalize -> PPO actor -> nominal/residual diagnostics.",
         )
 
-    def _publish_invalid(self, reason: str):
+    def _publish_activation(self, debug):
+        self.activation_ready_publisher.publish(Bool(data=bool(debug["ready"])))
+        self.activation_debug_publisher.publish(
+            String(data=json.dumps(debug, sort_keys=True))
+        )
+
+    def _publish_invalid(self, reason: str, *, details=None):
+        details = dict(details or {})
+        activation = details.get("policy_activation")
+        if activation is None:
+            activation = {
+                "ready": False,
+                "instantaneous_ready": False,
+                "consecutive_ready_samples": 0,
+                "required_stable_samples": self.activation_tracker.required_stable_samples,
+                "reasons": [reason],
+                "normalized_outliers": {},
+                "envelope_outliers": {},
+                "geometry": {},
+                "shadow_only": True,
+                "hardware_commanded": False,
+                "envelope_source": (
+                    self.activation_envelope.source
+                    if self.activation_envelope is not None
+                    else None
+                ),
+            }
+            details["policy_activation"] = activation
+            self._publish_activation(activation)
         self.inference_valid_publisher.publish(Bool(data=False))
+        self.activation_ready_publisher.publish(Bool(data=False))
         debug = {
             "valid": False,
             "shadow_only": True,
@@ -340,6 +500,7 @@ class PolicyShadowInferenceNode(Node):
             "reason": reason,
             "release_executed": False,
         }
+        debug.update(details)
         self.debug_publisher.publish(String(data=json.dumps(debug, sort_keys=True)))
         self._log_status_once(f"invalid:{reason}", f"Shadow inference invalid: {reason}", warning=True)
 

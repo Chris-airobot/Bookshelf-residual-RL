@@ -13,7 +13,10 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import Bool, Float32, Float32MultiArray, String
 
-from .offline_validation import PolicyStreamAuditAccumulator
+from .offline_validation import (
+    PolicyActivationAuditAccumulator,
+    PolicyStreamAuditAccumulator,
+)
 from .policy_observation_math import OBSERVATION_LABELS
 from .policy_shadow_math import MOTION_LABELS, POLICY_ACTION_LABELS
 
@@ -29,6 +32,7 @@ class PolicyStreamAuditNode(Node):
                 self.get_parameter("reference_slot_width_m").value
             )
         )
+        self.activation_accumulator = PolicyActivationAuditAccumulator()
         self.latest = {}
         self.completed = False
 
@@ -116,6 +120,12 @@ class PolicyStreamAuditNode(Node):
             self._policy_debug_callback,
             10,
         )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("activation_debug_topic").value),
+            self._activation_debug_callback,
+            10,
+        )
 
         self.get_logger().info(
             "Policy stream audit started. It only subscribes and writes CSV/JSON."
@@ -158,6 +168,9 @@ class PolicyStreamAuditNode(Node):
         self.declare_parameter("final_delta_topic", "/bookshelf_shadow/final_delta")
         self.declare_parameter(
             "policy_debug_topic", "/bookshelf_shadow/policy_debug"
+        )
+        self.declare_parameter(
+            "activation_debug_topic", "/bookshelf_shadow/policy_activation_debug"
         )
         self.declare_parameter("expected_base_frame", "link_base")
         self.declare_parameter("pair_max_age_s", 0.20)
@@ -251,6 +264,12 @@ class PolicyStreamAuditNode(Node):
             policy_observation = np.asarray(
                 policy_debug["observation_12d"], dtype=np.float64
             )
+            if not bool(policy_debug.get("vecnormalize_applied", False)):
+                raise ValueError("policy debug did not apply VecNormalize")
+            normalized_observation = np.asarray(
+                policy_debug["normalized_observation"], dtype=np.float64
+            )
+            actor_mean = np.asarray(policy_debug["actor_mean"], dtype=np.float64)
             if (
                 adapter_observation.shape != (len(OBSERVATION_LABELS),)
                 or policy_observation.shape != (len(OBSERVATION_LABELS),)
@@ -321,6 +340,8 @@ class PolicyStreamAuditNode(Node):
             ],
             raw_metrics=raw_metrics,
             observation=policy_observation,
+            normalized_observation=normalized_observation,
+            actor_mean=actor_mean,
             policy_action=policy_action,
             nominal_delta=nominal_delta,
             residual_delta=residual_delta,
@@ -338,6 +359,14 @@ class PolicyStreamAuditNode(Node):
             ),
         )
         self._maybe_report()
+
+    def _activation_debug_callback(self, message):
+        try:
+            payload = json.loads(message.data)
+        except json.JSONDecodeError:
+            self.activation_accumulator.invalid_payloads += 1
+            return
+        self.activation_accumulator.add(payload)
 
     def _maybe_report(self):
         target = max(int(self.get_parameter("target_samples").value), 1)
@@ -376,6 +405,7 @@ class PolicyStreamAuditNode(Node):
                 "configured slot width/confidence may come directly from adapter_debug"
             ),
             "policy_stream": self.accumulator.summary(),
+            "policy_activation": self.activation_accumulator.summary(),
             "limitations": [
                 "Policy outputs are diagnostics and were not executed.",
                 "Slot pose accuracy is unverified without a physical reference.",

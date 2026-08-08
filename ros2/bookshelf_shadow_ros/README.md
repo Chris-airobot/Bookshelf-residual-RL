@@ -765,3 +765,12 @@ not absolute slot-pose accuracy.
 The explicit shadow-only `AMENT_PREFIX_PATH` and `PYTHONPATH` avoid importing
 the separate `bookshelf_policy_ros/launch` Python package as ROS 2's own
 `launch` module in this merged local workspace.
+
+## Global-to-local activation gate
+
+The PPO actor is now guarded by an explicit local-policy activation gate. It
+combines raw pre-insertion geometry, VecNormalize distribution checks, a
+simulator-derived per-channel envelope, and a consecutive-sample requirement.
+See [OFFLINE_HANDOFF.md](OFFLINE_HANDOFF.md) for the acceptance logic and the
+remaining physical checks. The gate only enables shadow inference; it never
+authorizes hardware execution.

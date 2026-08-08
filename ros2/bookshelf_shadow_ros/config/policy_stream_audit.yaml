@@ -15,6 +15,7 @@ policy_stream_audit:
     residual_delta_topic: /bookshelf_shadow/residual_delta
     final_delta_topic: /bookshelf_shadow/final_delta
     policy_debug_topic: /bookshelf_shadow/policy_debug
+    activation_debug_topic: /bookshelf_shadow/policy_activation_debug
 
     expected_base_frame: link_base
     pair_max_age_s: 0.20

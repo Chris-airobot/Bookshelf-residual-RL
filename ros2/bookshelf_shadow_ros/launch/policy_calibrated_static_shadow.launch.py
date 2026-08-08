@@ -39,6 +39,16 @@ def generate_launch_description():
             description="Verified portable .npz actor and VecNormalize bundle.",
         ),
         DeclareLaunchArgument(
+            "activation_envelope",
+            default_value="",
+            description="Reviewed simulator-local activation-envelope JSON.",
+        ),
+        DeclareLaunchArgument(
+            "require_activation_envelope",
+            default_value="true",
+            description="Fail closed unless the simulator activation envelope is loaded.",
+        ),
+        DeclareLaunchArgument(
             "enable_audit",
             default_value="true",
             description="Record the subscriber-only shadow stream.",
@@ -85,7 +95,16 @@ def generate_launch_description():
         output="screen",
         parameters=[
             inference_config,
-            {"policy_bundle_path": LaunchConfiguration("policy_bundle")},
+            {
+                "policy_bundle_path": LaunchConfiguration("policy_bundle"),
+                "activation_envelope_path": LaunchConfiguration(
+                    "activation_envelope"
+                ),
+                "require_activation_envelope": ParameterValue(
+                    LaunchConfiguration("require_activation_envelope"),
+                    value_type=bool,
+                ),
+            },
             common_parameters,
         ],
     )

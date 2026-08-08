@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from bookshelf_shadow_ros.offline_validation import (
+    PolicyActivationAuditAccumulator,
     PolicyStreamAuditAccumulator,
     SlotAuditAccumulator,
     audit_shadow_source_tree,
@@ -110,6 +111,21 @@ def _add_complete_policy_sample(audit, *, width=0.0384, lateral=0.001):
             0.0,
             0.0,
         ],
+        normalized_observation=[
+            0.0,
+            -5.5,
+            3.5,
+            -0.1,
+            0.0,
+            0.0,
+            -0.24,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        actor_mean=[0.1, -0.2, 1.2, -1.3, 0.5, -2.0],
         policy_action=[0.1, -0.2, 0.3, -0.4, 0.5, -1.0],
         nominal_delta=[0.001, 0.00025, 0.00108, 0.0, 0.0],
         residual_delta=[0.0002, -0.0002, 0.00045, -0.002, 0.002],
@@ -147,6 +163,9 @@ def test_policy_stream_audit_reports_base_axes_and_reference_width_error():
         "measured_rgbd_static_no_absolute_ground_truth": 5
     }
     assert summary["observation_clip_fraction"] == 0.0
+    assert summary["normalized_abs_gt_3_fraction_by_label"]["front_to_back"] == 1.0
+    assert summary["normalized_abs_gt_5_fraction_by_label"]["rear_to_mouth"] == 1.0
+    assert summary["policy_action_saturation_fraction_by_label"]["release"] == 1.0
     assert len(list(audit.csv_rows())) == 5
 
 
@@ -161,6 +180,8 @@ def test_policy_stream_audit_rejects_malformed_complete_sample():
         book_quaternion_xyzw=[0.0, 0.0, 0.0, 1.0],
         raw_metrics=[0.0] * 11,
         observation=[0.0] * 12,
+        normalized_observation=[0.0] * 12,
+        actor_mean=[0.0] * 6,
         policy_action=[0.0] * 6,
         nominal_delta=[0.0] * 5,
         residual_delta=[0.0] * 5,
@@ -173,3 +194,40 @@ def test_policy_stream_audit_rejects_malformed_complete_sample():
     assert summary["complete_samples"] == 0
     assert summary["invalid_samples"] == 1
     assert "raw_metrics must have shape" in next(iter(summary["invalid_reasons"]))
+
+
+def test_policy_activation_audit_reports_handoff_reasons_and_stability():
+    audit = PolicyActivationAuditAccumulator()
+    blocked = {
+        "ready": False,
+        "instantaneous_ready": False,
+        "consecutive_ready_samples": 0,
+        "required_stable_samples": 2,
+        "reasons": ["lateral error exceeds the local-policy limit"],
+        "normalized_outliers": {"lat_err": -10.0},
+        "envelope_outliers": {"lat_err": {"value": -10.0}},
+        "geometry": {"lat_err": 0.043, "z_err": -0.063},
+    }
+    warming = {
+        "ready": False,
+        "instantaneous_ready": True,
+        "consecutive_ready_samples": 1,
+        "required_stable_samples": 2,
+        "reasons": [],
+        "normalized_outliers": {},
+        "envelope_outliers": {},
+        "geometry": {"lat_err": 0.001, "z_err": 0.006},
+    }
+    ready = {**warming, "ready": True, "consecutive_ready_samples": 2}
+
+    assert audit.add(blocked)
+    assert audit.add(warming)
+    assert audit.add(ready)
+    summary = audit.summary()
+    assert summary["samples"] == 3
+    assert summary["ready_samples"] == 1
+    assert summary["instantaneous_ready_samples"] == 2
+    assert summary["maximum_consecutive_ready_samples"] == 2
+    assert summary["normalized_outlier_counts"] == {"lat_err": 1}
+    assert summary["envelope_outlier_counts"] == {"lat_err": 1}
+    assert summary["geometry"]["lat_err"]["max"] == 0.043

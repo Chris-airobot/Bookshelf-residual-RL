@@ -5,6 +5,24 @@ policy_shadow_inference:
     message_max_age_s: 0.50
     pair_max_skew_s: 0.10
 
+    # Global planner -> local residual-policy handoff. The policy remains
+    # inactive until geometry is near the simulator pre-insertion region and
+    # the normalized observation is inside a reviewed simulator envelope.
+    activation_envelope_path: ""
+    require_activation_envelope: true
+    activation_stable_samples: 10
+    maximum_abs_normalized_observation: 5.0
+    activation_minimum_rear_to_mouth_m: -0.26
+    activation_maximum_rear_to_mouth_m: -0.10
+    activation_minimum_front_to_back_m: 0.12
+    activation_maximum_front_to_back_m: 0.32
+    activation_maximum_abs_lateral_error_m: 0.025
+    activation_maximum_abs_vertical_error_m: 0.030
+    activation_maximum_abs_yaw_error_rad: 0.3490658503988659
+    activation_maximum_gripper_open: 0.25
+    activation_required_mode: 0.0
+    activation_mode_tolerance: 1.0e-6
+
     observation_topic: /bookshelf_policy/observation_12d
     raw_metrics_topic: /bookshelf_policy/raw_metrics
     observation_valid_topic: /bookshelf_policy/observation_valid
@@ -16,6 +34,8 @@ policy_shadow_inference:
     nominal_delta_topic: /bookshelf_shadow/nominal_delta
     final_delta_topic: /bookshelf_shadow/final_delta
     debug_topic: /bookshelf_shadow/policy_debug
+    activation_ready_topic: /bookshelf_shadow/policy_activation_ready
+    activation_debug_topic: /bookshelf_shadow/policy_activation_debug
 
     # Exact scales from Bookshelf-Residual-Direct-v0.
     dx_action_scale: 0.0020
