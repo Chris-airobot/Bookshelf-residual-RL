@@ -8,6 +8,8 @@ def test_marker_vision_bringup_has_manual_robot_control_but_no_policy_executor()
     assert "robot_setup.launch.py" in source
     assert '"enable_robot_control"' in source
     assert 'default_value="true"' in source
+    assert '"show_rviz"' in source
+    assert '"show_rviz": LaunchConfiguration("show_rviz")' in source
     assert '"enable_rviz": "false"' in source
     assert 'package="rviz2"' not in source
     assert '"enable_calibrated_book_detection"' in source
@@ -22,3 +24,12 @@ def test_marker_vision_bringup_has_manual_robot_control_but_no_policy_executor()
     )
     for token in forbidden:
         assert token not in source
+
+
+def test_robot_setup_forwards_headless_rviz_option():
+    source = (
+        Path(__file__).parents[1] / "launch" / "robot_setup.launch.py"
+    ).read_text(encoding="utf-8")
+    assert "'show_rviz'" in source
+    assert "default_value='false'" in source
+    assert "'show_rviz':   show_rviz" in source

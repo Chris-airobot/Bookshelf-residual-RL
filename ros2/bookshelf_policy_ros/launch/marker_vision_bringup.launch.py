@@ -84,6 +84,11 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            "show_rviz",
+            default_value="false",
+            description="Start MoveIt RViz. Keep false for SSH/headless bringup.",
+        ),
+        DeclareLaunchArgument(
             "enable_calibrated_book_detection",
             default_value="true",
             description="Detect calibrated ArUco Original ID 0 on the held book.",
@@ -106,13 +111,17 @@ def generate_launch_description():
         ),
         LogInfo(
             msg=(
-                "Starting marker vision, calibrated book RViz, and optional "
-                "manual xArm/MoveIt bringup. No bookshelf policy executor is launched."
+                "Starting marker vision and optional manual xArm/MoveIt bringup. "
+                "MoveIt RViz is disabled by default. No bookshelf policy executor "
+                "is launched."
             )
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(robot_launch)),
             condition=robot_condition,
+            launch_arguments={
+                "show_rviz": LaunchConfiguration("show_rviz"),
+            }.items(),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(camera_launch))

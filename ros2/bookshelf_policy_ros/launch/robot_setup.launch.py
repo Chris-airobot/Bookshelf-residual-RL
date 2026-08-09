@@ -4,7 +4,7 @@
 import os
 
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
@@ -19,7 +19,7 @@ def generate_launch_description():
     robot_type  = LaunchConfiguration('robot_type', default='xarm')
     prefix      = LaunchConfiguration('prefix', default='')
     hw_ns       = LaunchConfiguration('hw_ns', default='xarm')
-    show_rviz   = LaunchConfiguration('show_rviz', default='true')
+    show_rviz   = LaunchConfiguration('show_rviz')
 
     # ---- Add xarm_api driver launch ----
     xarm_api_driver = IncludeLaunchDescription(
@@ -49,6 +49,7 @@ def generate_launch_description():
             'robot_ip':    robot_ip,
             'add_gripper': add_gripper,
             'limited':     limited,
+            'show_rviz':   show_rviz,
         }.items(),
     )
 
@@ -72,6 +73,11 @@ def generate_launch_description():
     )
 
     return LaunchDescription([
+        DeclareLaunchArgument(
+            'show_rviz',
+            default_value='false',
+            description='Start MoveIt RViz. Keep false for SSH/headless bringup.',
+        ),
         moveit_realmove,
         robot_planner,
     ])
