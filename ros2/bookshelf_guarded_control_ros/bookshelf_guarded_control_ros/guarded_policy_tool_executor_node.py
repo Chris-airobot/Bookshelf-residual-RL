@@ -10,6 +10,7 @@ import rclpy
 from std_msgs.msg import String
 
 from .policy_tool_control_math import (
+    OneShotExecutionGuard,
     execution_authorization_error,
     maximum_named_joint_difference,
 )
@@ -49,7 +50,7 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
             10,
         )
         self.execution_busy = False
-        self.execution_count = 0
+        self.execution_guard = OneShotExecutionGuard()
 
         if self.execution_client is None:
             self.get_logger().warning(
@@ -101,6 +102,7 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
             ),
             plan_valid=self.latest_plan is not None,
             busy=self.execution_busy,
+            execution_consumed=self.execution_guard.consumed,
         )
         if error is None:
             error = self._input_error()
@@ -140,12 +142,47 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
             )
             return
 
+        # Consume the process-lifetime allowance before submitting the goal. It
+        # is deliberately never restored, including when submission or
+        # execution fails. try_consume() is atomic so this remains one-shot if
+        # callbacks are ever dispatched by a multi-threaded executor.
+        if not self.execution_guard.try_consume():
+            self._publish_execution_report(
+                {
+                    "accepted": False,
+                    "hardware_commanded": False,
+                    "approval_consumed": True,
+                    "execution_count": self.execution_guard.execution_count,
+                    "reason": (
+                        "the one-execution-per-process allowance has already "
+                        "been consumed"
+                    ),
+                },
+                warning=True,
+            )
+            return
+
         plan = self.latest_plan
         self.latest_plan = None
         self.execution_busy = True
         goal = ExecuteTrajectory.Goal()
         goal.trajectory = plan.trajectory
-        future = self.execution_client.send_goal_async(goal)
+        try:
+            future = self.execution_client.send_goal_async(goal)
+        except Exception as error:
+            self.execution_busy = False
+            self._publish_execution_report(
+                {
+                    "accepted": True,
+                    "hardware_commanded": False,
+                    "target_id": plan.target.target_id,
+                    "approval_consumed": True,
+                    "execution_count": self.execution_guard.execution_count,
+                    "reason": f"trajectory goal submission failed: {error}",
+                },
+                warning=True,
+            )
+            return
         future.add_done_callback(
             lambda result_future: self._goal_response_callback(result_future, plan)
         )
@@ -154,6 +191,8 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
                 "accepted": True,
                 "hardware_commanded": True,
                 "target_id": plan.target.target_id,
+                "approval_consumed": True,
+                "execution_count": self.execution_guard.execution_count,
                 "reason": "one approved MoveIt trajectory submitted",
             }
         )
@@ -188,6 +227,8 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
                     "accepted": False,
                     "hardware_commanded": False,
                     "target_id": plan.target.target_id,
+                    "approval_consumed": True,
+                    "execution_count": self.execution_guard.execution_count,
                     "reason": f"trajectory goal submission failed: {error}",
                 },
                 warning=True,
@@ -200,12 +241,29 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
                     "accepted": False,
                     "hardware_commanded": False,
                     "target_id": plan.target.target_id,
+                    "approval_consumed": True,
+                    "execution_count": self.execution_guard.execution_count,
                     "reason": "MoveIt rejected the trajectory goal",
                 },
                 warning=True,
             )
             return
-        result_future = goal_handle.get_result_async()
+        try:
+            result_future = goal_handle.get_result_async()
+        except Exception as error:
+            self.execution_busy = False
+            self._publish_execution_report(
+                {
+                    "accepted": True,
+                    "hardware_commanded": True,
+                    "target_id": plan.target.target_id,
+                    "approval_consumed": True,
+                    "execution_count": self.execution_guard.execution_count,
+                    "reason": f"trajectory result request failed: {error}",
+                },
+                warning=True,
+            )
+            return
         result_future.add_done_callback(
             lambda value: self._execution_result_callback(value, plan)
         )
@@ -222,12 +280,13 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
                     "accepted": True,
                     "hardware_commanded": True,
                     "target_id": plan.target.target_id,
+                    "approval_consumed": True,
+                    "execution_count": self.execution_guard.execution_count,
                     "reason": f"trajectory result failed: {error}",
                 },
                 warning=True,
             )
             return
-        self.execution_count += 1
         self._publish_execution_report(
             {
                 "accepted": True,
@@ -235,7 +294,7 @@ class GuardedPolicyToolExecutorNode(PolicyToolPlannerBase):
                 "target_id": plan.target.target_id,
                 "moveit_error_code": error_code,
                 "action_status": status,
-                "execution_count": self.execution_count,
+                "execution_count": self.execution_guard.execution_count,
                 "approval_consumed": True,
                 "reason": "trajectory execution completed",
             },

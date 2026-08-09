@@ -35,6 +35,25 @@ def test_shadow_source_tree_has_no_robot_command_path():
     assert audit_shadow_source_tree(PACKAGE_SOURCE) == []
 
 
+def test_shadow_source_audit_only_exempts_rosbag_core_topic_literals(tmp_path):
+    logger = tmp_path / "experiment_logging.launch.py"
+    recorded_topic = (
+        "/x" + "arm7_traj_controller/follow" + "_joint_trajectory/_action/goal"
+    )
+    forbidden_topic = "/x" + "arm/command"
+    logger.write_text(
+        f"CORE_TOPICS = [{recorded_topic!r}]\n"
+        f"NOT_RECORDING = {forbidden_topic!r}\n",
+        encoding="utf-8",
+    )
+    findings = audit_shadow_source_tree(tmp_path)
+    assert len(findings) == 1
+    assert findings[0]["line"] == 2
+    assert findings[0]["reason"] == (
+        f"forbidden command namespace: {forbidden_topic[:5]}"
+    )
+
+
 def test_portable_controller_constants_match_simulator_source():
     result = controller_config_parity(ENV_CFG)
     assert result["passed"], result["mismatches"]

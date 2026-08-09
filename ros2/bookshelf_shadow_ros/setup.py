@@ -34,6 +34,8 @@ setup(
             "sim_rgb_camera_viewer = bookshelf_shadow_ros.sim_rgb_camera_viewer:main",
             "slot_detection_audit = "
             "bookshelf_shadow_ros.slot_detection_audit_node:main",
+            "static_slot_environment_check = "
+            "bookshelf_shadow_ros.static_slot_environment_check_node:main",
             "policy_stream_audit = "
             "bookshelf_shadow_ros.policy_stream_audit_node:main",
             "marker_book_calibrator = "

@@ -772,6 +772,27 @@ def audit_shadow_source_tree(source_root) -> list[dict]:
             findings.append({"path": str(path), "line": 0, "reason": f"parse error: {error}"})
             continue
 
+        # The dedicated logger is allowed to name command topics only inside
+        # its rosbag recording list. Merely subscribing/recording those exact
+        # strings is important evidence and does not expose a command path.
+        record_only_topic_nodes = set()
+        if path.name == "experiment_logging.launch.py":
+            for statement in tree.body:
+                if not isinstance(statement, ast.Assign):
+                    continue
+                if not any(
+                    isinstance(target, ast.Name) and target.id == "CORE_TOPICS"
+                    for target in statement.targets
+                ):
+                    continue
+                if isinstance(statement.value, (ast.List, ast.Tuple)):
+                    record_only_topic_nodes.update(
+                        id(element)
+                        for element in statement.value.elts
+                        if isinstance(element, ast.Constant)
+                        and isinstance(element.value, str)
+                    )
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
@@ -806,15 +827,16 @@ def audit_shadow_source_tree(source_root) -> list[dict]:
                     )
 
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                for fragment in forbidden_topic_fragments:
-                    if fragment in node.value:
-                        findings.append(
-                            {
-                                "path": str(path),
-                                "line": int(getattr(node, "lineno", 0)),
-                                "reason": f"forbidden command namespace: {fragment}",
-                            }
-                        )
+                if id(node) not in record_only_topic_nodes:
+                    for fragment in forbidden_topic_fragments:
+                        if fragment in node.value:
+                            findings.append(
+                                {
+                                    "path": str(path),
+                                    "line": int(getattr(node, "lineno", 0)),
+                                    "reason": f"forbidden command namespace: {fragment}",
+                                }
+                            )
                 for fragment in forbidden_process_fragments:
                     if fragment in node.value:
                         findings.append(

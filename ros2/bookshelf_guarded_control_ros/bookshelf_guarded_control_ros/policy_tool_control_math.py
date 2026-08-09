@@ -6,11 +6,38 @@ from dataclasses import dataclass
 import hashlib
 import json
 import math
+import threading
 
 import numpy as np
 
 
 MOTION_LABELS = ("dx", "dy", "dz", "dyaw", "dpitch")
+
+
+class OneShotExecutionGuard:
+    """Atomically consume the process's single trajectory submission slot."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._consumed = False
+
+    @property
+    def consumed(self) -> bool:
+        with self._lock:
+            return self._consumed
+
+    @property
+    def execution_count(self) -> int:
+        return int(self.consumed)
+
+    def try_consume(self) -> bool:
+        """Return true exactly once for the lifetime of this guard."""
+
+        with self._lock:
+            if self._consumed:
+                return False
+            self._consumed = True
+            return True
 
 
 @dataclass(frozen=True)
@@ -311,6 +338,7 @@ def execution_authorization_error(
     maximum_plan_age_s: float,
     plan_valid: bool,
     busy: bool,
+    execution_consumed: bool,
 ) -> str | None:
     if dry_run:
         return "dry_run is true"
@@ -325,6 +353,8 @@ def execution_authorization_error(
         return "approval token does not match"
     if busy:
         return "an execution is already active"
+    if execution_consumed:
+        return "the one-execution-per-process allowance has already been consumed"
     if not plan_valid:
         return "no valid collision-checked plan is available"
     if plan_age_s is None or not math.isfinite(float(plan_age_s)):

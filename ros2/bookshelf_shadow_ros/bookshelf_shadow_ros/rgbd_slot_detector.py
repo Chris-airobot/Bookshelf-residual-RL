@@ -13,7 +13,12 @@ import numpy as np
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Float32
 
@@ -137,7 +142,18 @@ class RgbdSlotDetector(Node):
         self.right_publisher = self.create_publisher(PointStamped, "/slot_detector/right_boundary", 10)
         self.width_publisher = self.create_publisher(Float32, "/slot_detector/slot_width", 10)
         self.confidence_publisher = self.create_publisher(Float32, "/slot_detector/confidence", 10)
-        self.debug_publisher = self.create_publisher(Image, self.debug_image_topic, qos_profile_sensor_data)
+        # This is a derived visualization stream rather than a camera-driver
+        # transport. RViz Image displays default to RELIABLE in Humble, so a
+        # BEST_EFFORT publisher silently leaves the display empty. Keep only
+        # the newest frame while making the default RViz subscription match.
+        debug_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.debug_publisher = self.create_publisher(
+            Image, self.debug_image_topic, debug_qos
+        )
 
         self.create_subscription(Image, self.image_topic, self._rgb_callback, qos_profile_sensor_data)
         self.create_subscription(Image, self.depth_topic, self._depth_callback, qos_profile_sensor_data)

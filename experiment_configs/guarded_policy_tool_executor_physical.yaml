@@ -1,0 +1,89 @@
+# Candidate physical-trial configuration for separate operator review.
+#
+# This file is deliberately fail-closed while the global MoveIt positioning and
+# plan-only evidence are collected.  Do not open the four REVIEW HOLD gates
+# below unless the physical policy-tool frame and the complete MoveIt collision
+# scene have both been independently checked for this exact shelf/book/grasp.
+#
+# The executor code enforces one trajectory submission for the entire process
+# lifetime. This repository copy is a non-secret template; generate a unique
+# one-session token only in the separately reviewed external experiment file.
+guarded_policy_tool_executor:
+  ros__parameters:
+    base_frame: link_base
+    tcp_frame: link_tcp
+    planning_link: link_tcp
+    group_name: xarm7
+    planning_service: /plan_kinematic_path
+    planning_pipeline_id: ""
+    planner_id: ""
+    planning_attempts: 3
+    allowed_planning_time_s: 2.0
+    velocity_scaling: 0.03
+    acceleration_scaling: 0.03
+    position_tolerance_m: 0.0005
+    orientation_tolerance_rad: 0.008726646259971648
+    planning_rate_hz: 1.0
+    message_max_age_s: 0.50
+    tf_max_age_s: 0.50
+    tf_lookup_timeout_s: 0.10
+    command_scale: 0.10
+
+    tcp_policy_tool_translation_xyz:
+      - 0.009119326451322136
+      - -0.04695895701970321
+      - -0.04939917878569483
+    tcp_policy_tool_quaternion_xyzw:
+      - -0.7018277662283674
+      - -0.03279647137253109
+      - -0.00294897656373922
+      - 0.7115851892455586
+    expected_policy_tool_status: derived_unverified_sim_to_xarm_nominal_2026_08_06
+    expected_slot_status: measured_rgbd_static_no_absolute_ground_truth
+    expected_book_status: measured_aruco_original_id0_static_grasp
+    expected_bundle_sha256: 75773dde0edabebcb525469c2e2b1cf868d7724f45a9f661f994cd8847a0ab19
+
+    # REVIEW HOLD: all four gates remain closed until the live plan-only review.
+    allow_unverified_policy_tool: false
+    planning_scene_complete: false
+    dry_run: true
+    allow_execution: false
+
+    # Exact std_msgs/msg/String data required on approval_topic. The hard
+    # process-lifetime latch consumes it before the first submission attempt.
+    approval_token: REPLACE_WITH_UNIQUE_ONE_SESSION_TOKEN
+    approval_topic: /bookshelf_guarded/approve_once
+    execution_action: /execute_trajectory
+    maximum_plan_age_s: 1.0
+    maximum_start_joint_drift_rad: 0.02
+    result_topic: /bookshelf_guarded/execution_report
+
+    maximum_policy_delta:
+      - 0.008
+      - 0.003
+      - 0.007
+      - 0.013962634015954637
+      - 0.010471975511965976
+    maximum_tcp_translation_step_m: 0.003
+    maximum_tcp_rotation_step_rad: 0.004363323129985824
+    workspace_min_xyz: [0.20, -0.60, 0.05]
+    workspace_max_xyz: [1.00, 0.60, 1.00]
+    blocked_node_names:
+      - policy_to_robot_node
+      - cartesian_action_executor_node
+      - action_executor_node
+
+    # inference_valid and policy_debug become valid only after the upstream
+    # policy-activation tracker has produced its required stable-ready streak.
+    observation_valid_topic: /bookshelf_policy/observation_valid
+    inference_valid_topic: /bookshelf_shadow/inference_valid
+    final_delta_topic: /bookshelf_shadow/final_delta
+    slot_pose_base_topic: /bookshelf_policy/slot_pose_base
+    joint_states_topic: /joint_states
+    adapter_debug_topic: /bookshelf_policy/adapter_debug
+    policy_debug_topic: /bookshelf_shadow/policy_debug
+    plan_valid_topic: /bookshelf_guarded/plan_valid
+    plan_report_topic: /bookshelf_guarded/plan_report
+    target_policy_tool_topic: /bookshelf_guarded/target_policy_tool
+    target_tcp_topic: /bookshelf_guarded/target_tcp
+    planned_trajectory_topic: /bookshelf_guarded/planned_trajectory

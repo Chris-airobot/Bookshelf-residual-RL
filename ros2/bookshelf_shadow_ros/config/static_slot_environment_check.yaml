@@ -1,0 +1,43 @@
+# Pre-experiment, read-only comparison with the immutable calibrated slot.
+static_slot_environment_check:
+  ros__parameters:
+    base_frame: link_base
+
+    # Must remain synchronized with calibrated_preinsert_target.yaml. This node
+    # reports disagreement but never updates these values.
+    static_slot_translation_xyz:
+      - 0.8741794456118123
+      - 0.0807494671987291
+      - 0.2473493846631505
+    static_slot_quaternion_xyzw:
+      - 0.002228045026061973
+      - 0.0499056226703669
+      - 0.05101853094791474
+      - 0.9974475295177995
+    static_slot_width_m: 0.036050625653429466
+    static_slot_transform_status: measured_rgbd_static_no_absolute_ground_truth
+
+    slot_depth_m: 0.20
+    # Display-only extent; the slot height was not independently calibrated.
+    visual_slot_height_m: 0.25
+
+    # Fixed review gates. Investigate a failure; do not loosen these to pass.
+    minimum_confidence: 0.60
+    maximum_translation_error_m: 0.010
+    maximum_rotation_error_deg: 5.0
+    maximum_width_error_m: 0.005
+    required_matching_samples: 30
+    pair_max_age_s: 0.10
+    stream_max_age_s: 1.0
+    message_max_age_s: 0.50
+    tf_lookup_timeout_s: 0.05
+
+    output_dir: /tmp/bookshelf_static_slot_check
+    live_pose_topic: /slot_detector/slot_pose
+    live_width_topic: /slot_detector/slot_width
+    live_confidence_topic: /slot_detector/confidence
+    marker_topic: /bookshelf_environment/slot_markers
+    static_pose_topic: /bookshelf_environment/static_slot_pose
+    live_pose_base_topic: /bookshelf_environment/live_slot_pose_base
+    passed_topic: /bookshelf_environment/static_slot_check_passed
+    status_topic: /bookshelf_environment/static_slot_check_status

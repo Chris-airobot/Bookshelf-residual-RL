@@ -1,9 +1,11 @@
-import math
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+import math
 
 import numpy as np
 
 from bookshelf_guarded_control_ros.policy_tool_control_math import (
+    OneShotExecutionGuard,
     TargetSafetyLimits,
     compute_policy_tool_target,
     euler_xyz_to_matrix,
@@ -253,6 +255,7 @@ def test_execution_requires_every_gate_and_consumable_token():
         "maximum_plan_age_s": 1.0,
         "plan_valid": True,
         "busy": False,
+        "execution_consumed": False,
     }
     assert execution_authorization_error(**values) == "dry_run is true"
     values.update(
@@ -264,6 +267,45 @@ def test_execution_requires_every_gate_and_consumable_token():
     assert execution_authorization_error(**values) is None
     values["plan_age_s"] = 2.0
     assert "stale" in execution_authorization_error(**values)
+
+
+def test_execution_authorization_fails_closed_after_process_allowance_is_consumed():
+    values = {
+        "dry_run": False,
+        "allow_execution": True,
+        "planning_scene_complete": True,
+        "approval_token": "trial-01",
+        "configured_token": "trial-01",
+        "plan_age_s": 0.1,
+        "maximum_plan_age_s": 1.0,
+        "plan_valid": True,
+        "busy": False,
+        "execution_consumed": True,
+    }
+    assert "one-execution-per-process" in execution_authorization_error(**values)
+
+
+def test_one_shot_execution_guard_can_never_be_rearmed():
+    guard = OneShotExecutionGuard()
+
+    assert guard.execution_count == 0
+    assert guard.try_consume() is True
+    assert guard.consumed is True
+    assert guard.execution_count == 1
+    assert guard.try_consume() is False
+    assert guard.try_consume() is False
+    assert guard.execution_count == 1
+
+
+def test_one_shot_execution_guard_allows_only_one_concurrent_consumer():
+    guard = OneShotExecutionGuard()
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        accepted = list(executor.map(lambda _: guard.try_consume(), range(32)))
+
+    assert accepted.count(True) == 1
+    assert accepted.count(False) == 31
+    assert guard.execution_count == 1
 
 
 def test_named_joint_drift_uses_names_not_message_order():
