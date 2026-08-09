@@ -36,6 +36,8 @@ setup(
             "bookshelf_shadow_ros.slot_detection_audit_node:main",
             "static_slot_environment_check = "
             "bookshelf_shadow_ros.static_slot_environment_check_node:main",
+            "static_slot_capture = "
+            "bookshelf_shadow_ros.static_slot_capture_node:main",
             "policy_stream_audit = "
             "bookshelf_shadow_ros.policy_stream_audit_node:main",
             "marker_book_calibrator = "

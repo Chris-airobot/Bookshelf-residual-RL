@@ -27,6 +27,40 @@ slot target offset before treating the 12D values as geometrically exact.
 The fixed gripper-to-book estimate is valid only while the book is rigidly held.
 Post-release book tracking remains outside this markerless smoke test.
 
+## Capture and freeze the current static slot
+
+For a new physical setup, do not edit the package's old static-slot values.
+Capture an unapproved candidate from the unobstructed shelf first:
+
+```bash
+ros2 launch bookshelf_shadow_ros static_slot_capture.launch.py \
+  output_dir:=/tmp/bookshelf_static_slot_capture \
+  repository_path:=/home/riot/Chris/bookshelf-unified
+```
+
+The subscriber-only node robustly filters pose, orientation, and width samples
+in `link_base`, records camera and TF provenance, and publishes:
+
+- `/bookshelf_environment/static_slot_capture_ready`;
+- `/bookshelf_environment/static_slot_capture_status`;
+- `/bookshelf_environment/static_slot_candidate_pose`;
+- `/bookshelf_environment/static_slot_candidate_markers`.
+
+It only writes `static_slot_capture_candidate.json`; it never changes active
+configuration. After visually approving the candidate in RViz, generate one
+trial-specific config for all downstream nodes:
+
+```bash
+python3 scripts/promote_static_slot_capture.py \
+  --candidate /tmp/bookshelf_static_slot_capture/static_slot_capture_candidate.json \
+  --output /tmp/trial_static_slot.yaml \
+  --approval-token VISUALLY_APPROVED_STATIC_SLOT
+```
+
+Use the generated YAML as `check_config`, `target_config`, and
+`adapter_config`. Its adjacent provenance JSON binds the approved configuration
+to the candidate SHA256.
+
 ## Calibrate the grasped book frame from the recorded marker bag
 
 The recorded calibration view uses `DICT_ARUCO_ORIGINAL`, marker ID 0, a

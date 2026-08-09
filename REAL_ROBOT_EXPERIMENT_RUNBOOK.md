@@ -6,6 +6,12 @@ This runbook is for the xArm7 bookshelf insertion experiment on the Riot PC.
 It separates global motion, local residual-policy activation, plan-only checking,
 and explicitly approved single-step execution.
 
+For the current scan-first physical sequence, use
+`REAL_ROBOT_EXPERIMENT_COMMANDS_2026-08-09.md`. It captures the unobstructed
+slot, requires RViz approval, and creates one trial-specific slot configuration
+before the book is attached. The package-default August 4 slot must not be used
+as the current physical reference.
+
 The stationary preflight verified that:
 
 - the unified source checkout builds on Riot;
@@ -123,7 +129,19 @@ ros2 launch bookshelf_shadow_ros \
 Use a new trial name for every attempt. This launch is subscriber-only and
 cannot move the robot.
 
-## 4. Start The Shadow Observation And Policy Pipeline
+## 4. Capture And Freeze The Current Slot
+
+Follow sections 4 through 7 of
+`REAL_ROBOT_EXPERIMENT_COMMANDS_2026-08-09.md`. The resulting file is:
+
+```text
+/home/riot/BookshelfFiles/experiment_logs/environment_checks/<TRIAL_NAME>/trial_static_slot.yaml
+```
+
+It must come from a valid read-only capture and explicit RViz approval. Use
+that same file as `check_config`, `target_config`, and `adapter_config`.
+
+## 5. Start The Shadow Observation And Policy Pipeline
 
 ### Riot Terminal 3
 
@@ -136,7 +154,7 @@ source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
 
 ros2 launch bookshelf_shadow_ros \
   policy_calibrated_static_shadow.launch.py \
-  adapter_config:=$PWD/ros2/bookshelf_shadow_ros/config/policy_observation_adapter_policy_tool_candidate.yaml \
+  adapter_config:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/trial_static_slot.yaml \
   policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
   activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
   enable_audit:=false
@@ -144,7 +162,7 @@ ros2 launch bookshelf_shadow_ros \
 
 At the far pose, `policy_activation_ready` must remain false. This is expected.
 
-## 5. Confirm That No Executor Is Running
+## 6. Confirm That No Executor Is Running
 
 ### Riot Terminal 4
 
@@ -163,7 +181,7 @@ ros2 node list | sort | uniq -c | sort -nr
 
 Stop and cleanly restart the system if a command-capable node is duplicated.
 
-## 6. Move Globally To The Pre-Insertion Pose
+## 7. Move Globally To The Pre-Insertion Pose
 
 Use the validated traditional-planner workflow to move the robot to the
 physical pre-insertion pose. Do not use PPO output for this movement.
@@ -174,7 +192,7 @@ still correct.
 
 After global motion finishes, leave the robot stationary.
 
-## 7. Check Local-Policy Activation
+## 8. Check Local-Policy Activation
 
 ### Riot Terminal 4
 
@@ -203,7 +221,7 @@ Required conditions:
 If any condition fails, return to the global planner. Do not launch the local
 executor.
 
-## 8. Run Plan-Only Checking
+## 9. Run Plan-Only Checking
 
 ### Riot Terminal 5
 
@@ -244,7 +262,7 @@ Do not proceed unless all of the following are true:
 
 Stop the plan-only launch before starting the guarded single-step executor.
 
-## 9. One-Time Executor Configuration Review
+## 10. One-Time Executor Configuration Review
 
 The physical executor configuration must be reviewed before experiment day.
 Do not use the default file as implicit permission to move.
@@ -281,7 +299,7 @@ For the first physical test it must enforce:
 The exact approval fields must be taken from the source inspection above. Do
 not guess their names or values beside the robot.
 
-## 10. Guarded Single-Step Execution
+## 11. Guarded Single-Step Execution
 
 Do not run this section until the executor configuration review is complete,
 the operator is ready, activation is true, and the plan-only target has been
@@ -315,7 +333,7 @@ ros2 launch bookshelf_guarded_control_ros \
 The operator must watch the robot throughout this step. Stop immediately after
 the single action or at the first unexpected motion.
 
-## 11. Shutdown Order
+## 12. Shutdown Order
 
 Stop processes using `Ctrl+C` in this order:
 
@@ -328,7 +346,7 @@ Stop processes using `Ctrl+C` in this order:
 Stopping the logger after the policy processes allows it to capture their final
 states and finalize the compressed bag.
 
-## 12. Verify The Trial Record
+## 13. Verify The Trial Record
 
 ```bash
 source /opt/ros/humble/setup.bash

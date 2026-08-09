@@ -1,0 +1,31 @@
+# Read-only capture of the unobstructed physical slot before the book is grasped.
+static_slot_capture:
+  ros__parameters:
+    base_frame: link_base
+    target_samples: 120
+    minimum_samples: 60
+    minimum_inlier_fraction: 0.80
+
+    minimum_confidence: 0.60
+    minimum_slot_width_m: 0.020
+    maximum_slot_width_m: 0.090
+    maximum_translation_deviation_m: 0.010
+    maximum_rotation_deviation_deg: 5.0
+    maximum_width_deviation_m: 0.005
+
+    pair_max_age_s: 0.10
+    message_max_age_s: 0.50
+    tf_lookup_timeout_s: 0.05
+    slot_depth_m: 0.20
+    visual_slot_height_m: 0.25
+
+    repository_path: /home/riot/Chris/bookshelf-unified
+    output_dir: /tmp/bookshelf_static_slot_capture
+    live_pose_topic: /slot_detector/slot_pose
+    live_width_topic: /slot_detector/slot_width
+    live_confidence_topic: /slot_detector/confidence
+    camera_info_topic: /camera/color/camera_info
+    ready_topic: /bookshelf_environment/static_slot_capture_ready
+    status_topic: /bookshelf_environment/static_slot_capture_status
+    candidate_pose_topic: /bookshelf_environment/static_slot_candidate_pose
+    marker_topic: /bookshelf_environment/static_slot_candidate_markers

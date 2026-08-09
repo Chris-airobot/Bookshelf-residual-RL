@@ -7,7 +7,7 @@ marker overlay must be sourced as shown below.
 The sequence intentionally separates:
 
 1. hardware, camera, MoveIt, and logging;
-2. read-only static-slot verification;
+2. read-only static-slot capture, human review, and trial-specific freezing;
 3. human-reviewed global MoveIt positioning;
 4. post-positioning shadow activation and plan-only evidence.
 
@@ -127,7 +127,7 @@ screen. Logging includes TF, joint state, slot-check results, MoveIt displayed
 plans, monitored planning scene, policy diagnostics, plan-only results, and
 trajectory action evidence.
 
-## 4. Terminal 3 — live static-slot environment check
+## 4. Terminal 3 — capture and freeze the unobstructed slot
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -146,42 +146,99 @@ Expected prefixes in this terminal:
 /home/riot/Chris/bookshelf_unified_ws/install/bookshelf_shadow_ros
 ```
 
-Launch the read-only detector and comparison:
+Launch the read-only detector and robust capture while the slot is unobstructed:
 
 ```bash
 TRIAL_NAME=physical_trial_001
+CAPTURE_DIR=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME/slot_capture
 
-ros2 launch bookshelf_shadow_ros static_slot_environment_check.launch.py \
-  output_dir:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME
+ros2 launch bookshelf_shadow_ros static_slot_capture.launch.py \
+  output_dir:="$CAPTURE_DIR" \
+  repository_path:=/home/riot/Chris/bookshelf-unified \
+  target_samples:=120
 ```
 
 If exactly one `/rgbd_slot_detector` is already running, do not duplicate it:
 
 ```bash
-ros2 launch bookshelf_shadow_ros static_slot_environment_check.launch.py \
+ros2 launch bookshelf_shadow_ros static_slot_capture.launch.py \
   start_live_detector:=false \
-  output_dir:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME
+  output_dir:="$CAPTURE_DIR" \
+  repository_path:=/home/riot/Chris/bookshelf-unified \
+  target_samples:=120
 ```
 
 ### RViz displays
 
 In the existing MoveIt RViz, set `Fixed Frame` to `link_base` and add:
 
-- `MarkerArray`: `/bookshelf_environment/slot_markers`
+- `MarkerArray`: `/bookshelf_environment/static_slot_candidate_markers`
 - `Image`: `/slot_detector/debug_image`
 
 The image shows the camera frame, detector ROI, opening mask, detected slot
 boundaries, centre line, width, and confidence. The debug-image publisher is
 RELIABLE with depth one so it matches the default Humble RViz Image display.
 
-The 3D display uses:
+After 120 accepted samples, inspect:
 
-- cyan: immutable configured static slot;
-- green: live slot agrees with the static reference;
-- red: live slot disagrees;
-- blue arrow: slot local `+X`, the insertion direction.
+- the green candidate outline matches the physical opening;
+- the arrow points into the shelf along slot local `+X`;
+- the annotated RGB-D image selects the intended opening;
+- the reported residuals and inlier fraction are stable.
 
-## 5. Terminal 4 — read-only system and slot checks
+In another terminal, check the result:
+
+```bash
+ros2 topic echo /bookshelf_environment/static_slot_capture_ready --once
+ros2 topic echo \
+  /bookshelf_environment/static_slot_capture_status \
+  --field data --once
+
+python3 -m json.tool \
+  "$CAPTURE_DIR/static_slot_capture_candidate.json"
+```
+
+The capture is still unapproved and cannot affect the policy. Stop the capture
+launch after visual review. Only when the RViz candidate matches the physical
+slot, explicitly create this trial's single shared parameter file:
+
+```bash
+cd /home/riot/Chris/bookshelf-unified
+
+CANDIDATE=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME/slot_capture/static_slot_capture_candidate.json
+TRIAL_SLOT_CONFIG=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME/trial_static_slot.yaml
+
+python3 scripts/promote_static_slot_capture.py \
+  --candidate "$CANDIDATE" \
+  --output "$TRIAL_SLOT_CONFIG" \
+  --approval-token VISUALLY_APPROVED_STATIC_SLOT
+
+python3 -m json.tool \
+  "${TRIAL_SLOT_CONFIG%.yaml}.provenance.json"
+```
+
+This command does not launch ROS or command hardware. It creates one config
+containing consistent slot values for the environment check, pre-insertion
+target, and policy observation adapter. It never edits the package defaults.
+
+## 5. Terminal 3 — verify the frozen trial slot
+
+Restart the detector and compare it with the newly frozen trial reference:
+
+```bash
+TRIAL_NAME=physical_trial_001
+TRIAL_SLOT_CONFIG=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME/trial_static_slot.yaml
+
+ros2 launch bookshelf_shadow_ros static_slot_environment_check.launch.py \
+  check_config:="$TRIAL_SLOT_CONFIG" \
+  output_dir:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME/frozen_check
+```
+
+In RViz, replace the capture MarkerArray with
+`/bookshelf_environment/slot_markers`. Cyan is the frozen candidate; green is
+the live estimate agreeing with it; red indicates disagreement.
+
+## 6. Terminal 4 — read-only system and slot checks
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -230,7 +287,7 @@ ros2 topic echo \
   --field data --once
 
 python3 -m json.tool \
-  /home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/static_slot_environment_check.json
+  /home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/frozen_check/static_slot_environment_check.json
 ```
 
 Accept the slot for this trial only when the live outline is green, RViz agrees
@@ -239,7 +296,7 @@ is true. The fixed checks are confidence at least 0.60, translation error at
 most 10 mm, rotation error at most 5 degrees, and width error at most 5 mm. Do
 not weaken a limit to make the check pass.
 
-## 6. Calculate the non-policy pre-insertion target
+## 7. Calculate the non-policy pre-insertion target
 
 Keep the environment check and logger running. In a new terminal:
 
@@ -250,6 +307,7 @@ source /tmp/bookshelf_marker_install/setup.bash
 source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
 
 ros2 launch bookshelf_shadow_ros calibrated_preinsert_target.launch.py \
+  target_config:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/trial_static_slot.yaml \
   output_dir:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/preinsert_target
 ```
 
@@ -261,24 +319,17 @@ ros2 topic echo /bookshelf_shadow/target_eef_pose --once
 ros2 topic echo /bookshelf_shadow/calibrated_target_debug --field data --once
 ```
 
-The reviewed reference target for `link_eef` in `link_base` is:
+The target is now calculated from this trial's frozen slot rather than the old
+August 4 pose. It places the book 30 mm outside the shelf mouth with a 6 mm
+vertical offset. It is geometric output, not permission to move. Inspect the
+reported pose in RViz and against the physical setup before planning.
 
-```text
-position xyz:
-  [0.7860910879338582, -0.051610767469894084, 0.2405459402816384]
-quaternion xyzw:
-  [-0.47597420380985805, -0.4638929270390939,
-   -0.48104022735307195, 0.5717098995284048]
-```
-
-It places the book 30 mm outside the shelf mouth with a 6 mm vertical offset.
-It is geometric calibration output, not a policy target and not permission to
-move.
-
-## 7. Request collision-aware IK without executing
+## 8. Request collision-aware IK without executing
 
 Only after the slot check passes, request a collision-aware IK solution from
-MoveIt:
+MoveIt. First copy the position and quaternion printed by
+`/bookshelf_shadow/target_eef_pose`; do not reuse values from an older trial.
+Substitute those seven values below:
 
 ```bash
 ros2 service call /compute_ik moveit_msgs/srv/GetPositionIK "{
@@ -291,15 +342,15 @@ ros2 service call /compute_ik moveit_msgs/srv/GetPositionIK "{
       header: {frame_id: link_base},
       pose: {
         position: {
-          x: 0.7860910879338582,
-          y: -0.051610767469894084,
-          z: 0.2405459402816384
+          x: REPLACE_WITH_CURRENT_TARGET_X,
+          y: REPLACE_WITH_CURRENT_TARGET_Y,
+          z: REPLACE_WITH_CURRENT_TARGET_Z
         },
         orientation: {
-          x: -0.47597420380985805,
-          y: -0.4638929270390939,
-          z: -0.48104022735307195,
-          w: 0.5717098995284048
+          x: REPLACE_WITH_CURRENT_TARGET_QX,
+          y: REPLACE_WITH_CURRENT_TARGET_QY,
+          z: REPLACE_WITH_CURRENT_TARGET_QZ,
+          w: REPLACE_WITH_CURRENT_TARGET_QW
         }
       }
     },
@@ -307,6 +358,10 @@ ros2 service call /compute_ik moveit_msgs/srv/GetPositionIK "{
   }
 }"
 ```
+
+The command must visibly contain the current trial values before it is run.
+The `REPLACE_WITH_...` text intentionally makes an unreviewed copy-and-paste
+fail instead of silently requesting the old pose.
 
 Require `error_code.val: 1`. Copy only `joint1` through `joint7` from the IK
 response into the RViz MotionPlanning `Joints` goal state.
@@ -326,7 +381,7 @@ low-speed collision-aware workflow.
 
 After the traditional global motion finishes, leave the robot stationary.
 
-## 8. Start shadow activation only after reaching pre-insertion
+## 9. Start shadow activation only after reaching pre-insertion
 
 In a new terminal:
 
@@ -339,7 +394,7 @@ source /tmp/bookshelf_marker_install/setup.bash
 source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
 
 ros2 launch bookshelf_shadow_ros policy_calibrated_static_shadow.launch.py \
-  adapter_config:=$PWD/ros2/bookshelf_shadow_ros/config/policy_observation_adapter_policy_tool_candidate.yaml \
+  adapter_config:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/trial_static_slot.yaml \
   policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
   activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
   enable_audit:=false
@@ -362,7 +417,7 @@ timeout 5 ros2 run tf2_ros tf2_echo link_base calibration_detected_book
 Require at least 10 consecutive ready samples, no reasons, no normalized
 outliers, and no envelope outliers. Do not weaken the envelope.
 
-## 9. Plan-only local-policy evidence
+## 10. Plan-only local-policy evidence
 
 In a new terminal:
 
@@ -388,7 +443,7 @@ timeout 5 ros2 run tf2_ros tf2_echo link_base link_tcp
 This is the end of the currently authorized sequence. Stop the plan-only launch
 after collecting evidence. Do **not** launch the guarded executor.
 
-## 10. Implementation and offline verification commands
+## 11. Implementation and offline verification commands
 
 The executor now has an atomic, hard one-trajectory-submission allowance for
 the complete process lifetime. Submission failure, rejection, or result failure
