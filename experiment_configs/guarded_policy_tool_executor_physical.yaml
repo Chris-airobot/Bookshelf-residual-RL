@@ -46,6 +46,9 @@ guarded_policy_tool_executor:
     # REVIEW HOLD: all four gates remain closed until the live plan-only review.
     allow_unverified_policy_tool: false
     planning_scene_complete: false
+    require_scene_status: true
+    required_scene_mode: local_insertion
+    scene_status_max_age_s: 0.50
     dry_run: true
     allow_execution: false
 
@@ -82,6 +85,7 @@ guarded_policy_tool_executor:
     joint_states_topic: /joint_states
     adapter_debug_topic: /bookshelf_policy/adapter_debug
     policy_debug_topic: /bookshelf_shadow/policy_debug
+    scene_status_topic: /bookshelf_scene/status
     plan_valid_topic: /bookshelf_guarded/plan_valid
     plan_report_topic: /bookshelf_guarded/plan_report
     target_policy_tool_topic: /bookshelf_guarded/target_policy_tool

@@ -1,0 +1,61 @@
+# Single physical-geometry configuration for the AU bookshelf experiment.
+#
+# Tomorrow's measured values belong only in this file. The launch interface
+# accepts this file as one scene_config argument; no source edit is required.
+# Keep both review gates false until the boxes have been inspected in RViz.
+bookshelf_scene_manager:
+  ros__parameters:
+    base_frame: link_base
+    tcp_frame: link_tcp
+
+    # REVIEW HOLD 1: confirms every approximate physical value below was
+    # measured/reviewed for the current shelf, table, camera and grasp.
+    hardware_measurements_confirmed: false
+
+    # REVIEW HOLD 2: permits an explicit service request to remove only the
+    # coarse bookshelf keep-out after policy activation is stable.
+    allow_local_insertion: false
+
+    apply_planning_scene_service: /apply_planning_scene
+    slot_pose_topic: /bookshelf_environment/static_slot_pose
+    activation_ready_topic: /bookshelf_shadow/policy_activation_ready
+    slot_message_max_age_s: 1.0
+    activation_max_age_s: 0.50
+    maximum_shelf_front_plane_error_m: 0.005
+
+    # Slot frame: +X enters the shelf, +Y is lateral and +Z is up.
+    # The X centre must remain half the X size so the front face begins at the
+    # detected slot mouth. Width/height are conservative global keep-out sizes.
+    shelf_object_id: bookshelf_global_keepout
+    shelf_box_size_xyz: [0.20, 0.70, 0.40]  # MEASURE: depth, width, height
+    shelf_box_center_offset_slot_xyz: [0.10, 0.0, 0.0]  # MEASURE: Y/Z offsets
+
+    table_enabled: true
+    table_object_id: bookshelf_worktable
+    table_box_size_xyz: [1.20, 1.20, 0.05]  # MEASURE
+    table_box_center_base_xyz: [0.55, 0.0, -0.025]  # MEASURE
+    table_box_quaternion_base_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+    held_book_enabled: true
+    held_book_object_id: bookshelf_held_book
+    held_book_size_xyz: [0.156, 0.034, 0.236]
+    # Candidate T_link_tcp_book from the measured rigid grasp and recorded
+    # link_eef -> link_tcp transform. Confirm visually before opening HOLD 1.
+    held_book_center_tcp_xyz: [0.0081243577, -0.0101568565, -0.0477412824]
+    held_book_quaternion_tcp_xyzw:
+      [0.4756936127, 0.4680286672, 0.5317004003, 0.5214973038]
+    held_book_touch_links:
+      - link_tcp
+      - xarm_gripper_base_link
+      - left_finger
+      - right_finger
+      - left_inner_knuckle
+      - right_inner_knuckle
+      - left_outer_knuckle
+      - right_outer_knuckle
+
+    publish_rate_hz: 2.0
+    status_topic: /bookshelf_scene/status
+    ready_topic: /bookshelf_scene/ready
+    mode_topic: /bookshelf_scene/mode
+    set_local_insertion_service: /bookshelf_scene/set_local_insertion

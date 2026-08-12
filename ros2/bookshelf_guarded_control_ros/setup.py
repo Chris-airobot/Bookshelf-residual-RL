@@ -28,6 +28,8 @@ setup(
     extras_require={"test": ["pytest"]},
     entry_points={
         "console_scripts": [
+            "bookshelf_scene_manager = "
+            "bookshelf_guarded_control_ros.bookshelf_scene_manager_node:main",
             "policy_tool_plan_checker = "
             "bookshelf_guarded_control_ros.policy_tool_plan_checker_node:main",
             "guarded_policy_tool_executor = "
@@ -35,4 +37,3 @@ setup(
         ],
     },
 )
-

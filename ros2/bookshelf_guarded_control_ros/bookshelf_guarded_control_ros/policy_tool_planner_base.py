@@ -39,6 +39,7 @@ from .policy_tool_control_math import (
     target_safety_error,
     transform_to_dict,
 )
+from .planning_scene_math import LOCAL_INSERTION, scene_status_error
 
 
 @dataclass
@@ -111,6 +112,8 @@ class PolicyToolPlannerBase(Node):
         self.latest_adapter_debug_ns = None
         self.latest_policy_debug = None
         self.latest_policy_debug_ns = None
+        self.latest_scene_status = None
+        self.latest_scene_status_ns = None
 
         self.plan_pending = False
         self.pending_target = None
@@ -187,6 +190,12 @@ class PolicyToolPlannerBase(Node):
             self._policy_debug_callback,
             10,
         )
+        self.create_subscription(
+            String,
+            str(self.get_parameter("scene_status_topic").value),
+            self._scene_status_callback,
+            10,
+        )
 
         rate = max(float(self.get_parameter("planning_rate_hz").value), 0.1)
         self.timer = self.create_timer(1.0 / rate, self._timer_callback)
@@ -221,6 +230,9 @@ class PolicyToolPlannerBase(Node):
         self.declare_parameter("expected_bundle_sha256", "")
         self.declare_parameter("allow_unverified_policy_tool", False)
         self.declare_parameter("planning_scene_complete", False)
+        self.declare_parameter("require_scene_status", False)
+        self.declare_parameter("required_scene_mode", LOCAL_INSERTION)
+        self.declare_parameter("scene_status_max_age_s", 0.50)
 
         self.declare_parameter(
             "maximum_policy_delta",
@@ -246,6 +258,7 @@ class PolicyToolPlannerBase(Node):
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("adapter_debug_topic", "/bookshelf_policy/adapter_debug")
         self.declare_parameter("policy_debug_topic", "/bookshelf_shadow/policy_debug")
+        self.declare_parameter("scene_status_topic", "/bookshelf_scene/status")
         self.declare_parameter("plan_valid_topic", "/bookshelf_guarded/plan_valid")
         self.declare_parameter("plan_report_topic", "/bookshelf_guarded/plan_report")
         self.declare_parameter("target_policy_tool_topic", "/bookshelf_guarded/target_policy_tool")
@@ -282,6 +295,10 @@ class PolicyToolPlannerBase(Node):
     def _policy_debug_callback(self, message: String):
         self.latest_policy_debug = self._parse_debug(message.data)
         self.latest_policy_debug_ns = self._now_ns()
+
+    def _scene_status_callback(self, message: String):
+        self.latest_scene_status = self._parse_debug(message.data)
+        self.latest_scene_status_ns = self._now_ns()
 
     @staticmethod
     def _parse_debug(value: str):
@@ -344,6 +361,18 @@ class PolicyToolPlannerBase(Node):
         )
         if error:
             return error
+        if bool(self.get_parameter("require_scene_status").value):
+            if not self._fresh(
+                self.latest_scene_status_ns,
+                float(self.get_parameter("scene_status_max_age_s").value),
+            ):
+                return "planning scene status is missing or stale"
+            error = scene_status_error(
+                self.latest_scene_status,
+                required_mode=str(self.get_parameter("required_scene_mode").value),
+            )
+            if error:
+                return error
         blocked = self._blocked_nodes_present()
         if blocked:
             return f"blocked legacy execution nodes are active: {blocked}"
@@ -632,6 +661,10 @@ class PolicyToolPlannerBase(Node):
             ),
             "policy_bundle_sha256": self.latest_policy_debug.get("bundle_sha256"),
             "blocked_nodes": self._blocked_nodes_present(),
+            "scene_status_required": bool(
+                self.get_parameter("require_scene_status").value
+            ),
+            "scene_status": self.latest_scene_status,
         }
 
     def _publish_target_poses(self, target: PolicyToolTarget):

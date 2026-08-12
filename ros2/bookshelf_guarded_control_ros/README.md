@@ -48,10 +48,35 @@ one exact approval token authorizes at most one trajectory.
 ## Important planning-scene boundary
 
 MoveIt can only collision-check geometry present in its active planning scene.
-The checker reports a path while `planning_scene_complete=false`, but that path
-does not authorize execution. Before changing the flag, the scene must contain
-the shelf shell, neighboring books, held book, robot, camera/fixture geometry,
-and any nearby lab obstacles with checked frame IDs and dimensions.
+The global free-space approach and the contact-rich local insertion use two
+explicit scene modes:
+
+- `global_approach`: table and attached book are present, and one coarse box
+  keeps the robot outside the complete bookshelf volume.
+- `local_insertion`: an explicit, gated handoff removes only the coarse shelf
+  box. The table and attached book remain while the residual policy selects
+  small Cartesian targets.
+
+`bookshelf_scene_manager` applies these objects but has no motion interface. It
+starts fail-closed, automatically applies only the global scene after physical
+measurements are confirmed, and rejects the local handoff unless activation is
+fresh and ready. The executor additionally requires fresh
+`/bookshelf_scene/status` reporting `local_insertion`; the static
+`planning_scene_complete` review gate remains separate.
+
+All physical dimensions and transition settings live in one YAML file. The
+repository copy remains unapproved:
+
+```bash
+ros2 launch bookshelf_guarded_control_ros \
+  bookshelf_scene_manager.launch.py \
+  scene_config:=/path/to/reviewed_bookshelf_scene.yaml
+```
+
+Copy `config/bookshelf_scene_physical.yaml`, update its marked shelf/table
+measurements, inspect the resulting objects in RViz, and only then change
+`hardware_measurements_confirmed`. Enabling `allow_local_insertion` is a second
+independent review decision.
 
 ## Build and test
 
@@ -63,7 +88,7 @@ source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
 source /home/riot/Chris/bookshelf_shadow_ws/install_standard/setup.bash
 
-cd /home/riot/Chris/Bookshelf-residual-RL
+cd /home/riot/Chris/bookshelf-unified
 
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 PYTHONPATH=$PWD/ros2/bookshelf_guarded_control_ros \
@@ -88,8 +113,7 @@ Then source this package and launch only the checker:
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_shadow_ws/install_standard/setup.bash
-source /home/riot/Chris/bookshelf_guarded_control_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
 
 ros2 launch bookshelf_guarded_control_ros policy_tool_plan_only.launch.py
 ```
