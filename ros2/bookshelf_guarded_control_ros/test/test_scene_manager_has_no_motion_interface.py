@@ -36,3 +36,8 @@ def test_repository_physical_scene_config_is_fail_closed():
     source = CONFIG.read_text(encoding="utf-8")
     assert "hardware_measurements_confirmed: false" in source
     assert "allow_local_insertion: false" in source
+
+
+def test_scene_manager_shutdown_is_idempotent_after_sigint():
+    source = NODE.read_text(encoding="utf-8")
+    assert "if rclpy.ok():\n            rclpy.shutdown()" in source
