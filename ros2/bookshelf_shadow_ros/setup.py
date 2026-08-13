@@ -48,6 +48,8 @@ setup(
             "bookshelf_shadow_ros.policy_tool_frame_audit_node:main",
             "experiment_logger = "
             "bookshelf_shadow_ros.experiment_logger_node:main",
+            "physical_experiment_preflight = "
+            "bookshelf_shadow_ros.physical_experiment_preflight:main",
         ],
     },
 )

@@ -238,6 +238,45 @@ In RViz, replace the capture MarkerArray with
 `/bookshelf_environment/slot_markers`. Cyan is the frozen candidate; green is
 the live estimate agreeing with it; red indicates disagreement.
 
+### One-command software readiness report
+
+While the hardware launch and frozen-slot check are running, generate the
+fail-closed readiness report. This command only reads files, ROS graph state,
+four live messages, and one TF. It creates no publishers, planners,
+controllers, gripper clients, or execution clients.
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
+
+TRIAL_NAME=physical_trial_001
+TRIAL_DIR=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME
+
+ros2 run bookshelf_shadow_ros physical_experiment_preflight \
+  --repository /home/riot/Chris/bookshelf-unified \
+  --trial-slot-config "$TRIAL_DIR/trial_static_slot.yaml" \
+  --policy-bundle /home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
+  --activation-envelope /home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
+  --expected-shadow-prefix /home/riot/Chris/bookshelf_unified_ws/install/bookshelf_shadow_ros \
+  --expected-guarded-prefix /home/riot/Chris/bookshelf_unified_ws/install/bookshelf_guarded_control_ros \
+  --check-ros \
+  --require-frozen-check \
+  --output "$TRIAL_DIR/software_preflight.json"
+```
+
+Expected final lines:
+
+```text
+Software ready: True
+Execution authorized: False
+Hardware commanded: False
+```
+
+`Software ready` means the frozen slot, provenance, policy assets, committed
+fail-closed executor defaults, hardware topics, camera TF, and frozen live
+check are coherent. It deliberately does not authorize movement.
+
 ## 6. Terminal 4 — read-only system and slot checks
 
 ```bash

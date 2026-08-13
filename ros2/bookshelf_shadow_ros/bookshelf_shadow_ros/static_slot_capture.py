@@ -24,6 +24,23 @@ from .policy_observation_math import make_transform, matrix_to_quaternion_xyzw
 APPROVAL_TOKEN = "VISUALLY_APPROVED_STATIC_SLOT"
 
 
+class _RosParameterDumper(yaml.SafeDumper):
+    """Emit ROS 2 parameter YAML without unsupported anchors or aliases."""
+
+    def ignore_aliases(self, data):
+        return True
+
+
+def dump_ros_parameter_yaml(data: dict) -> str:
+    """Serialize a parameter document accepted by the ROS 2 Humble parser."""
+
+    return yaml.dump(
+        data,
+        Dumper=_RosParameterDumper,
+        sort_keys=False,
+    )
+
+
 @dataclass(frozen=True)
 class StaticSlotSample:
     stamp_ns: int
@@ -297,7 +314,7 @@ def promote_capture_candidate(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         "# Generated trial configuration. Do not edit slot values independently.\n"
-        + yaml.safe_dump(combined, sort_keys=False),
+        + dump_ros_parameter_yaml(combined),
         encoding="utf-8",
     )
     provenance = {

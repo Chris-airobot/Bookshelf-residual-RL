@@ -119,6 +119,9 @@ def test_promotion_generates_one_consistent_trial_config(tmp_path):
     )
 
     generated = yaml.safe_load(output.read_text(encoding="utf-8"))
+    generated_text = output.read_text(encoding="utf-8")
+    assert "&id" not in generated_text
+    assert "*id" not in generated_text
     check = generated["static_slot_environment_check"]["ros__parameters"]
     target = generated["calibrated_preinsert_target"]["ros__parameters"]
     adapter = generated["policy_observation_adapter"]["ros__parameters"]
