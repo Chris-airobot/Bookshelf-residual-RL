@@ -793,6 +793,32 @@ def audit_shadow_source_tree(source_root) -> list[dict]:
                         and isinstance(element.value, str)
                     )
 
+        # The physical preflight names prohibited processes only so it can
+        # prove they are absent from the live ROS graph. Those literals are
+        # audit inputs, not subprocess or launch targets.
+        prohibited_process_name_nodes = set()
+        if path.name == "physical_experiment_preflight.py":
+            for statement in tree.body:
+                if not isinstance(statement, ast.Assign):
+                    continue
+                if not any(
+                    isinstance(target, ast.Name)
+                    and target.id in {
+                        "CRITICAL_NODE_NAMES",
+                        "PROHIBITED_EXECUTION_NODES",
+                        "REQUIRED_HARDWARE_NODES",
+                    }
+                    for target in statement.targets
+                ):
+                    continue
+                if isinstance(statement.value, (ast.Set, ast.List, ast.Tuple)):
+                    prohibited_process_name_nodes.update(
+                        id(element)
+                        for element in statement.value.elts
+                        if isinstance(element, ast.Constant)
+                        and isinstance(element.value, str)
+                    )
+
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names = [alias.name for alias in node.names]
@@ -838,7 +864,10 @@ def audit_shadow_source_tree(source_root) -> list[dict]:
                                 }
                             )
                 for fragment in forbidden_process_fragments:
-                    if fragment in node.value:
+                    if (
+                        id(node) not in prohibited_process_name_nodes
+                        and fragment in node.value
+                    ):
                         findings.append(
                             {
                                 "path": str(path),

@@ -3,6 +3,7 @@ import numpy as np
 from bookshelf_guarded_control_ros.planning_scene_math import (
     GLOBAL_APPROACH,
     LOCAL_INSERTION,
+    global_scene_status_error,
     local_handoff_error,
     scene_status_error,
     shelf_box_from_slot,
@@ -84,3 +85,26 @@ def test_runtime_scene_status_requires_local_mode_table_and_book():
         "objects": {**status["objects"], "bookshelf_keepout": True},
     }
     assert "still active" in scene_status_error(shelf_active)
+
+
+def test_global_scene_status_requires_keepout_table_and_held_book():
+    status = {
+        "mode": GLOBAL_APPROACH,
+        "scene_applied": True,
+        "hardware_measurements_confirmed": True,
+        "objects": {
+            "bookshelf_keepout": True,
+            "table": True,
+            "held_book": True,
+        },
+    }
+    assert global_scene_status_error(status) is None
+
+    local = dict(status, mode=LOCAL_INSERTION)
+    assert "expected" in global_scene_status_error(local)
+
+    no_keepout = {
+        **status,
+        "objects": {**status["objects"], "bookshelf_keepout": False},
+    }
+    assert "keep-out" in global_scene_status_error(no_keepout)

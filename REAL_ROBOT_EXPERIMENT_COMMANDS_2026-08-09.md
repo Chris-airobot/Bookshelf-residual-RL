@@ -1,18 +1,19 @@
 # Real-Robot Experiment Commands — 2026-08-09
 
-This is the consolidated operator sequence for the xArm7 bookshelf experiment.
-It supersedes the older `show_rviz:=false` hardware command. The corrected
-marker overlay must be sourced as shown below.
+This is the consolidated operator sequence for the xArm7 bookshelf experiment
+from the unified repository and unified ROS install. Do not source the retired
+`/tmp/bookshelf_marker_install` overlay.
 
 The sequence intentionally separates:
 
 1. hardware, camera, MoveIt, and logging;
 2. read-only static-slot capture, human review, and trial-specific freezing;
-3. human-reviewed global MoveIt positioning;
+3. automatic global target calculation and collision-aware MoveIt planning;
 4. post-positioning shadow activation and plan-only evidence.
 
 It does **not** authorize or launch `guarded_policy_tool_single_step`, any
-approval publication, a gripper command, or a policy-generated global target.
+approval publication, a gripper command, or trajectory execution. The global
+bridge produces a path for review; it never sends that path to the robot.
 
 ## Safety stop conditions
 
@@ -31,7 +32,6 @@ approval publication, a gripper command, or a policy-generated global target.
 ```bash
 REPO=/home/riot/Chris/bookshelf-unified
 HARDWARE_INSTALL=/home/riot/Chris/ros2_ws/install_depth_fix
-MARKER_INSTALL=/tmp/bookshelf_marker_install
 UNIFIED_INSTALL=/home/riot/Chris/bookshelf_unified_ws/install
 POLICY=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz
 ENVELOPE=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json
@@ -69,21 +69,20 @@ envelope: 82213b44217c52a300917ff3e0a3d1f247d22c127f54ce03aae3490a97fb1be3
 The two Git commit hashes must match. Do not stage, restore, or use the known
 modified `data/bc/*.pt` Git LFS files.
 
-## 2. Terminal 1 — hardware, camera, MoveIt, RViz, corrected book pose
-
-Source the corrected marker overlay last in this terminal:
+## 2. Terminal 1 — hardware, camera, TF, and MoveIt
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /tmp/bookshelf_marker_install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 ros2 pkg prefix bookshelf_policy_ros
 ros2 pkg prefix bookshelf_shadow_ros
 ```
 
-Both packages must resolve under `/tmp/bookshelf_marker_install` in this
-terminal. Then launch:
+`bookshelf_shadow_ros` must resolve under
+`/home/riot/Chris/bookshelf_unified_ws/install`. Then launch headlessly over
+SSH:
 
 ```bash
 mkdir -p /tmp/bookshelf_hardware_ros_logs
@@ -91,23 +90,22 @@ mkdir -p /tmp/bookshelf_hardware_ros_logs
 ROS_LOG_DIR=/tmp/bookshelf_hardware_ros_logs \
 ros2 launch bookshelf_policy_ros marker_vision_bringup.launch.py \
   enable_robot_control:=true \
-  enable_calibrated_book_detection:=true \
+  enable_calibrated_book_detection:=false \
   enable_legacy_three_book_detection:=false \
-  calibration_output_dir:=/tmp/bookshelf_marker_book_live_check_physical_trial_001
+  show_rviz:=false
 ```
 
-Do not pass `show_rviz`; it is not a declared argument in the corrected
-overlay. This launch starts the xArm hardware interface, robot state, TF,
-MoveIt/RViz, RealSense camera, and corrected calibrated marker/book display. It
-does not start a bookshelf policy executor.
+This starts the xArm hardware interface, robot state, TF, MoveIt, and RealSense
+camera. It does not start a bookshelf policy executor. A local operator who
+needs RViz may deliberately use `show_rviz:=true` from the Riot desktop; keep
+it false over SSH.
 
 ## 3. Terminal 2 — automatic logging before any movement
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /tmp/bookshelf_marker_install/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 mkdir -p /home/riot/BookshelfFiles/experiment_logs
 TRIAL_NAME=physical_trial_001
@@ -132,17 +130,15 @@ trajectory action evidence.
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /tmp/bookshelf_marker_install/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 ros2 pkg prefix bookshelf_policy_ros
 ros2 pkg prefix bookshelf_shadow_ros
 ```
 
-Expected prefixes in this terminal:
+Expected prefixes in this terminal include:
 
 ```text
-/tmp/bookshelf_marker_install/bookshelf_policy_ros
 /home/riot/Chris/bookshelf_unified_ws/install/bookshelf_shadow_ros
 ```
 
@@ -282,8 +278,7 @@ check are coherent. It deliberately does not authorize movement.
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /tmp/bookshelf_marker_install/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 ```
 
 Confirm that no executor exists:
@@ -335,101 +330,84 @@ is true. The fixed checks are confidence at least 0.60, translation error at
 most 10 mm, rotation error at most 5 degrees, and width error at most 5 mm. Do
 not weaken a limit to make the check pass.
 
-## 7. Calculate the non-policy pre-insertion target
+## 7. Prepare the reviewed global collision scene
 
-Keep the environment check and logger running. In a new terminal:
+The automatic bridge requires a trial-specific scene file. Create it from the
+repository template before the experiment, then replace the measured shelf and
+table values. Set `hardware_measurements_confirmed: true` only after those
+values and the held-book box have been checked in RViz. Keep
+`allow_local_insertion: false` during the global approach.
+
+```bash
+mkdir -p /home/riot/BookshelfFiles/experiment_configs
+
+SCENE_CONFIG=/home/riot/BookshelfFiles/experiment_configs/physical_trial_001_bookshelf_scene.yaml
+
+cp --no-clobber \
+  /home/riot/Chris/bookshelf-unified/ros2/bookshelf_guarded_control_ros/config/bookshelf_scene_physical.yaml \
+  "$SCENE_CONFIG"
+
+test -f "$SCENE_CONFIG" \
+  && echo "SCENE_CONFIG_FOUND" \
+  || echo "STOP: scene config is missing"
+```
+
+Do not edit the package template. The external file is the reviewed record for
+this physical setup.
+
+## 8. Automatic global pre-insertion plan only
+
+Keep the logger and frozen environment check running. Leave the robot
+stationary while starting this command. The bridge launches the collision-scene
+manager, calculates the target from this trial's frozen slot, preserves the
+current `link_tcp` orientation, and submits one MoveIt planning request.
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /tmp/bookshelf_marker_install/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
-ros2 launch bookshelf_shadow_ros calibrated_preinsert_target.launch.py \
-  target_config:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/trial_static_slot.yaml \
-  target_orientation_mode:=preserve_current_tcp \
-  maximum_preserved_book_orientation_error_deg:=15.0 \
-  output_dir:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/preinsert_target
+TRIAL_NAME=physical_trial_001
+TRIAL_DIR=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME
+SCENE_CONFIG=/home/riot/BookshelfFiles/experiment_configs/${TRIAL_NAME}_bookshelf_scene.yaml
+
+ros2 launch bookshelf_guarded_control_ros \
+  calibrated_preinsert_plan_only.launch.py \
+  target_config:="$TRIAL_DIR/trial_static_slot.yaml" \
+  scene_config:="$SCENE_CONFIG" \
+  output_dir:="$TRIAL_DIR/preinsert_plan"
 ```
 
-The node latches the first fresh live `link_tcp` orientation after startup.
-Leave the robot stationary while launching it. Restart the node if a different
-orientation must be captured.
-
-Inspect the calculated target:
+Inspect the result from the monitoring terminal:
 
 ```bash
-ros2 topic echo /bookshelf_shadow/calibrated_target_valid --once
-ros2 topic echo /bookshelf_shadow/target_eef_pose --once
+ros2 topic echo /bookshelf_scene/status --field data --once
 ros2 topic echo /bookshelf_shadow/current_tcp_pose --once
-ros2 topic echo /bookshelf_shadow/target_tcp_pose --once
-ros2 topic echo /bookshelf_shadow/calibrated_target_debug --field data --once
+ros2 topic echo /bookshelf_preinsert/target_tcp --once
+ros2 topic echo /bookshelf_preinsert/plan_valid --once
+ros2 topic echo /bookshelf_preinsert/plan_report --field data --once
+
+python3 -m json.tool \
+  "$TRIAL_DIR/preinsert_plan/calibrated_preinsert_plan_report.json"
 ```
 
-The target is now calculated from this trial's frozen slot rather than the old
-August 4 pose. It preserves the captured TCP orientation while placing the book
-centre 30 mm outside the shelf mouth with a 6 mm vertical offset. Require
-`preserved_tcp_orientation_change_deg` to be zero and
-`preserved_book_orientation_error_deg` to remain below the configured limit.
-This is geometric output, not permission to move. Inspect both TCP poses and
-the held-book marker in RViz before planning.
+Require all of the following:
 
-## 8. Request collision-aware IK without executing
+- scene mode is `global_approach`;
+- shelf keep-out, table, and held-book collision objects are active;
+- `plan_valid` is true and `path_planned` is true;
+- trajectory sanity passed;
+- `preserved_tcp_orientation_change_deg` is effectively zero;
+- `execution_ready`, `execution_authorized`, and `hardware_commanded` are false.
 
-Only after the slot check passes, request a collision-aware IK solution from
-MoveIt. First copy the position and quaternion printed by
-`/bookshelf_shadow/target_eef_pose`; do not reuse values from an older trial.
-Substitute those seven values below:
+The path is published on `/display_planned_path` for RViz review. Inspect the
+complete path against the physical shelf, table, camera, cable, gripper, and
+held book. This bridge cannot execute the path. Physical global movement is a
+separate operator-approved MoveIt step; do not treat `plan_valid` as permission
+to move.
 
-```bash
-ros2 service call /compute_ik moveit_msgs/srv/GetPositionIK "{
-  ik_request: {
-    group_name: xarm7,
-    robot_state: {is_diff: true},
-    avoid_collisions: true,
-    ik_link_name: link_eef,
-    pose_stamped: {
-      header: {frame_id: link_base},
-      pose: {
-        position: {
-          x: REPLACE_WITH_CURRENT_TARGET_X,
-          y: REPLACE_WITH_CURRENT_TARGET_Y,
-          z: REPLACE_WITH_CURRENT_TARGET_Z
-        },
-        orientation: {
-          x: REPLACE_WITH_CURRENT_TARGET_QX,
-          y: REPLACE_WITH_CURRENT_TARGET_QY,
-          z: REPLACE_WITH_CURRENT_TARGET_QZ,
-          w: REPLACE_WITH_CURRENT_TARGET_QW
-        }
-      }
-    },
-    timeout: {sec: 2, nanosec: 0}
-  }
-}"
-```
-
-The command must visibly contain the current trial values before it is run.
-The `REPLACE_WITH_...` text intentionally makes an unreviewed copy-and-paste
-fail instead of silently requesting the old pose.
-
-Require `error_code.val: 1`. Copy only `joint1` through `joint7` from the IK
-response into the RViz MotionPlanning `Joints` goal state.
-
-In RViz:
-
-1. select planning group `xarm7`;
-2. set velocity and acceleration scaling to `0.1`;
-3. click **Plan**, not Execute;
-4. inspect the complete start state, goal state, animated path, physical shelf
-   clearance, camera clearance, cable clearance, and held-book clearance;
-5. only after explicit human approval, the operator may separately click
-   **Execute** for this traditional global MoveIt plan.
-
-Do not use `move_to_joint_pose` or `/xarm_pose_plan`; those are not the reviewed
-low-speed collision-aware workflow.
-
-After the traditional global motion finishes, leave the robot stationary.
+After the separately approved global movement reaches pre-insertion, leave the
+robot stationary before continuing.
 
 ## 9. Start shadow activation only after reaching pre-insertion
 
@@ -440,8 +418,7 @@ cd /home/riot/Chris/bookshelf-unified
 
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /tmp/bookshelf_marker_install/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 ros2 launch bookshelf_shadow_ros policy_calibrated_static_shadow.launch.py \
   adapter_config:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/trial_static_slot.yaml \
@@ -474,8 +451,7 @@ In a new terminal:
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /tmp/bookshelf_marker_install/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 ros2 launch bookshelf_guarded_control_ros policy_tool_plan_only.launch.py
 ```

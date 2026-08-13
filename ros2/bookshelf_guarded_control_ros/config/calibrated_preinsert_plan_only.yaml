@@ -1,0 +1,61 @@
+# Automatic global pre-insertion planning. This configuration cannot execute.
+calibrated_preinsert_plan_only:
+  ros__parameters:
+    base_frame: link_base
+    tcp_frame: link_tcp
+    planning_link: link_tcp
+    group_name: xarm7
+    planning_service: /plan_kinematic_path
+    planning_pipeline_id: ""
+    planner_id: ""
+    planning_attempts: 3
+    allowed_planning_time_s: 5.0
+    velocity_scaling: 0.05
+    acceleration_scaling: 0.05
+    position_tolerance_m: 0.001
+    orientation_tolerance_rad: 0.017453292519943295
+    planning_rate_hz: 2.0
+    message_max_age_s: 1.0
+    scene_status_max_age_s: 1.0
+    tf_max_age_s: 0.50
+    tf_lookup_timeout_s: 0.10
+
+    # preserve_current_tcp should produce zero orientation change. A small
+    # numerical allowance is retained, but a global reorientation is rejected.
+    maximum_preserved_tcp_orientation_change_deg: 0.10
+    maximum_target_translation_m: 0.75
+    maximum_target_rotation_deg: 5.0
+    workspace_min_xyz: [0.20, -0.60, 0.05]
+    workspace_max_xyz: [1.00, 0.60, 1.00]
+
+    # Global paths may be long, but malformed timing, discontinuities, distant
+    # IK starts and extreme branches remain fail-closed.
+    require_trajectory_sanity: true
+    expected_arm_joint_names:
+      [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
+    minimum_trajectory_point_count: 2
+    require_trajectory_velocities: true
+    maximum_trajectory_start_error_rad: 0.02
+    maximum_trajectory_waypoint_joint_jump_rad: 0.20
+    maximum_trajectory_endpoint_joint_delta_rad: 3.0
+    maximum_trajectory_joint_path_length_rad: 10.0
+    minimum_trajectory_duration_s: 0.10
+    maximum_trajectory_duration_s: 90.0
+
+    blocked_node_names:
+      - guarded_policy_tool_executor
+      - policy_to_robot_node
+      - cartesian_action_executor_node
+      - action_executor_node
+
+    target_valid_topic: /bookshelf_shadow/calibrated_target_valid
+    target_tcp_topic: /bookshelf_shadow/target_tcp_pose
+    target_debug_topic: /bookshelf_shadow/calibrated_target_debug
+    joint_states_topic: /joint_states
+    scene_status_topic: /bookshelf_scene/status
+    plan_valid_topic: /bookshelf_preinsert/plan_valid
+    plan_report_topic: /bookshelf_preinsert/plan_report
+    target_tcp_output_topic: /bookshelf_preinsert/target_tcp
+    planned_trajectory_topic: /bookshelf_preinsert/planned_trajectory
+    display_trajectory_topic: /display_planned_path
+    output_dir: /tmp/bookshelf_preinsert_plan

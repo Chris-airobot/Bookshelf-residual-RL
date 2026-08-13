@@ -54,6 +54,15 @@ def test_shadow_source_audit_only_exempts_rosbag_core_topic_literals(tmp_path):
     )
 
 
+def test_shadow_source_audit_allows_preflight_prohibited_node_literals(tmp_path):
+    preflight = tmp_path / "physical_experiment_preflight.py"
+    preflight.write_text(
+        "PROHIBITED_EXECUTION_NODES = {'/policy_' + 'to_robot_node'}\n",
+        encoding="utf-8",
+    )
+    assert audit_shadow_source_tree(tmp_path) == []
+
+
 def test_portable_controller_constants_match_simulator_source():
     result = controller_config_parity(ENV_CFG)
     assert result["passed"], result["mismatches"]

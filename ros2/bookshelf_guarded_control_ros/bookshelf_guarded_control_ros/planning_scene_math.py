@@ -147,3 +147,29 @@ def scene_status_error(
     if not bool(objects.get("held_book")):
         return "held-book collision object is not active"
     return None
+
+
+def global_scene_status_error(status) -> str | None:
+    """Require the measured coarse scene used for the global approach plan."""
+
+    if not isinstance(status, dict):
+        return "planning scene status is unavailable"
+    if status.get("mode") != GLOBAL_APPROACH:
+        return (
+            f"planning scene mode is {status.get('mode')!r}, "
+            f"expected {GLOBAL_APPROACH!r}"
+        )
+    if not bool(status.get("scene_applied")):
+        return "planning scene has not been applied"
+    if not bool(status.get("hardware_measurements_confirmed")):
+        return "planning scene hardware measurements are unconfirmed"
+    objects = status.get("objects")
+    if not isinstance(objects, dict):
+        return "planning scene object status is unavailable"
+    if not bool(objects.get("bookshelf_keepout")):
+        return "bookshelf keep-out box is not active during global approach"
+    if not bool(objects.get("table")):
+        return "table collision object is not active"
+    if not bool(objects.get("held_book")):
+        return "held-book collision object is not active"
+    return None

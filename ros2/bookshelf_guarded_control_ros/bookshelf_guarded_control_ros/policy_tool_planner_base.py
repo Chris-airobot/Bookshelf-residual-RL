@@ -9,15 +9,7 @@ import math
 from pathlib import Path
 
 from geometry_msgs.msg import Pose, PoseStamped
-from moveit_msgs.msg import (
-    BoundingVolume,
-    Constraints,
-    MoveItErrorCodes,
-    OrientationConstraint,
-    PositionConstraint,
-    RobotState,
-    RobotTrajectory,
-)
+from moveit_msgs.msg import MoveItErrorCodes, RobotState, RobotTrajectory
 from moveit_msgs.srv import GetMotionPlan
 import numpy as np
 import rclpy
@@ -25,7 +17,6 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
-from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Bool, Float32MultiArray, String
 import tf2_ros
 
@@ -42,6 +33,7 @@ from .policy_tool_control_math import (
     transform_to_dict,
 )
 from .planning_scene_math import LOCAL_INSERTION, scene_status_error
+from .pose_motion_plan import build_pose_motion_plan_request
 
 
 @dataclass
@@ -578,68 +570,37 @@ class PolicyToolPlannerBase(Node):
         )
 
     def _motion_plan_request(self, target: PolicyToolTarget):
-        request = GetMotionPlan.Request()
-        motion_request = request.motion_plan_request
-        motion_request.group_name = self.group_name
-        motion_request.pipeline_id = str(
-            self.get_parameter("planning_pipeline_id").value
-        )
-        motion_request.planner_id = str(self.get_parameter("planner_id").value)
-        motion_request.num_planning_attempts = int(
-            self.get_parameter("planning_attempts").value
-        )
-        motion_request.allowed_planning_time = float(
-            self.get_parameter("allowed_planning_time_s").value
-        )
-        motion_request.max_velocity_scaling_factor = float(
-            self.get_parameter("velocity_scaling").value
-        )
-        motion_request.max_acceleration_scaling_factor = float(
-            self.get_parameter("acceleration_scaling").value
-        )
-        motion_request.start_state = RobotState(joint_state=self.latest_joint_state)
-
         workspace_min = self.get_parameter("workspace_min_xyz").value
         workspace_max = self.get_parameter("workspace_max_xyz").value
-        motion_request.workspace_parameters.header.frame_id = self.base_frame
-        motion_request.workspace_parameters.min_corner.x = float(workspace_min[0])
-        motion_request.workspace_parameters.min_corner.y = float(workspace_min[1])
-        motion_request.workspace_parameters.min_corner.z = float(workspace_min[2])
-        motion_request.workspace_parameters.max_corner.x = float(workspace_max[0])
-        motion_request.workspace_parameters.max_corner.y = float(workspace_max[1])
-        motion_request.workspace_parameters.max_corner.z = float(workspace_max[2])
-
         target_pose = _transform_to_pose(target.transform_base_tcp_target)
-        position_tolerance = float(self.get_parameter("position_tolerance_m").value)
-        primitive = SolidPrimitive(type=SolidPrimitive.BOX)
-        primitive.dimensions = [2.0 * position_tolerance] * 3
-        region = BoundingVolume(
-            primitives=[primitive],
-            primitive_poses=[target_pose],
+        return build_pose_motion_plan_request(
+            target_pose=target_pose,
+            start_joint_state=self.latest_joint_state,
+            base_frame=self.base_frame,
+            planning_link=self.planning_link,
+            group_name=self.group_name,
+            workspace_min_xyz=workspace_min,
+            workspace_max_xyz=workspace_max,
+            planning_pipeline_id=str(
+                self.get_parameter("planning_pipeline_id").value
+            ),
+            planner_id=str(self.get_parameter("planner_id").value),
+            planning_attempts=int(self.get_parameter("planning_attempts").value),
+            allowed_planning_time_s=float(
+                self.get_parameter("allowed_planning_time_s").value
+            ),
+            velocity_scaling=float(self.get_parameter("velocity_scaling").value),
+            acceleration_scaling=float(
+                self.get_parameter("acceleration_scaling").value
+            ),
+            position_tolerance_m=float(
+                self.get_parameter("position_tolerance_m").value
+            ),
+            orientation_tolerance_rad=float(
+                self.get_parameter("orientation_tolerance_rad").value
+            ),
+            constraint_name=f"policy_tool_{target.target_id[:12]}",
         )
-        position = PositionConstraint()
-        position.header.frame_id = self.base_frame
-        position.link_name = self.planning_link
-        position.constraint_region = region
-        position.weight = 1.0
-
-        orientation = OrientationConstraint()
-        orientation.header.frame_id = self.base_frame
-        orientation.link_name = self.planning_link
-        orientation.orientation = target_pose.orientation
-        tolerance = float(self.get_parameter("orientation_tolerance_rad").value)
-        orientation.absolute_x_axis_tolerance = tolerance
-        orientation.absolute_y_axis_tolerance = tolerance
-        orientation.absolute_z_axis_tolerance = tolerance
-        orientation.weight = 1.0
-
-        constraints = Constraints(
-            name=f"policy_tool_{target.target_id[:12]}",
-            position_constraints=[position],
-            orientation_constraints=[orientation],
-        )
-        motion_request.goal_constraints = [constraints]
-        return request
 
     def _plan_response_callback(self, future):
         target = self.pending_target
