@@ -76,6 +76,8 @@ class BookshelfEnvCfg(BookshelfEnvCfgV4):
     slot_lateral_clearance_min = 0.003
     slot_lateral_clearance_max = 0.006
     forced_missing_book_index = -1
+    # Optional read-only JSON bank used only for controlled evaluation replay.
+    evaluation_scenario_bank = ""
 
     # V5 allows small over-insertion past the nominal back reference.
     success_front_clear_min = -0.003

@@ -267,6 +267,7 @@ class BookshelfEnv(BookshelfEnvV4):
 
     def _sample_row_layout(self, env_ids_t: torch.Tensor) -> None:
         self._ensure_randomization_buffers()
+        self._ensure_scenario_trace_buffers()
         p_merge = float(getattr(self.cfg, "side_book_merge_probability", 0.0))
         row_count = int(getattr(self.cfg, "row_book_count", 10))
 
@@ -302,6 +303,16 @@ class BookshelfEnv(BookshelfEnvV4):
                                 )
                                 single_cursor += 1
                     cursor += span
+
+        self._scenario_row_wide_mask_env[env_ids_t] = 0
+        for env_id in env_ids_t.tolist():
+            mask = 0
+            for start in self._wide_book_start_slot_env[env_id].tolist():
+                if start >= 0:
+                    mask |= 1 << int(start)
+            self._scenario_row_wide_mask_env[env_id] = mask
+        self._scenario_single_book_slot_env[env_ids_t] = self._single_book_slot_env[env_ids_t]
+        self._scenario_wide_book_start_slot_env[env_ids_t] = self._wide_book_start_slot_env[env_ids_t]
 
     def _current_slot_lateral_clearance(self) -> float:
         """Compatibility helper used by manual status printing."""
@@ -740,9 +751,9 @@ class BookshelfEnv(BookshelfEnvV4):
             torch.full_like(self.episode_length_buf, -1),
         )
         self.extras["episode_metric_done"] = done
-        self.extras["episode_metric_slot_center_y"] = self._slot_center_y_env
-        self.extras["episode_metric_slot_clearance"] = self._slot_lateral_clearance_env
-        self.extras["episode_metric_missing_book_index"] = self._missing_book_index_env
+        self.extras["episode_metric_slot_center_y"] = self._slot_center_y_env.clone()
+        self.extras["episode_metric_slot_clearance"] = self._slot_lateral_clearance_env.clone()
+        self.extras["episode_metric_missing_book_index"] = self._missing_book_index_env.clone()
         self.extras["episode_metric_success"] = success
         self.extras["episode_metric_failure_code"] = failure_code
         self.extras["episode_metric_final_lat_err"] = torch.abs(m["lat_err"])
@@ -753,6 +764,7 @@ class BookshelfEnv(BookshelfEnvV4):
         self.extras["episode_metric_release_step"] = self._release_step_buf
         self.extras["episode_metric_push_steps"] = push_steps
         self.extras["episode_metric_mode_at_done"] = mode_before
+        self._write_scenario_episode_metrics()
 
         return terminated, time_out
 
@@ -767,6 +779,7 @@ class BookshelfEnv(BookshelfEnvV4):
         cmax = float(getattr(self.cfg, "slot_lateral_clearance_max", self.cfg.slot_lateral_clearance))
 
         self._ensure_randomization_buffers()
+        bank_active = self._assign_frozen_scenarios(env_ids_t)
 
         self._slot_lateral_clearance_env[env_ids_t] = sample_uniform(cmin, cmax, (n,), self.device)
         row_count = int(getattr(self.cfg, "row_book_count", 10))
@@ -779,12 +792,25 @@ class BookshelfEnv(BookshelfEnvV4):
             self._missing_book_index_env[env_ids_t] = torch.randint(0, row_count, (n,), device=self.device)
         self._sample_row_layout(env_ids_t)
 
+        if torch.any(bank_active):
+            active_env_ids = env_ids_t[bank_active]
+            self._slot_lateral_clearance_env[active_env_ids] = self._frozen_slot_clearance_env[active_env_ids]
+            self._missing_book_index_env[active_env_ids] = self._frozen_missing_book_index_env[active_env_ids]
+            self._single_book_slot_env[active_env_ids] = self._frozen_single_book_slot_env[active_env_ids]
+            self._wide_book_start_slot_env[active_env_ids] = self._frozen_wide_book_start_slot_env[active_env_ids]
+            self._scenario_row_wide_mask_env[active_env_ids] = self._frozen_row_wide_mask_env[active_env_ids]
+            self._scenario_single_book_slot_env[active_env_ids] = self._single_book_slot_env[active_env_ids]
+            self._scenario_wide_book_start_slot_env[active_env_ids] = self._wide_book_start_slot_env[active_env_ids]
+
         nb = _neighbor_book_dims(self.cfg)
         pitch_y = float(nb[2])
         row_center = 0.5 * float(row_count - 1)
         self._slot_center_y_env[env_ids_t] = (
             self._missing_book_index_env[env_ids_t].to(dtype=torch.float32) - row_center
         ) * pitch_y
+        if torch.any(bank_active):
+            active_env_ids = env_ids_t[bank_active]
+            self._slot_center_y_env[active_env_ids] = self._frozen_slot_center_y_env[active_env_ids]
 
         self._write_side_book_states(env_ids_t)
 
@@ -792,3 +818,4 @@ class BookshelfEnv(BookshelfEnvV4):
 
         self._write_side_book_states(env_ids_t)
         self._align_gripper_to_sampled_slot(env_ids_t)
+        self._capture_scenario_initial_pose(env_ids_t)

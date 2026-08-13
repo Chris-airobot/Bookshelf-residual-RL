@@ -16,7 +16,7 @@ mkdir -p "$OUT_DIR"
 
 SUMMARY_CSV="$OUT_DIR/summary.csv"
 cat > "$SUMMARY_CSV" <<'CSV'
-case,seed,slot_clearance,episodes,success,success_pct,drop,drop_pct,timeout,timeout_pct,log_path
+case,seed,slot_clearance,episodes,success,success_pct,drop,drop_pct,timeout,timeout_pct,scenario_sha256,trace_summary,log_path
 CSV
 
 run_case() {
@@ -29,6 +29,8 @@ run_case() {
   fi
 
   local log_path="$OUT_DIR/${case_name}_seed${seed}.log"
+  local trace_dir="$OUT_DIR/${case_name}_seed${seed}_trace"
+  local trace_summary="$trace_dir/summary.json"
 
   echo "============================================================"
   echo "case=$case_name seed=$seed clearance=$SLOT_CLEARANCE checkpoint=$CHECKPOINT"
@@ -42,18 +44,23 @@ run_case() {
     --seed "$seed" \
     --eval_slot_clearance "$SLOT_CLEARANCE" \
     --eval_episodes "$EVAL_EPISODES" \
+    --eval_output_dir "$trace_dir" \
     --checkpoint "$CHECKPOINT" \
     "${extra_args[@]}" \
     2>&1 | tee "$log_path"
 
-  python3 - "$case_name" "$seed" "$SLOT_CLEARANCE" "$log_path" "$SUMMARY_CSV" <<'PY'
+  python3 - "$case_name" "$seed" "$SLOT_CLEARANCE" "$log_path" "$trace_summary" "$SUMMARY_CSV" <<'PY'
 import csv
+import json
 import re
 import sys
 from pathlib import Path
 
-case_name, seed, slot_clearance, log_path, summary_csv = sys.argv[1:]
+case_name, seed, slot_clearance, log_path, trace_summary, summary_csv = sys.argv[1:]
 text = Path(log_path).read_text(errors="replace")
+trace = json.loads(Path(trace_summary).read_text(encoding="utf-8"))
+if not trace.get("scenario_trace_complete", False):
+    raise SystemExit(f"Incomplete scenario trace: {trace_summary}")
 
 patterns = {
     "episodes": r"Episodes\s*:\s*(\d+)",
@@ -81,6 +88,8 @@ row = {
     "drop_pct": drop_m.group(3),
     "timeout": timeout_m.group(1),
     "timeout_pct": timeout_m.group(3),
+    "scenario_sha256": trace["scenario_sha256"],
+    "trace_summary": trace_summary,
     "log_path": log_path,
 }
 

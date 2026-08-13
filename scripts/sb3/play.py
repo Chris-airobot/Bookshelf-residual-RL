@@ -52,6 +52,27 @@ parser.add_argument(
     help="Stop after this many completed episodes; 0 runs until manually stopped.",
 )
 parser.add_argument(
+    "--eval_output_dir",
+    type=str,
+    default=None,
+    help="Scenario trace directory. Bookshelf residual/PPO evaluations create one automatically when omitted.",
+)
+parser.add_argument(
+    "--eval_scenario_bank",
+    type=str,
+    default=None,
+    help="Replay every scenario from a frozen evaluation bank exactly once.",
+)
+parser.add_argument(
+    "--eval_nominal_only",
+    action="store_true",
+    default=False,
+    help=(
+        "Evaluate the geometric nominal controller with zero residual actions. "
+        "This enables geometry-gated nominal release and does not load PPO."
+    ),
+)
+parser.add_argument(
     "--use_pretrained_checkpoint",
     action="store_true",
     help="Use the pre-trained checkpoint from Nucleus.",
@@ -107,8 +128,10 @@ import os
 import random
 import time
 import math
+from datetime import datetime
 
 import gymnasium as gym
+import numpy as np
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecNormalize
@@ -128,6 +151,16 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 from isaaclab_tasks.utils.parse_cfg import get_checkpoint_path
 
 import bookshelf.tasks  # noqa: F401
+from bookshelf.tasks.direct.bookshelf.frozen_scenario_bank import load_frozen_scenario_bank
+
+from evaluation_scenarios import (
+    EvaluationScenarioTrace,
+    SCENARIO_FIELDS,
+    SCENARIO_VECTOR_FIELDS,
+    apply_evaluation_seed_after_agent_load,
+    git_revision,
+    sha256_file,
+)
 
 
 def _scalar(value, env_idx: int | None = None, default=None):
@@ -160,18 +193,88 @@ def _episode_metric(infos, env_idx: int, key: str, default=None):
     return default
 
 
+def _episode_info_value(infos, env_idx: int, key: str, default=None):
+    if not isinstance(infos, (list, tuple)) or env_idx >= len(infos):
+        return default
+    info = infos[env_idx]
+    if not isinstance(info, dict):
+        return default
+    episode = info.get("episode")
+    if not isinstance(episode, dict):
+        return default
+    return _scalar(episode.get(key), None, default)
+
+
+def _episode_metric_vector(infos, env_idx: int, key: str) -> list | None:
+    if not isinstance(infos, (list, tuple)) or env_idx >= len(infos):
+        return None
+    info = infos[env_idx]
+    if not isinstance(info, dict):
+        return None
+    value = info.get(f"episode_metric_{key}")
+    if value is None:
+        return None
+    try:
+        if hasattr(value, "detach"):
+            value = value.detach().cpu()
+        if hasattr(value, "tolist"):
+            value = value.tolist()
+        return list(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _scenario_trace_row(infos, env_idx: int) -> dict:
+    row = {
+        "env_id": env_idx,
+        "slot_center_y": _episode_metric(infos, env_idx, "slot_center_y"),
+        "slot_clearance": _episode_metric(infos, env_idx, "slot_clearance"),
+        "missing_book_index": _episode_metric(infos, env_idx, "missing_book_index"),
+    }
+    vector = _episode_metric_vector(infos, env_idx, "scenario_vector")
+    if vector is not None and len(vector) == len(SCENARIO_VECTOR_FIELDS):
+        row.update(zip(SCENARIO_VECTOR_FIELDS, vector))
+    return row
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Play with stable-baselines agent."""
     # grab task name for checkpoint path
     task_name = args_cli.task.split(":")[-1]
     train_task_name = task_name.replace("-Play", "")
+    traced_tasks = {"Bookshelf-Residual-Direct-v0", "Bookshelf-PPO-Direct-v0"}
+    frozen_bank = None
+    if args_cli.eval_scenario_bank is not None:
+        if task_name not in traced_tasks:
+            raise ValueError(f"Frozen bookshelf scenarios are not supported for task {task_name!r}.")
+        frozen_bank = load_frozen_scenario_bank(args_cli.eval_scenario_bank)
+        bank_episode_count = int(frozen_bank["scenario_count"])
+        if args_cli.eval_episodes not in (0, bank_episode_count):
+            raise ValueError(
+                "--eval_episodes must be omitted/zero or equal the frozen bank count: "
+                f"{args_cli.eval_episodes} != {bank_episode_count}"
+            )
+        args_cli.eval_episodes = bank_episode_count
+    trace_enabled = args_cli.eval_output_dir is not None or frozen_bank is not None or (
+        args_cli.eval_episodes > 0 and task_name in traced_tasks
+    )
+    if trace_enabled and not args_cli.keep_all_info:
+        args_cli.keep_all_info = True
+        print("[INFO] Enabling full terminal metrics for scenario tracing.")
     # randomly sample a seed if seed = -1
     if args_cli.seed == -1:
         args_cli.seed = random.randint(0, 10000)
 
     # override configurations with non-hydra CLI arguments
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if frozen_bank is not None:
+        if env_cfg.scene.num_envs > int(frozen_bank["scenario_count"]):
+            raise ValueError(
+                "--num_envs cannot exceed the frozen bank scenario count: "
+                f"{env_cfg.scene.num_envs} > {frozen_bank['scenario_count']}"
+            )
+        env_cfg.evaluation_scenario_bank = str(Path(args_cli.eval_scenario_bank).expanduser().resolve())
     agent_cfg["seed"] = args_cli.seed if args_cli.seed is not None else agent_cfg["seed"]
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
@@ -200,12 +303,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.book_grasp_y_jitter = 0.006
         env_cfg.book_grasp_z_jitter = 0.003
         env_cfg.book_grasp_yaw_jitter = math.radians(8.0)
+    if args_cli.eval_nominal_only:
+        if task_name != "Bookshelf-Residual-Direct-v0":
+            raise ValueError("--eval_nominal_only requires Bookshelf-Residual-Direct-v0.")
+        if not bool(getattr(env_cfg, "enable_nominal_controller", False)):
+            raise ValueError("--eval_nominal_only requires the geometric nominal controller.")
+        env_cfg.enable_nominal_release_assist = True
+        env_cfg.nominal_release_assist_until_frac = 1.0
 
     # directory for logging into
     log_root_path = os.path.join("logs", "sb3", train_task_name)
     log_root_path = os.path.abspath(log_root_path)
     # checkpoint and log_dir stuff
-    if args_cli.checkpoint is None:
+    if args_cli.eval_nominal_only:
+        if args_cli.checkpoint is not None:
+            raise ValueError("Do not pass --checkpoint with --eval_nominal_only.")
+        checkpoint_path = None
+        log_dir = os.path.join(log_root_path, "nominal_only")
+    elif args_cli.checkpoint is None:
         # FIXME: last checkpoint doesn't seem to really use the last one'
         if args_cli.use_last_checkpoint:
             checkpoint = "model_.*.zip"
@@ -214,7 +329,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         checkpoint_path = get_checkpoint_path(log_root_path, ".*", checkpoint, sort_alpha=False)
     else:
         checkpoint_path = args_cli.checkpoint
-    log_dir = os.path.dirname(checkpoint_path)
+    if checkpoint_path is not None:
+        log_dir = os.path.dirname(checkpoint_path)
 
     # set the log directory for the environment (works for all environment types)
     env_cfg.log_dir = log_dir
@@ -243,18 +359,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for stable baselines
     env = Sb3VecEnvWrapper(env, fast_variant=not args_cli.keep_all_info)
 
-    vec_norm_path = checkpoint_path.replace("/model", "/model_vecnormalize").replace(".zip", ".pkl")
-    vec_norm_path = Path(vec_norm_path)
+    vec_norm_path = None
+    if checkpoint_path is not None:
+        vec_norm_path = Path(
+            checkpoint_path.replace("/model", "/model_vecnormalize").replace(".zip", ".pkl")
+        )
 
     # normalize environment (if needed)
-    if vec_norm_path.exists():
+    if vec_norm_path is not None and vec_norm_path.exists():
         print(f"Loading saved normalization: {vec_norm_path}")
         env = VecNormalize.load(vec_norm_path, env)
         #  do not update them at test time
         env.training = False
         # reward normalization is not needed at test time
         env.norm_reward = False
-    elif "normalize_input" in agent_cfg:
+    elif not args_cli.eval_nominal_only and "normalize_input" in agent_cfg:
         env = VecNormalize(
             env,
             training=True,
@@ -262,9 +381,72 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             clip_obs="clip_obs" in agent_cfg and agent_cfg.pop("clip_obs"),
         )
 
-    # create agent from stable baselines
-    print(f"Loading checkpoint from: {checkpoint_path}")
-    agent = PPO.load(checkpoint_path, env, print_system_info=True)
+    evaluation_seed = int(agent_cfg["seed"])
+    agent = None
+    checkpoint_agent_seed = None
+    if args_cli.eval_nominal_only:
+        print("[INFO] Evaluation policy: nominal controller only (zero residual actions).")
+    else:
+        print(f"Loading checkpoint from: {checkpoint_path}")
+        agent = PPO.load(checkpoint_path, env, print_system_info=True)
+        checkpoint_agent_seed = apply_evaluation_seed_after_agent_load(agent, evaluation_seed)
+        print(
+            "[INFO] Reapplied evaluation seed after PPO.load: "
+            f"evaluation={evaluation_seed}, checkpoint={checkpoint_agent_seed}"
+        )
+
+    trace = None
+    if trace_enabled:
+        if args_cli.eval_output_dir is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            trace_output_dir = _REPO_ROOT / "logs" / "eval_scenarios" / (
+                f"{timestamp}_{task_name}_seed{agent_cfg['seed']}"
+            )
+        else:
+            trace_output_dir = Path(args_cli.eval_output_dir).expanduser().resolve()
+        trace = EvaluationScenarioTrace(
+            trace_output_dir,
+            {
+                "task": task_name,
+                "evaluation_policy": "nominal_only" if args_cli.eval_nominal_only else "ppo",
+                "seed": evaluation_seed,
+                "checkpoint_agent_seed": checkpoint_agent_seed,
+                "num_envs": int(env.num_envs),
+                "requested_episodes": int(args_cli.eval_episodes),
+                "checkpoint": str(Path(checkpoint_path).resolve()) if checkpoint_path is not None else None,
+                "checkpoint_sha256": sha256_file(checkpoint_path),
+                "vecnormalize": (
+                    str(vec_norm_path.resolve())
+                    if vec_norm_path is not None and vec_norm_path.exists()
+                    else None
+                ),
+                "vecnormalize_sha256": sha256_file(vec_norm_path),
+                "git": git_revision(_REPO_ROOT),
+                "evaluation": {
+                    "fixed_slot_clearance": args_cli.eval_slot_clearance,
+                    "old_reset_noise": bool(args_cli.eval_old_reset_noise),
+                    "reset_arm_joint_pos_noise": float(
+                        getattr(env_cfg, "reset_arm_joint_pos_noise", 0.0)
+                    ),
+                    "book_grasp_x_jitter": float(getattr(env_cfg, "book_grasp_x_jitter", 0.0)),
+                    "book_grasp_y_jitter": float(getattr(env_cfg, "book_grasp_y_jitter", 0.0)),
+                    "book_grasp_z_jitter": float(getattr(env_cfg, "book_grasp_z_jitter", 0.0)),
+                    "book_grasp_yaw_jitter": float(getattr(env_cfg, "book_grasp_yaw_jitter", 0.0)),
+                },
+                "scenario_fields": SCENARIO_FIELDS,
+                "scenario_vector_fields": SCENARIO_VECTOR_FIELDS,
+                "frozen_scenario_bank": (
+                    {
+                        "path": frozen_bank["path"],
+                        "scenario_count": frozen_bank["scenario_count"],
+                        "scenario_sha256": frozen_bank["scenario_sha256"],
+                    }
+                    if frozen_bank is not None
+                    else None
+                ),
+            },
+        )
+        print(f"[INFO] Evaluation scenario trace: {trace.output_dir}")
 
     dt = env.unwrapped.step_dt
     num_envs = env.num_envs
@@ -288,30 +470,57 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            actions, _ = agent.predict(obs, deterministic=True)
+            if args_cli.eval_nominal_only:
+                actions = np.zeros((num_envs, *env.action_space.shape), dtype=np.float32)
+            else:
+                actions, _ = agent.predict(obs, deterministic=True)
             # env stepping
             obs, rewards, dones, infos = env.step(actions)
 
         for i in range(num_envs):
             ep_reward[i] += float(rewards[i])
             if dones[i]:
+                trace_row = _scenario_trace_row(infos, i) if trace is not None else {}
+                bank_index = trace_row.get("scenario_bank_index", -1)
+                if frozen_bank is not None and (bank_index is None or int(bank_index) < 0):
+                    ep_reward[i] = 0.0
+                    continue
+                if args_cli.eval_episodes > 0 and n_episodes >= args_cli.eval_episodes:
+                    ep_reward[i] = 0.0
+                    continue
                 r = ep_reward[i]
                 metric_success = _episode_metric(infos, i, "success", default=None)
                 failure_code = _episode_metric(infos, i, "failure_code", default=None)
+                outcome = "timeout"
                 if metric_success is not None:
                     if bool(metric_success):
                         n_success += 1
+                        outcome = "success"
                     elif int(failure_code or 0) == 3:
                         n_timeout += 1
                     else:
                         n_drop += 1
+                        outcome = "drop"
                 elif r > SUCCESS_REWARD_THRESH:
                     n_success += 1
+                    outcome = "success"
                 elif r < -10.0:
                     n_drop += 1
+                    outcome = "drop"
                 else:
                     n_timeout += 1
                 n_episodes += 1
+                if trace is not None:
+                    trace_row.update(
+                        {
+                            "episode_index": n_episodes - 1,
+                            "outcome": outcome,
+                            "failure_code": failure_code,
+                            "episode_reward": r,
+                            "episode_length": _episode_info_value(infos, i, "l"),
+                        }
+                    )
+                    trace.append(trace_row)
                 ep_reward[i] = 0.0
 
                 if n_episodes % PRINT_EVERY == 0:
@@ -345,6 +554,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print(f"  Drop           : {n_drop} / {total}  ({100*n_drop/total:.0f}%)")
         print(f"  Timeout        : {n_timeout} / {total}  ({100*n_timeout/total:.0f}%)")
         print("=" * 55)
+
+    if trace is not None:
+        summary_path = trace.write()
+        print(f"[INFO] Scenario trace summary: {summary_path}")
 
     # close the simulator
     env.close()

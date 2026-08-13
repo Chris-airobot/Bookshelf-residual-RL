@@ -32,6 +32,7 @@ from isaaclab.utils import math as math_utils
 from isaaclab.utils.math import sample_uniform
 
 from .bookshelf_env_cfg_v4 import BookshelfEnvCfg
+from .frozen_scenario_bank import FrozenScenarioAllocator, load_frozen_scenario_bank
 
 _MODE_INSERT = 0
 _MODE_SCRIPTED = 1
@@ -178,6 +179,154 @@ class BookshelfEnv(DirectRLEnv):
 
         # Hold arm target when action≈0
         self._arm_hold_joint_pos = self.robot.data.default_joint_pos[:, self._arm_joint_ids].clone()
+        self._ensure_scenario_trace_buffers()
+
+    def _ensure_scenario_trace_buffers(self) -> None:
+        """Create reset-condition buffers lazily so derived envs can reuse them."""
+        if hasattr(self, "_scenario_reset_count_env"):
+            return
+        self._scenario_reset_count_env = torch.full(
+            (self.num_envs,), -1, device=self.device, dtype=torch.long
+        )
+        self._scenario_bank_index_env = torch.full(
+            (self.num_envs,), -1, device=self.device, dtype=torch.long
+        )
+        self._scenario_joint_noise_env = torch.zeros(
+            (self.num_envs, len(self._arm_joint_ids)), device=self.device, dtype=torch.float32
+        )
+        self._scenario_grasp_jitter_env = torch.zeros(
+            (self.num_envs, 4), device=self.device, dtype=torch.float32
+        )
+        self._scenario_initial_book_pose_env = torch.zeros(
+            (self.num_envs, 7), device=self.device, dtype=torch.float32
+        )
+        self._scenario_initial_tool_pose_env = torch.zeros(
+            (self.num_envs, 7), device=self.device, dtype=torch.float32
+        )
+        self._scenario_row_wide_mask_env = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.long
+        )
+        self._scenario_single_book_slot_env = torch.full(
+            (self.num_envs, 9), -1, device=self.device, dtype=torch.long
+        )
+        self._scenario_wide_book_start_slot_env = torch.full(
+            (self.num_envs, 4), -1, device=self.device, dtype=torch.long
+        )
+        self._frozen_joint_noise_env = torch.zeros_like(self._scenario_joint_noise_env)
+        self._frozen_grasp_jitter_env = torch.zeros_like(self._scenario_grasp_jitter_env)
+        self._frozen_slot_center_y_env = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.float32
+        )
+        self._frozen_slot_clearance_env = torch.zeros_like(self._frozen_slot_center_y_env)
+        self._frozen_missing_book_index_env = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.long
+        )
+        self._frozen_row_wide_mask_env = torch.zeros(
+            (self.num_envs,), device=self.device, dtype=torch.long
+        )
+        self._frozen_single_book_slot_env = torch.full_like(
+            self._scenario_single_book_slot_env, -1
+        )
+        self._frozen_wide_book_start_slot_env = torch.full_like(
+            self._scenario_wide_book_start_slot_env, -1
+        )
+
+    def _ensure_frozen_scenario_bank(self) -> None:
+        if hasattr(self, "_frozen_scenario_allocator"):
+            return
+        bank_path = str(getattr(self.cfg, "evaluation_scenario_bank", "") or "")
+        self._frozen_scenario_bank = None
+        self._frozen_scenario_allocator = None
+        if not bank_path:
+            return
+        bank = load_frozen_scenario_bank(bank_path)
+        if int(bank["scenario_count"]) < self.num_envs:
+            raise ValueError(
+                "Frozen scenario bank must contain at least as many scenarios as active environments: "
+                f"{bank['scenario_count']} < {self.num_envs}"
+            )
+        self._frozen_scenario_bank = bank
+        self._frozen_scenario_allocator = FrozenScenarioAllocator(bank["scenarios"], self.num_envs)
+        print(
+            "[INFO] Frozen evaluation scenario bank loaded: "
+            f"{bank['scenario_count']} scenarios, sha256={bank['scenario_sha256']}"
+        )
+
+    def _assign_frozen_scenarios(self, env_ids_t: torch.Tensor) -> torch.Tensor:
+        """Assign fresh bank rows to reset envs and return the active mask."""
+        self._ensure_scenario_trace_buffers()
+        self._ensure_frozen_scenario_bank()
+        self._scenario_bank_index_env[env_ids_t] = -1
+        if self._frozen_scenario_allocator is None:
+            return torch.zeros(len(env_ids_t), device=self.device, dtype=torch.bool)
+
+        assignments = self._frozen_scenario_allocator.allocate(env_ids_t.tolist())
+        active = torch.zeros(len(env_ids_t), device=self.device, dtype=torch.bool)
+        local_index = {int(env_id): index for index, env_id in enumerate(env_ids_t.tolist())}
+        for env_id, scenario in assignments.items():
+            if scenario is None:
+                continue
+            index = local_index[env_id]
+            active[index] = True
+            self._scenario_bank_index_env[env_id] = int(scenario["scenario_id"])
+            self._frozen_slot_center_y_env[env_id] = float(scenario["slot_center_y"])
+            self._frozen_slot_clearance_env[env_id] = float(scenario["slot_clearance"])
+            self._frozen_missing_book_index_env[env_id] = int(scenario["missing_book_index"])
+            self._frozen_row_wide_mask_env[env_id] = int(scenario["row_wide_mask"])
+            self._frozen_joint_noise_env[env_id] = torch.tensor(
+                [scenario[f"joint_noise_{joint}"] for joint in range(1, 8)],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self._frozen_grasp_jitter_env[env_id] = torch.tensor(
+                [
+                    scenario["grasp_jitter_x"],
+                    scenario["grasp_jitter_y"],
+                    scenario["grasp_jitter_z"],
+                    scenario["grasp_jitter_yaw"],
+                ],
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self._frozen_single_book_slot_env[env_id] = torch.tensor(
+                [scenario[f"single_book_slot_{slot}"] for slot in range(9)],
+                device=self.device,
+                dtype=torch.long,
+            )
+            self._frozen_wide_book_start_slot_env[env_id] = torch.tensor(
+                [scenario[f"wide_book_start_slot_{slot}"] for slot in range(4)],
+                device=self.device,
+                dtype=torch.long,
+            )
+        return active
+
+    def _capture_scenario_initial_pose(self, env_ids_t: torch.Tensor) -> None:
+        self._ensure_scenario_trace_buffers()
+        book_pos_env = self.book.data.root_link_pos_w[env_ids_t] - self.scene.env_origins[env_ids_t]
+        book_quat_w = self.book.data.root_link_quat_w[env_ids_t]
+        tool_pos_env = self._ee_tool_pos_env()[env_ids_t]
+        tool_quat_w = self.robot.data.body_quat_w[env_ids_t, self._ee_body_idx]
+        self._scenario_initial_book_pose_env[env_ids_t] = torch.cat((book_pos_env, book_quat_w), dim=-1)
+        self._scenario_initial_tool_pose_env[env_ids_t] = torch.cat((tool_pos_env, tool_quat_w), dim=-1)
+
+    def _write_scenario_episode_metrics(self) -> None:
+        """Snapshot reset conditions before DirectRLEnv resets completed envs."""
+        # Fixed order is mirrored by SCENARIO_VECTOR_FIELDS in
+        # scripts/sb3/evaluation_scenarios.py.
+        self.extras["episode_metric_scenario_vector"] = torch.cat(
+            (
+                self._scenario_reset_count_env.to(dtype=torch.float32).unsqueeze(-1),
+                self._scenario_bank_index_env.to(dtype=torch.float32).unsqueeze(-1),
+                self._scenario_row_wide_mask_env.to(dtype=torch.float32).unsqueeze(-1),
+                self._scenario_joint_noise_env,
+                self._scenario_grasp_jitter_env,
+                self._scenario_single_book_slot_env.to(dtype=torch.float32),
+                self._scenario_wide_book_start_slot_env.to(dtype=torch.float32),
+                self._scenario_initial_book_pose_env,
+                self._scenario_initial_tool_pose_env,
+            ),
+            dim=-1,
+        ).clone()
 
     def _grasp_frame_pose_w(self, env_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         lf_pos = self.robot.data.body_pos_w[env_ids, self._left_finger_body_idx]
@@ -209,32 +358,41 @@ class BookshelfEnv(DirectRLEnv):
         n = int(env_ids_t.numel())
         dtype = torch.float32
 
+        self._ensure_scenario_trace_buffers()
         hx, hy, hz = self.cfg.book_grasp_offset_hand
         off = torch.tensor([hx, hy, hz], device=self.device, dtype=dtype).unsqueeze(0).expand(n, 3).clone()
+        jitter = torch.zeros((n, 4), device=self.device, dtype=dtype)
 
         if float(self.cfg.book_grasp_x_jitter) != 0.0:
-            off[:, 0] += sample_uniform(
+            jitter[:, 0] = sample_uniform(
                 -float(self.cfg.book_grasp_x_jitter), float(self.cfg.book_grasp_x_jitter), (n,), self.device
             )
+            off[:, 0] += jitter[:, 0]
         if float(self.cfg.book_grasp_y_jitter) != 0.0:
-            off[:, 1] += sample_uniform(
+            jitter[:, 1] = sample_uniform(
                 -float(self.cfg.book_grasp_y_jitter), float(self.cfg.book_grasp_y_jitter), (n,), self.device
             )
+            off[:, 1] += jitter[:, 1]
 
         z_j = float(getattr(self.cfg, "book_grasp_z_jitter", 0.0))
         if z_j != 0.0:
-            off[:, 2] += sample_uniform(-z_j, z_j, (n,), self.device)
+            jitter[:, 2] = sample_uniform(-z_j, z_j, (n,), self.device)
+            off[:, 2] += jitter[:, 2]
 
-        yaw_delta = (
-            sample_uniform(
+        if float(self.cfg.book_grasp_yaw_jitter) != 0.0:
+            jitter[:, 3] = sample_uniform(
                 -float(self.cfg.book_grasp_yaw_jitter),
                 float(self.cfg.book_grasp_yaw_jitter),
                 (n,),
                 self.device,
             )
-            if float(self.cfg.book_grasp_yaw_jitter) != 0.0
-            else torch.zeros(n, device=self.device, dtype=dtype)
-        )
+        bank_active = self._scenario_bank_index_env[env_ids_t] >= 0
+        if torch.any(bank_active):
+            jitter[bank_active] = self._frozen_grasp_jitter_env[env_ids_t][bank_active]
+            base_offset = torch.tensor([hx, hy, hz], device=self.device, dtype=dtype)
+            off[bank_active] = base_offset + jitter[bank_active, :3]
+        yaw_delta = jitter[:, 3]
+        self._scenario_grasp_jitter_env[env_ids_t] = jitter
 
         grasp_pos_w, grasp_quat_w = self._grasp_frame_pose_w(env_ids_t)
         book_pos_w = grasp_pos_w + math_utils.quat_apply(grasp_quat_w, off)
@@ -874,6 +1032,7 @@ class BookshelfEnv(DirectRLEnv):
         self.extras["episode_metric_release_step"] = self._release_step_buf
         self.extras["episode_metric_push_steps"] = push_steps
         self.extras["episode_metric_mode_at_done"] = mode_before
+        self._write_scenario_episode_metrics()
 
         return terminated, time_out
 
@@ -883,6 +1042,10 @@ class BookshelfEnv(DirectRLEnv):
         else:
             env_ids_t = torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
 
+        self._ensure_scenario_trace_buffers()
+        self._scenario_reset_count_env[env_ids_t] += 1
+        self._scenario_joint_noise_env[env_ids_t] = 0.0
+        self._scenario_grasp_jitter_env[env_ids_t] = 0.0
         super()._reset_idx(env_ids_t)
 
         if hasattr(self, "actions") and isinstance(self.actions, torch.Tensor):
@@ -896,10 +1059,16 @@ class BookshelfEnv(DirectRLEnv):
         joint_vel = self.robot.data.default_joint_vel[env_ids_t].clone()
 
         noise = float(getattr(self.cfg, "reset_arm_joint_pos_noise", 0.0))
-        if noise > 0.0 and len(self._arm_joint_ids) > 0:
+        bank_active = self._scenario_bank_index_env[env_ids_t] >= 0
+        if (noise > 0.0 or torch.any(bank_active)) and len(self._arm_joint_ids) > 0:
             n = int(env_ids_t.numel())
             j = len(self._arm_joint_ids)
-            dq = sample_uniform(-noise, noise, (n, j), self.device)
+            dq = torch.zeros((n, j), device=self.device, dtype=torch.float32)
+            if noise > 0.0:
+                dq = sample_uniform(-noise, noise, (n, j), self.device)
+            if torch.any(bank_active):
+                dq[bank_active] = self._frozen_joint_noise_env[env_ids_t][bank_active]
+            self._scenario_joint_noise_env[env_ids_t] = dq
             joint_pos[:, self._arm_joint_ids] = joint_pos[:, self._arm_joint_ids] + dq
 
             lo = self.robot.data.soft_joint_pos_limits[env_ids_t][:, self._arm_joint_ids, 0]
@@ -968,3 +1137,4 @@ class BookshelfEnv(DirectRLEnv):
         self._release_request[env_ids_t] = False
         self._release_step_buf[env_ids_t] = -1
         self._push_start_step_buf[env_ids_t] = -1
+        self._capture_scenario_initial_pose(env_ids_t)
