@@ -21,11 +21,13 @@ from .calibrated_preinsert_target_math import (
     calibration_sensitivity,
     compare_current_eef_to_target,
     compute_calibrated_preinsert_target,
+    compute_preserved_tcp_orientation_preinsert_target,
     labelled_values,
     transform_to_dict,
 )
 from .policy_observation_math import (
     ObservationScales,
+    invert_transform,
     make_transform,
     matrix_to_quaternion_xyzw,
 )
@@ -67,6 +69,25 @@ class CalibratedPreinsertTargetNode(Node):
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.ee_frame = str(self.get_parameter("ee_frame").value)
+        self.tcp_frame = str(self.get_parameter("tcp_frame").value)
+        self.target_orientation_mode = str(
+            self.get_parameter("target_orientation_mode").value
+        ).strip()
+        if self.target_orientation_mode not in (
+            "preserve_current_tcp",
+            "book_aligned",
+        ):
+            raise ValueError(
+                "target_orientation_mode must be preserve_current_tcp or "
+                "book_aligned."
+            )
+        maximum_orientation_error = float(
+            self.get_parameter("maximum_preserved_book_orientation_error_deg").value
+        )
+        if not np.isfinite(maximum_orientation_error) or maximum_orientation_error <= 0.0:
+            raise ValueError(
+                "maximum_preserved_book_orientation_error_deg must be positive."
+            )
         self.slot_status = str(
             self.get_parameter("static_slot_transform_status").value
         ).strip()
@@ -100,14 +121,21 @@ class CalibratedPreinsertTargetNode(Node):
             ("verified_", "validated_")
         )
         self.spec = self._target_spec()
-        self.target = compute_calibrated_preinsert_target(
+        self.book_aligned_target = compute_calibrated_preinsert_target(
             self.transform_base_slot,
             self.transform_eef_book,
             transform_eef_policy_tool=self.transform_eef_policy_tool,
             spec=self.spec,
         )
-        self.geometric_target_valid = not self.target.unexpected_clipped_labels
-        self.target_valid = self.geometric_target_valid and self.policy_tool_verified
+        self.target = (
+            self.book_aligned_target
+            if self.target_orientation_mode == "book_aligned"
+            else None
+        )
+        self.preserved_orientation_diagnostics = None
+        self.geometric_target_valid = False
+        self.target_valid = False
+        self._refresh_target_validity()
         self.sensitivity = calibration_sensitivity(
             self.transform_base_slot,
             self.transform_eef_book,
@@ -126,7 +154,8 @@ class CalibratedPreinsertTargetNode(Node):
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.current_comparison = None
-        self.current_lookup_error = "waiting for current base-to-EEF transform"
+        self.current_tcp_transform = None
+        self.current_lookup_error = "waiting for current base-to-EEF/TCP transforms"
         self.last_status_key = None
         self.last_report_write_ns = None
 
@@ -139,6 +168,9 @@ class CalibratedPreinsertTargetNode(Node):
         self.target_eef_publisher = self.create_publisher(
             PoseStamped, str(self.get_parameter("target_eef_pose_topic").value), 10
         )
+        self.target_tcp_publisher = self.create_publisher(
+            PoseStamped, str(self.get_parameter("target_tcp_pose_topic").value), 10
+        )
         self.target_policy_tool_publisher = self.create_publisher(
             PoseStamped,
             str(self.get_parameter("target_policy_tool_pose_topic").value),
@@ -149,6 +181,9 @@ class CalibratedPreinsertTargetNode(Node):
         )
         self.current_eef_publisher = self.create_publisher(
             PoseStamped, str(self.get_parameter("current_eef_pose_topic").value), 10
+        )
+        self.current_tcp_publisher = self.create_publisher(
+            PoseStamped, str(self.get_parameter("current_tcp_pose_topic").value), 10
         )
         self.target_raw_publisher = self.create_publisher(
             Float32MultiArray,
@@ -180,12 +215,20 @@ class CalibratedPreinsertTargetNode(Node):
             "interface is created."
         )
         self.get_logger().info(f"Static target report: {self.report_path}")
+        self.get_logger().info(
+            f"Target orientation mode={self.target_orientation_mode}; "
+            "preserve_current_tcp latches the first fresh live TCP orientation."
+        )
         if not self.policy_tool_verified:
             self.get_logger().warning(
                 "PPO observation is fail-closed because the policy-tool "
                 f"transform is not verified: {self.policy_tool_status}"
             )
-        if self.target.unexpected_clipped_labels:
+        if self.target is None:
+            self.get_logger().warning(
+                "Target remains invalid until fresh link_eef and link_tcp TF are available."
+            )
+        elif self.target.unexpected_clipped_labels:
             self.get_logger().warning(
                 "Target has unexpected clipped observations: "
                 + ", ".join(self.target.unexpected_clipped_labels)
@@ -199,6 +242,9 @@ class CalibratedPreinsertTargetNode(Node):
     def _declare_parameters(self):
         self.declare_parameter("base_frame", "link_base")
         self.declare_parameter("ee_frame", "link_eef")
+        self.declare_parameter("tcp_frame", "link_tcp")
+        self.declare_parameter("target_orientation_mode", "preserve_current_tcp")
+        self.declare_parameter("maximum_preserved_book_orientation_error_deg", 15.0)
         self.declare_parameter("static_slot_translation_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter(
             "static_slot_quaternion_xyzw", [0.0, 0.0, 0.0, 1.0]
@@ -247,6 +293,9 @@ class CalibratedPreinsertTargetNode(Node):
             "target_eef_pose_topic", "/bookshelf_shadow/target_eef_pose"
         )
         self.declare_parameter(
+            "target_tcp_pose_topic", "/bookshelf_shadow/target_tcp_pose"
+        )
+        self.declare_parameter(
             "target_policy_tool_pose_topic",
             "/bookshelf_shadow/target_policy_tool_pose",
         )
@@ -255,6 +304,9 @@ class CalibratedPreinsertTargetNode(Node):
         )
         self.declare_parameter(
             "current_eef_pose_topic", "/bookshelf_shadow/current_eef_pose"
+        )
+        self.declare_parameter(
+            "current_tcp_pose_topic", "/bookshelf_shadow/current_tcp_pose"
         )
         self.declare_parameter(
             "target_raw_metrics_topic", "/bookshelf_shadow/target_raw_metrics"
@@ -302,29 +354,115 @@ class CalibratedPreinsertTargetNode(Node):
             raise ValueError(f"Parameter {name} must contain {size} finite values.")
         return value
 
-    def _lookup_current_eef(self):
+    def _refresh_target_validity(self):
+        self.geometric_target_valid = bool(
+            self.target is not None and not self.target.unexpected_clipped_labels
+        )
+        if self.preserved_orientation_diagnostics is not None:
+            maximum = float(
+                self.get_parameter(
+                    "maximum_preserved_book_orientation_error_deg"
+                ).value
+            )
+            self.geometric_target_valid = bool(
+                self.geometric_target_valid
+                and self.preserved_orientation_diagnostics[
+                    "book_orientation_error_deg"
+                ]
+                <= maximum
+            )
+        self.target_valid = bool(
+            self.geometric_target_valid and self.policy_tool_verified
+        )
+
+    def _lookup_current_frame(self, frame: str):
         timeout = max(float(self.get_parameter("tf_lookup_timeout_s").value), 0.0)
         try:
             message = self.tf_buffer.lookup_transform(
                 self.base_frame,
-                self.ee_frame,
+                frame,
                 Time(),
                 timeout=Duration(seconds=timeout),
             )
         except Exception as error:
-            return None, f"TF {self.base_frame} <- {self.ee_frame} unavailable: {error}"
+            return None, f"TF {self.base_frame} <- {frame} unavailable: {error}"
 
         maximum_age = float(self.get_parameter("tf_max_age_s").value)
         stamp_ns = _stamp_nanoseconds(message.header.stamp)
         if maximum_age > 0.0 and stamp_ns != 0:
             age = abs(int(self.get_clock().now().nanoseconds) - stamp_ns) * 1.0e-9
             if age > maximum_age:
-                return None, f"TF {self.base_frame} <- {self.ee_frame} is stale"
+                return None, f"TF {self.base_frame} <- {frame} is stale"
         return _transform_message_to_matrix(message), None
+
+    def _latch_preserved_orientation_target(
+        self, transform_base_eef, transform_base_tcp
+    ):
+        if self.target is not None:
+            return
+        self.target, self.preserved_orientation_diagnostics = (
+            compute_preserved_tcp_orientation_preinsert_target(
+                self.transform_base_slot,
+                self.transform_eef_book,
+                transform_base_eef,
+                transform_base_tcp,
+                transform_eef_policy_tool=self.transform_eef_policy_tool,
+                spec=self.spec,
+            )
+        )
+        self._refresh_target_validity()
+        self.get_logger().warning(
+            "Latched current link_tcp orientation for the read-only "
+            "pre-insertion target. Restart this node to capture a new orientation."
+        )
+        error = self.preserved_orientation_diagnostics["book_orientation_error_deg"]
+        maximum = float(
+            self.get_parameter("maximum_preserved_book_orientation_error_deg").value
+        )
+        if error > maximum:
+            self.get_logger().warning(
+                f"Preserved TCP orientation makes the book differ from the slot "
+                f"by {error:.3f} deg; limit is {maximum:.3f} deg. Target is invalid."
+            )
 
     def _timer_callback(self):
         stamp = self.get_clock().now().to_msg()
+        transform_base_eef, eef_error = self._lookup_current_frame(self.ee_frame)
+        transform_base_tcp, tcp_error = self._lookup_current_frame(self.tcp_frame)
+        errors = [value for value in (eef_error, tcp_error) if value]
+        if errors:
+            self.current_lookup_error = "; ".join(errors)
+            self.valid_publisher.publish(Bool(data=False))
+            self._publish_debug()
+            self._log_status_once(
+                f"invalid:{self.current_lookup_error}",
+                self.current_lookup_error,
+                warning=True,
+            )
+            return
+
+        self.current_lookup_error = None
+        self.current_tcp_transform = transform_base_tcp
+        if self.target_orientation_mode == "preserve_current_tcp":
+            self._latch_preserved_orientation_target(
+                transform_base_eef, transform_base_tcp
+            )
+
         self.valid_publisher.publish(Bool(data=self.target_valid))
+        self.current_eef_publisher.publish(
+            _matrix_to_pose_stamped(transform_base_eef, self.base_frame, stamp)
+        )
+        self.current_tcp_publisher.publish(
+            _matrix_to_pose_stamped(transform_base_tcp, self.base_frame, stamp)
+        )
+        if self.target is None:
+            self._publish_debug()
+            return
+
+        transform_eef_tcp = invert_transform(transform_base_eef) @ transform_base_tcp
+        transform_base_tcp_target = (
+            self.target.transform_base_eef_target @ transform_eef_tcp
+        )
         self.target_book_publisher.publish(
             _matrix_to_pose_stamped(
                 self.target.transform_base_book_target, self.base_frame, stamp
@@ -333,6 +471,11 @@ class CalibratedPreinsertTargetNode(Node):
         self.target_eef_publisher.publish(
             _matrix_to_pose_stamped(
                 self.target.transform_base_eef_target, self.base_frame, stamp
+            )
+        )
+        self.target_tcp_publisher.publish(
+            _matrix_to_pose_stamped(
+                transform_base_tcp_target, self.base_frame, stamp
             )
         )
         self.target_policy_tool_publisher.publish(
@@ -349,14 +492,6 @@ class CalibratedPreinsertTargetNode(Node):
             Float32MultiArray(data=self.target.observation_12d.tolist())
         )
 
-        transform_base_eef, error = self._lookup_current_eef()
-        if error:
-            self.current_lookup_error = error
-            self._publish_debug()
-            self._log_status_once(f"invalid:{error}", error, warning=True)
-            return
-
-        self.current_lookup_error = None
         self.current_comparison = compare_current_eef_to_target(
             transform_base_eef,
             self.transform_base_slot,
@@ -364,9 +499,6 @@ class CalibratedPreinsertTargetNode(Node):
             self.target,
             transform_eef_policy_tool=self.transform_eef_policy_tool,
             spec=self.spec,
-        )
-        self.current_eef_publisher.publish(
-            _matrix_to_pose_stamped(transform_base_eef, self.base_frame, stamp)
         )
         self.current_book_publisher.publish(
             _matrix_to_pose_stamped(
@@ -387,18 +519,44 @@ class CalibratedPreinsertTargetNode(Node):
             "valid": self.target_valid,
             "geometric_target_valid": self.geometric_target_valid,
             "policy_observation_valid": self.target_valid,
+            "target_orientation_mode": self.target_orientation_mode,
+            "orientation_latched": self.target is not None,
             "policy_tool_transform_status": self.policy_tool_status,
             "shadow_only": True,
             "hardware_commanded": False,
             "ik_checked": False,
             "reachability_checked": False,
             "report_path": str(self.report_path),
-            "target_unexpected_clipped_labels": list(
-                self.target.unexpected_clipped_labels
+            "target_unexpected_clipped_labels": (
+                []
+                if self.target is None
+                else list(self.target.unexpected_clipped_labels)
             ),
             "current_comparison_available": self.current_comparison is not None,
             "current_lookup_error": self.current_lookup_error,
         }
+        if self.preserved_orientation_diagnostics is not None:
+            payload.update(
+                {
+                    "preserved_tcp_orientation_change_deg": round(
+                        self.preserved_orientation_diagnostics[
+                            "tcp_orientation_change_deg"
+                        ],
+                        7,
+                    ),
+                    "preserved_book_orientation_error_deg": round(
+                        self.preserved_orientation_diagnostics[
+                            "book_orientation_error_deg"
+                        ],
+                        5,
+                    ),
+                    "maximum_preserved_book_orientation_error_deg": float(
+                        self.get_parameter(
+                            "maximum_preserved_book_orientation_error_deg"
+                        ).value
+                    ),
+                }
+            )
         if self.current_comparison is not None:
             payload["target_minus_current_translation_norm_m"] = round(
                 self.current_comparison[
@@ -427,51 +585,14 @@ class CalibratedPreinsertTargetNode(Node):
         self.last_report_write_ns = now_ns
 
     def _write_report(self):
-        payload = {
-            "schema_version": 1,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "safety": {
-                "shadow_only": True,
-                "hardware_commanded": False,
-                "ik_checked": False,
-                "reachability_checked": False,
-                "collision_checked": False,
-                "execution_authorized": False,
-            },
-            "frames": {
-                "base": self.base_frame,
-                "eef": self.ee_frame,
-                "slot": "configured static slot frame",
-                "book": "policy book frame: +X depth, +Y thickness, +Z up",
-            },
-            "provenance": {
-                "static_slot_transform_status": self.slot_status,
-                "eef_book_transform_status": self.eef_book_status,
-                "policy_tool_transform_status": self.policy_tool_status,
-            },
-            "configuration": {
-                "book_size_xyz_m": [float(value) for value in self.spec.book_size],
-                "slot_depth_m": self.spec.slot_depth,
-                "static_slot_width_m": float(
-                    self.get_parameter("static_slot_width_m").value
-                ),
-                "static_slot_confidence": float(
-                    self.get_parameter("static_slot_confidence").value
-                ),
-                "preinsert_standoff_m": self.spec.standoff,
-                "preinsert_vertical_offset_m": self.spec.vertical_offset,
-                "target_gripper_open": self.spec.gripper_open,
-            },
-            "calibration": {
-                "transform_base_slot": transform_to_dict(
-                    self.transform_base_slot
-                ),
-                "transform_eef_book": transform_to_dict(self.transform_eef_book),
-                "transform_eef_policy_tool": transform_to_dict(
-                    self.transform_eef_policy_tool
-                ),
-            },
-            "target": {
+        target_payload = {
+            "available": False,
+            "reason": self.current_lookup_error,
+        }
+        if self.target is not None:
+            target_payload = {
+                "available": True,
+                "orientation_mode": self.target_orientation_mode,
                 "transform_slot_book": transform_to_dict(
                     self.target.transform_slot_book_target
                 ),
@@ -508,15 +629,95 @@ class CalibratedPreinsertTargetNode(Node):
                     "standoff, rear_to_mouth and front_to_back exceed the "
                     f"policy's {self.spec.observation_scales.rear_to_mouth * 1000.0:.1f} "
                     "mm depth observation scales and are expected to clip. "
-                    "Other clipped channels "
-                    "indicate a configuration or geometry problem."
+                    "Other clipped channels indicate a configuration or geometry problem."
+                ),
+            }
+        if self.preserved_orientation_diagnostics is not None:
+            diagnostics = self.preserved_orientation_diagnostics
+            target_payload["preserved_tcp_orientation"] = {
+                "transform_base_tcp_current": transform_to_dict(
+                    diagnostics["transform_base_tcp_current"]
+                ),
+                "transform_base_tcp_target": transform_to_dict(
+                    diagnostics["transform_base_tcp_target"]
+                ),
+                "transform_eef_tcp": transform_to_dict(
+                    diagnostics["transform_eef_tcp"]
+                ),
+                "transform_tcp_book": transform_to_dict(
+                    diagnostics["transform_tcp_book"]
+                ),
+                "tcp_orientation_change_deg": diagnostics[
+                    "tcp_orientation_change_deg"
+                ],
+                "book_orientation_error_deg": diagnostics[
+                    "book_orientation_error_deg"
+                ],
+                "book_center_error_m": diagnostics["book_center_error_m"],
+                "maximum_book_orientation_error_deg": float(
+                    self.get_parameter(
+                        "maximum_preserved_book_orientation_error_deg"
+                    ).value
+                ),
+            }
+        payload = {
+            "schema_version": 2,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "safety": {
+                "shadow_only": True,
+                "hardware_commanded": False,
+                "ik_checked": False,
+                "reachability_checked": False,
+                "collision_checked": False,
+                "execution_authorized": False,
+            },
+            "frames": {
+                "base": self.base_frame,
+                "eef": self.ee_frame,
+                "tcp": self.tcp_frame,
+                "slot": "configured static slot frame",
+                "book": "policy book frame: +X depth, +Y thickness, +Z up",
+            },
+            "provenance": {
+                "static_slot_transform_status": self.slot_status,
+                "eef_book_transform_status": self.eef_book_status,
+                "policy_tool_transform_status": self.policy_tool_status,
+            },
+            "configuration": {
+                "target_orientation_mode": self.target_orientation_mode,
+                "maximum_preserved_book_orientation_error_deg": float(
+                    self.get_parameter(
+                        "maximum_preserved_book_orientation_error_deg"
+                    ).value
+                ),
+                "book_size_xyz_m": [float(value) for value in self.spec.book_size],
+                "slot_depth_m": self.spec.slot_depth,
+                "static_slot_width_m": float(
+                    self.get_parameter("static_slot_width_m").value
+                ),
+                "static_slot_confidence": float(
+                    self.get_parameter("static_slot_confidence").value
+                ),
+                "preinsert_standoff_m": self.spec.standoff,
+                "preinsert_vertical_offset_m": self.spec.vertical_offset,
+                "target_gripper_open": self.spec.gripper_open,
+            },
+            "calibration": {
+                "transform_base_slot": transform_to_dict(
+                    self.transform_base_slot
+                ),
+                "transform_eef_book": transform_to_dict(self.transform_eef_book),
+                "transform_eef_policy_tool": transform_to_dict(
+                    self.transform_eef_policy_tool
                 ),
             },
-            "calibration_sensitivity": self.sensitivity,
+            "target": target_payload,
+            "book_aligned_reference_calibration_sensitivity": self.sensitivity,
             "current_comparison": self._serializable_current_comparison(),
             "limitations": [
                 "The static slot pose has no independent absolute ground truth.",
                 "The EEF-to-book transform is valid only for the measured rigid grasp.",
+                "Preserving TCP orientation does not independently prove book-slot alignment.",
                 "This report does not prove IK reachability, collision freedom, or safe execution.",
                 "No result in this report authorizes robot motion.",
             ],

@@ -30,9 +30,11 @@ from std_msgs.msg import Bool, Float32MultiArray, String
 import tf2_ros
 
 from .policy_tool_control_math import (
+    JointTrajectorySafetyLimits,
     PolicyToolTarget,
     TargetSafetyLimits,
     compute_policy_tool_target,
+    joint_trajectory_sanity,
     make_transform,
     matrix_to_quaternion_xyzw,
     provenance_error,
@@ -219,6 +221,32 @@ class PolicyToolPlannerBase(Node):
         self.declare_parameter("tf_max_age_s", 0.50)
         self.declare_parameter("tf_lookup_timeout_s", 0.10)
         self.declare_parameter("command_scale", 0.10)
+
+        self.declare_parameter("require_trajectory_sanity", True)
+        self.declare_parameter(
+            "expected_arm_joint_names",
+            [
+                "joint1",
+                "joint2",
+                "joint3",
+                "joint4",
+                "joint5",
+                "joint6",
+                "joint7",
+            ],
+        )
+        self.declare_parameter("minimum_trajectory_point_count", 2)
+        self.declare_parameter("require_trajectory_velocities", True)
+        self.declare_parameter("maximum_trajectory_start_error_rad", 0.02)
+        self.declare_parameter(
+            "maximum_trajectory_waypoint_joint_jump_rad", 0.05
+        )
+        self.declare_parameter(
+            "maximum_trajectory_endpoint_joint_delta_rad", 0.10
+        )
+        self.declare_parameter("maximum_trajectory_joint_path_length_rad", 0.30)
+        self.declare_parameter("minimum_trajectory_duration_s", 0.10)
+        self.declare_parameter("maximum_trajectory_duration_s", 15.0)
 
         self.declare_parameter("tcp_policy_tool_translation_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter(
@@ -435,6 +463,67 @@ class PolicyToolPlannerBase(Node):
             ),
         )
 
+    def _trajectory_safety_limits(self) -> JointTrajectorySafetyLimits:
+        return JointTrajectorySafetyLimits(
+            expected_joint_names=tuple(
+                str(value)
+                for value in self.get_parameter("expected_arm_joint_names").value
+            ),
+            minimum_point_count=int(
+                self.get_parameter("minimum_trajectory_point_count").value
+            ),
+            require_velocities=bool(
+                self.get_parameter("require_trajectory_velocities").value
+            ),
+            maximum_start_error_rad=float(
+                self.get_parameter("maximum_trajectory_start_error_rad").value
+            ),
+            maximum_waypoint_joint_jump_rad=float(
+                self.get_parameter(
+                    "maximum_trajectory_waypoint_joint_jump_rad"
+                ).value
+            ),
+            maximum_endpoint_joint_delta_rad=float(
+                self.get_parameter(
+                    "maximum_trajectory_endpoint_joint_delta_rad"
+                ).value
+            ),
+            maximum_joint_path_length_rad=float(
+                self.get_parameter(
+                    "maximum_trajectory_joint_path_length_rad"
+                ).value
+            ),
+            minimum_duration_s=float(
+                self.get_parameter("minimum_trajectory_duration_s").value
+            ),
+            maximum_duration_s=float(
+                self.get_parameter("maximum_trajectory_duration_s").value
+            ),
+        )
+
+    def _trajectory_sanity(self, response) -> tuple[dict, str | None]:
+        if not bool(self.get_parameter("require_trajectory_sanity").value):
+            return {
+                "passed": False,
+                "skipped": True,
+                "reasons": ["trajectory sanity validation is disabled"],
+            }, "trajectory sanity validation is disabled"
+        trajectory = response.trajectory.joint_trajectory
+        start = response.trajectory_start.joint_state
+        return joint_trajectory_sanity(
+            trajectory.joint_names,
+            [point.positions for point in trajectory.points],
+            [point.velocities for point in trajectory.points],
+            [
+                float(point.time_from_start.sec)
+                + float(point.time_from_start.nanosec) * 1.0e-9
+                for point in trajectory.points
+            ],
+            start.name,
+            start.position,
+            limits=self._trajectory_safety_limits(),
+        )
+
     def _timer_callback(self):
         if self.plan_pending:
             return
@@ -581,6 +670,13 @@ class PolicyToolPlannerBase(Node):
         if not success or point_count == 0:
             self.latest_plan = None
             self._publish_invalid("MoveIt did not return a valid path", report=report)
+            return
+
+        trajectory_report, trajectory_error = self._trajectory_sanity(response)
+        report["trajectory_sanity"] = trajectory_report
+        if trajectory_error:
+            self.latest_plan = None
+            self._publish_invalid(trajectory_error, report=report)
             return
 
         report.update(

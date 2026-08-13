@@ -308,21 +308,32 @@ source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
 
 ros2 launch bookshelf_shadow_ros calibrated_preinsert_target.launch.py \
   target_config:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/trial_static_slot.yaml \
+  target_orientation_mode:=preserve_current_tcp \
+  maximum_preserved_book_orientation_error_deg:=15.0 \
   output_dir:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/preinsert_target
 ```
+
+The node latches the first fresh live `link_tcp` orientation after startup.
+Leave the robot stationary while launching it. Restart the node if a different
+orientation must be captured.
 
 Inspect the calculated target:
 
 ```bash
 ros2 topic echo /bookshelf_shadow/calibrated_target_valid --once
 ros2 topic echo /bookshelf_shadow/target_eef_pose --once
+ros2 topic echo /bookshelf_shadow/current_tcp_pose --once
+ros2 topic echo /bookshelf_shadow/target_tcp_pose --once
 ros2 topic echo /bookshelf_shadow/calibrated_target_debug --field data --once
 ```
 
 The target is now calculated from this trial's frozen slot rather than the old
-August 4 pose. It places the book 30 mm outside the shelf mouth with a 6 mm
-vertical offset. It is geometric output, not permission to move. Inspect the
-reported pose in RViz and against the physical setup before planning.
+August 4 pose. It preserves the captured TCP orientation while placing the book
+centre 30 mm outside the shelf mouth with a 6 mm vertical offset. Require
+`preserved_tcp_orientation_change_deg` to be zero and
+`preserved_book_orientation_error_deg` to remain below the configured limit.
+This is geometric output, not permission to move. Inspect both TCP poses and
+the held-book marker in RViz before planning.
 
 ## 8. Request collision-aware IK without executing
 

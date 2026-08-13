@@ -5,6 +5,7 @@ import math
 import numpy as np
 
 from bookshelf_guarded_control_ros.policy_tool_control_math import (
+    JointTrajectorySafetyLimits,
     OneShotExecutionGuard,
     TargetSafetyLimits,
     compute_policy_tool_target,
@@ -12,6 +13,7 @@ from bookshelf_guarded_control_ros.policy_tool_control_math import (
     execution_authorization_error,
     make_transform,
     maximum_named_joint_difference,
+    joint_trajectory_sanity,
     provenance_error,
     target_safety_error,
 )
@@ -316,3 +318,97 @@ def test_named_joint_drift_uses_names_not_message_order():
         [0.11, 0.19],
     )
     assert math.isclose(difference, 0.01, abs_tol=1.0e-12)
+
+
+def _trajectory_inputs():
+    names = [f"joint{index}" for index in range(1, 8)]
+    positions = [
+        [0.0] * 7,
+        [0.005] * 7,
+        [0.010] * 7,
+    ]
+    velocities = [[0.0] * 7, [0.02] * 7, [0.0] * 7]
+    times = [0.0, 0.5, 1.0]
+    return names, positions, velocities, times, names, [0.0] * 7
+
+
+def test_joint_trajectory_sanity_accepts_small_reordered_arm_path():
+    values = list(_trajectory_inputs())
+    order = [6, 0, 1, 2, 3, 4, 5]
+    values[0] = [values[0][index] for index in order]
+    values[1] = [[point[index] for index in order] for point in values[1]]
+    values[2] = [[point[index] for index in order] for point in values[2]]
+
+    report, error = joint_trajectory_sanity(*values)
+
+    assert error is None
+    assert report["passed"] is True
+    assert math.isclose(report["maximum_endpoint_joint_delta_rad"], 0.01)
+    assert report["maximum_absolute_velocity_rad_s"] == 0.02
+
+
+def test_joint_trajectory_sanity_rejects_wrong_joints_and_missing_velocity():
+    values = list(_trajectory_inputs())
+    values[0][-1] = "gripper_joint"
+    report, error = joint_trajectory_sanity(*values)
+    assert report["passed"] is False
+    assert "exactly the expected arm joints" in error
+
+    values = list(_trajectory_inputs())
+    values[2][1] = []
+    report, error = joint_trajectory_sanity(*values)
+    assert report["passed"] is False
+    assert "velocity point 1" in error
+
+
+def test_joint_trajectory_sanity_rejects_nonfinite_and_nonmonotonic_data():
+    values = list(_trajectory_inputs())
+    values[1][1][3] = float("nan")
+    report, error = joint_trajectory_sanity(*values)
+    assert report["passed"] is False
+    assert "positions contain non-finite" in error
+
+    values = list(_trajectory_inputs())
+    values[3] = [0.0, 0.5, 0.5]
+    report, error = joint_trajectory_sanity(*values)
+    assert report["passed"] is False
+    assert "strictly increasing" in error
+
+
+def test_joint_trajectory_sanity_rejects_start_jump_endpoint_and_path_detour():
+    values = list(_trajectory_inputs())
+    values[1][0][0] = 0.03
+    report, error = joint_trajectory_sanity(*values)
+    assert "first waypoint" in error
+
+    values = list(_trajectory_inputs())
+    values[1][-1][0] = 0.11
+    report, error = joint_trajectory_sanity(*values)
+    assert "endpoint is too far" in error
+
+    values = list(_trajectory_inputs())
+    values[1] = [
+        [0.0] * 7,
+        [0.04] * 7,
+        [0.0] * 7,
+    ]
+    tight = JointTrajectorySafetyLimits(
+        maximum_waypoint_joint_jump_rad=0.05,
+        maximum_endpoint_joint_delta_rad=0.10,
+        maximum_joint_path_length_rad=0.20,
+    )
+    report, error = joint_trajectory_sanity(*values, limits=tight)
+    assert report["maximum_waypoint_joint_jump_rad"] == 0.04
+    assert "path is too long" in error
+
+
+def test_joint_trajectory_sanity_rejects_duration_outside_limits():
+    values = list(_trajectory_inputs())
+    values[3] = [0.0, 0.02, 0.05]
+    report, error = joint_trajectory_sanity(*values)
+    assert "duration is too short" in error
+
+    values = list(_trajectory_inputs())
+    values[3] = [0.0, 8.0, 16.0]
+    report, error = joint_trajectory_sanity(*values)
+    assert "duration is too long" in error

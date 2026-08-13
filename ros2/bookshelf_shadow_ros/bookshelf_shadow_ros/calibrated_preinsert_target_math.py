@@ -123,6 +123,120 @@ def compute_calibrated_preinsert_target(
     )
 
 
+def compute_preserved_tcp_orientation_preinsert_target(
+    transform_base_slot,
+    transform_eef_book,
+    transform_base_eef_current,
+    transform_base_tcp_current,
+    *,
+    transform_eef_policy_tool=None,
+    spec=PreinsertTargetSpec(),
+) -> tuple[CalibratedPreinsertTarget, dict]:
+    """Place the book centre at pre-insertion while preserving TCP rotation.
+
+    The current ``link_eef -> link_tcp`` and calibrated ``link_eef -> book``
+    transforms determine the book offset from TCP. The target TCP keeps its
+    current base-frame rotation exactly; only its translation changes.
+    """
+
+    transform_base_slot = _validated_transform(transform_base_slot)
+    transform_eef_book = _validated_transform(transform_eef_book)
+    transform_base_eef_current = _validated_transform(transform_base_eef_current)
+    transform_base_tcp_current = _validated_transform(transform_base_tcp_current)
+    transform_eef_policy_tool = (
+        np.eye(4, dtype=np.float64)
+        if transform_eef_policy_tool is None
+        else _validated_transform(transform_eef_policy_tool)
+    )
+    _validate_spec(spec)
+
+    transform_eef_tcp = (
+        invert_transform(transform_base_eef_current) @ transform_base_tcp_current
+    )
+    transform_tcp_book = invert_transform(transform_eef_tcp) @ transform_eef_book
+
+    book_depth = float(spec.book_size[0])
+    transform_slot_book_reference = make_transform(
+        [-(0.5 * book_depth + spec.standoff), 0.0, spec.vertical_offset]
+    )
+    transform_base_book_reference = (
+        transform_base_slot @ transform_slot_book_reference
+    )
+
+    transform_base_tcp_target = np.eye(4, dtype=np.float64)
+    transform_base_tcp_target[:3, :3] = transform_base_tcp_current[:3, :3]
+    transform_base_tcp_target[:3, 3] = (
+        transform_base_book_reference[:3, 3]
+        - transform_base_tcp_target[:3, :3] @ transform_tcp_book[:3, 3]
+    )
+    transform_base_eef_target = (
+        transform_base_tcp_target @ invert_transform(transform_eef_tcp)
+    )
+    transform_base_book_target = transform_base_eef_target @ transform_eef_book
+    transform_slot_base = invert_transform(transform_base_slot)
+    transform_slot_book_target = transform_slot_base @ transform_base_book_target
+    transform_base_policy_tool_target = (
+        transform_base_eef_target @ transform_eef_policy_tool
+    )
+    transform_slot_eef_target = transform_slot_base @ transform_base_eef_target
+    transform_slot_policy_tool_target = (
+        transform_slot_base @ transform_base_policy_tool_target
+    )
+
+    raw_metrics, observation_12d = compute_policy_observation(
+        transform_slot_book_target,
+        transform_slot_policy_tool_target,
+        book_size=spec.book_size,
+        slot_depth=spec.slot_depth,
+        mode_observation=0.0,
+        gripper_open=spec.gripper_open,
+        scales=spec.observation_scales,
+    )
+    clipped = _clipped_labels(observation_12d)
+    expected = tuple(
+        label for label in clipped if label in EXPECTED_PREINSERT_CLIPPED_LABELS
+    )
+    unexpected = tuple(
+        label for label in clipped if label not in EXPECTED_PREINSERT_CLIPPED_LABELS
+    )
+    target = CalibratedPreinsertTarget(
+        transform_slot_book_target=transform_slot_book_target,
+        transform_base_book_target=transform_base_book_target,
+        transform_base_eef_target=transform_base_eef_target,
+        transform_base_policy_tool_target=transform_base_policy_tool_target,
+        transform_slot_eef_target=transform_slot_eef_target,
+        transform_slot_policy_tool_target=transform_slot_policy_tool_target,
+        raw_metrics=raw_metrics,
+        observation_12d=observation_12d,
+        clipped_labels=clipped,
+        expected_clipped_labels=expected,
+        unexpected_clipped_labels=unexpected,
+    )
+    orientation_error = (
+        transform_slot_book_reference[:3, :3].T
+        @ transform_slot_book_target[:3, :3]
+    )
+    diagnostics = {
+        "transform_eef_tcp": transform_eef_tcp,
+        "transform_tcp_book": transform_tcp_book,
+        "transform_base_tcp_current": transform_base_tcp_current,
+        "transform_base_tcp_target": transform_base_tcp_target,
+        "transform_slot_book_reference": transform_slot_book_reference,
+        "tcp_orientation_change_deg": rotation_angle_deg(
+            transform_base_tcp_current[:3, :3].T
+            @ transform_base_tcp_target[:3, :3]
+        ),
+        "book_orientation_error_deg": rotation_angle_deg(orientation_error),
+        "book_center_error_m": float(
+            np.linalg.norm(
+                transform_base_book_target[:3, 3]
+                - transform_base_book_reference[:3, 3]
+            )
+        ),
+    }
+    return target, diagnostics
+
+
 def compare_current_eef_to_target(
     transform_base_eef_current,
     transform_base_slot,

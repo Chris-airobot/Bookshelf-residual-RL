@@ -4,6 +4,12 @@ calibrated_preinsert_target:
   ros__parameters:
     base_frame: link_base
     ee_frame: link_eef
+    tcp_frame: link_tcp
+
+    # Default physical workflow: keep the first fresh live link_tcp
+    # orientation after this node starts. Use book_aligned only for comparison.
+    target_orientation_mode: preserve_current_tcp
+    maximum_preserved_book_orientation_error_deg: 15.0
 
     # Static RGB-D slot estimate from the unobstructed 2026-08-04 recording.
     static_slot_translation_xyz:
@@ -66,9 +72,11 @@ calibrated_preinsert_target:
     valid_topic: /bookshelf_shadow/calibrated_target_valid
     target_book_pose_topic: /bookshelf_shadow/target_book_pose
     target_eef_pose_topic: /bookshelf_shadow/target_eef_pose
+    target_tcp_pose_topic: /bookshelf_shadow/target_tcp_pose
     target_policy_tool_pose_topic: /bookshelf_shadow/target_policy_tool_pose
     current_book_pose_topic: /bookshelf_shadow/current_book_pose
     current_eef_pose_topic: /bookshelf_shadow/current_eef_pose
+    current_tcp_pose_topic: /bookshelf_shadow/current_tcp_pose
     target_raw_metrics_topic: /bookshelf_shadow/target_raw_metrics
     target_observation_topic: /bookshelf_shadow/target_observation_12d
     debug_topic: /bookshelf_shadow/calibrated_target_debug

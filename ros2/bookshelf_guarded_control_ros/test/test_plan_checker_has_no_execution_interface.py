@@ -42,6 +42,21 @@ def test_plan_checker_reports_frame_chain_on_workspace_rejection():
         assert token in source
 
 
+def test_moveit_plan_is_sanity_checked_before_becoming_executable():
+    source = (
+        Path(__file__).parents[1]
+        / "bookshelf_guarded_control_ros"
+        / "policy_tool_planner_base.py"
+    ).read_text(encoding="utf-8")
+    validation = source.index(
+        "trajectory_report, trajectory_error = self._trajectory_sanity(response)"
+    )
+    snapshot = source.index("self.latest_plan = PlanSnapshot(")
+    assert validation < snapshot
+    assert 'report["trajectory_sanity"] = trajectory_report' in source
+    assert "if trajectory_error:" in source
+
+
 def test_committed_executor_configuration_is_non_executable():
     config = (
         Path(__file__).parents[1]
@@ -54,6 +69,7 @@ def test_committed_executor_configuration_is_non_executable():
         "dry_run: true",
         "allow_execution: false",
         "approval_token: DISABLED",
+        "require_trajectory_sanity: true",
     )
     for gate in required_closed_gates:
         assert gate in config

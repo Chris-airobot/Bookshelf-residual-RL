@@ -37,6 +37,22 @@ def generate_launch_description():
             default_value="0.50",
             description="Set to 0 for unrestricted offline bag TF age.",
         ),
+        DeclareLaunchArgument(
+            "target_orientation_mode",
+            default_value="preserve_current_tcp",
+            description=(
+                "preserve_current_tcp latches the live TCP orientation; "
+                "book_aligned retains the original geometric reference."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "maximum_preserved_book_orientation_error_deg",
+            default_value="15.0",
+            description=(
+                "Fail the preserved-orientation target when the resulting "
+                "book orientation differs from the slot by more than this."
+            ),
+        ),
     ]
     node = Node(
         package="bookshelf_shadow_ros",
@@ -52,6 +68,15 @@ def generate_launch_description():
                 ),
                 "tf_max_age_s": ParameterValue(
                     LaunchConfiguration("tf_max_age_s"), value_type=float
+                ),
+                "target_orientation_mode": LaunchConfiguration(
+                    "target_orientation_mode"
+                ),
+                "maximum_preserved_book_orientation_error_deg": ParameterValue(
+                    LaunchConfiguration(
+                        "maximum_preserved_book_orientation_error_deg"
+                    ),
+                    value_type=float,
                 ),
             },
         ],

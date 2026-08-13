@@ -6,6 +6,7 @@ from bookshelf_shadow_ros.calibrated_preinsert_target_math import (
     calibration_sensitivity,
     compare_current_eef_to_target,
     compute_calibrated_preinsert_target,
+    compute_preserved_tcp_orientation_preinsert_target,
 )
 from bookshelf_shadow_ros.policy_observation_math import make_transform
 
@@ -48,6 +49,65 @@ def test_target_eef_reconstructs_target_book_with_nontrivial_calibration():
         target.transform_base_eef_target @ transform_eef_book,
         target.transform_base_book_target,
         atol=1.0e-10,
+    )
+
+
+def test_preserved_tcp_orientation_keeps_rotation_and_places_book_center():
+    transform_base_eef_current = make_transform(
+        [0.5, 0.1, 0.2], [0.0, 0.0, 0.2588190451, 0.9659258263]
+    )
+    transform_base_tcp_current = (
+        transform_base_eef_current @ make_transform([0.0, 0.0, 0.172])
+    )
+    transform_eef_book = make_transform(
+        [0.008, -0.010, 0.124], [0.4757, 0.4680, 0.5317, 0.5215]
+    )
+
+    target, diagnostics = compute_preserved_tcp_orientation_preinsert_target(
+        np.eye(4),
+        transform_eef_book,
+        transform_base_eef_current,
+        transform_base_tcp_current,
+        spec=PreinsertTargetSpec(standoff=0.030, vertical_offset=0.006),
+    )
+
+    np.testing.assert_allclose(
+        diagnostics["transform_base_tcp_target"][:3, :3],
+        transform_base_tcp_current[:3, :3],
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        target.transform_base_book_target[:3, 3],
+        [-0.108, 0.0, 0.006],
+        atol=1.0e-10,
+    )
+    np.testing.assert_allclose(
+        target.transform_base_eef_target @ transform_eef_book,
+        target.transform_base_book_target,
+        atol=1.0e-10,
+    )
+    assert diagnostics["tcp_orientation_change_deg"] == pytest.approx(0.0)
+    assert diagnostics["book_center_error_m"] == pytest.approx(0.0, abs=1.0e-12)
+
+
+def test_preserved_tcp_orientation_reports_book_slot_orientation_error():
+    quarter_turn = [0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)]
+    transform_base_eef_current = make_transform([0.0, 0.0, 0.0], quarter_turn)
+    transform_base_tcp_current = (
+        transform_base_eef_current @ make_transform([0.0, 0.0, 0.172])
+    )
+    target, diagnostics = compute_preserved_tcp_orientation_preinsert_target(
+        np.eye(4),
+        np.eye(4),
+        transform_base_eef_current,
+        transform_base_tcp_current,
+    )
+
+    assert diagnostics["book_orientation_error_deg"] == pytest.approx(90.0)
+    np.testing.assert_allclose(
+        target.transform_base_book_target[:3, 3],
+        [-0.108, 0.0, 0.006],
+        atol=1.0e-12,
     )
 
 

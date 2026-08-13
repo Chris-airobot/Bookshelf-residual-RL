@@ -56,6 +56,29 @@ class TargetSafetyLimits:
 
 
 @dataclass(frozen=True)
+class JointTrajectorySafetyLimits:
+    """Limits for a small local MoveIt trajectory before it can be executed."""
+
+    expected_joint_names: tuple[str, ...] = (
+        "joint1",
+        "joint2",
+        "joint3",
+        "joint4",
+        "joint5",
+        "joint6",
+        "joint7",
+    )
+    minimum_point_count: int = 2
+    require_velocities: bool = True
+    maximum_start_error_rad: float = 0.02
+    maximum_waypoint_joint_jump_rad: float = 0.05
+    maximum_endpoint_joint_delta_rad: float = 0.10
+    maximum_joint_path_length_rad: float = 0.30
+    minimum_duration_s: float = 0.10
+    maximum_duration_s: float = 15.0
+
+
+@dataclass(frozen=True)
 class PolicyToolTarget:
     scaled_delta: np.ndarray
     transform_base_policy_tool_current: np.ndarray
@@ -376,6 +399,203 @@ def maximum_named_joint_difference(
     if not common:
         raise ValueError("Current and planned joint states have no common names.")
     return max(abs(float(current[name]) - float(planned[name])) for name in common)
+
+
+def joint_trajectory_sanity(
+    joint_names,
+    point_positions,
+    point_velocities,
+    point_times_s,
+    start_joint_names,
+    start_joint_positions,
+    limits: JointTrajectorySafetyLimits = JointTrajectorySafetyLimits(),
+) -> tuple[dict, str | None]:
+    """Validate one local joint trajectory and return reportable statistics.
+
+    The trajectory may list the expected joints in any order. The start state
+    may contain additional joints, but every expected arm joint must exist.
+    Empty velocity arrays are accepted only when ``require_velocities`` is
+    false; any supplied derivative is always checked for finiteness.
+    """
+
+    expected = tuple(str(value) for value in limits.expected_joint_names)
+    names = tuple(str(value) for value in joint_names)
+    start_names = tuple(str(value) for value in start_joint_names)
+    reasons = []
+    report = {
+        "passed": False,
+        "expected_joint_names": list(expected),
+        "trajectory_joint_names": list(names),
+        "point_count": len(point_positions),
+        "require_velocities": bool(limits.require_velocities),
+        "maximum_start_error_rad": None,
+        "maximum_waypoint_joint_jump_rad": None,
+        "maximum_endpoint_joint_delta_rad": None,
+        "joint_path_length_rad": None,
+        "maximum_absolute_velocity_rad_s": None,
+        "duration_s": None,
+        "reasons": reasons,
+    }
+
+    if not expected or len(set(expected)) != len(expected):
+        reasons.append("expected arm joint names are empty or duplicated")
+    if len(set(names)) != len(names):
+        reasons.append("trajectory joint names contain duplicates")
+    if len(names) != len(expected) or set(names) != set(expected):
+        reasons.append("trajectory does not contain exactly the expected arm joints")
+    if len(set(start_names)) != len(start_names):
+        reasons.append("trajectory start joint names contain duplicates")
+    if len(start_joint_positions) != len(start_names):
+        reasons.append("trajectory start names and positions have different lengths")
+    if not set(expected).issubset(start_names):
+        reasons.append("trajectory start state is missing expected arm joints")
+
+    point_count = len(point_positions)
+    if point_count < int(limits.minimum_point_count):
+        reasons.append(
+            f"trajectory has {point_count} points; "
+            f"minimum is {int(limits.minimum_point_count)}"
+        )
+    if int(limits.minimum_point_count) < 2:
+        reasons.append("minimum trajectory point count must be at least two")
+    if len(point_velocities) != point_count or len(point_times_s) != point_count:
+        reasons.append("trajectory point arrays have inconsistent lengths")
+
+    if reasons:
+        return report, "trajectory sanity check failed: " + "; ".join(reasons)
+
+    try:
+        positions = np.asarray(point_positions, dtype=np.float64)
+        times = np.asarray(point_times_s, dtype=np.float64)
+        start_map = {
+            name: float(value)
+            for name, value in zip(start_names, start_joint_positions)
+        }
+    except (TypeError, ValueError) as error:
+        reasons.append(f"trajectory contains non-numeric values: {error}")
+        return report, "trajectory sanity check failed: " + "; ".join(reasons)
+
+    if positions.shape != (point_count, len(names)):
+        reasons.append(
+            "trajectory positions do not match the point and joint dimensions"
+        )
+    elif not np.all(np.isfinite(positions)):
+        reasons.append("trajectory positions contain non-finite values")
+    if times.shape != (point_count,) or not np.all(np.isfinite(times)):
+        reasons.append("trajectory timestamps are missing or non-finite")
+    elif np.any(times < 0.0) or np.any(np.diff(times) <= 0.0):
+        reasons.append("trajectory timestamps must be non-negative and strictly increasing")
+    if len(start_map) != len(start_names) or not all(
+        math.isfinite(start_map[name]) for name in expected
+    ):
+        reasons.append("trajectory start positions are missing or non-finite")
+
+    velocity_rows = []
+    for index, values in enumerate(point_velocities):
+        try:
+            row = np.asarray(values, dtype=np.float64)
+        except (TypeError, ValueError) as error:
+            reasons.append(f"trajectory velocity point {index} is non-numeric: {error}")
+            continue
+        if row.size == 0 and not limits.require_velocities:
+            continue
+        if row.shape != (len(names),):
+            reasons.append(
+                f"trajectory velocity point {index} does not contain every arm joint"
+            )
+        elif not np.all(np.isfinite(row)):
+            reasons.append(f"trajectory velocity point {index} is non-finite")
+        else:
+            velocity_rows.append(row)
+
+    numeric_limits = {
+        "maximum_start_error_rad": limits.maximum_start_error_rad,
+        "maximum_waypoint_joint_jump_rad": (
+            limits.maximum_waypoint_joint_jump_rad
+        ),
+        "maximum_endpoint_joint_delta_rad": (
+            limits.maximum_endpoint_joint_delta_rad
+        ),
+        "maximum_joint_path_length_rad": limits.maximum_joint_path_length_rad,
+        "minimum_duration_s": limits.minimum_duration_s,
+        "maximum_duration_s": limits.maximum_duration_s,
+    }
+    if any(
+        not math.isfinite(float(value)) or float(value) < 0.0
+        for value in numeric_limits.values()
+    ):
+        reasons.append("trajectory safety limits must be finite and non-negative")
+    if float(limits.minimum_duration_s) > float(limits.maximum_duration_s):
+        reasons.append("trajectory duration limits are inverted")
+
+    if reasons:
+        return report, "trajectory sanity check failed: " + "; ".join(reasons)
+
+    name_indices = [names.index(name) for name in expected]
+    ordered_positions = positions[:, name_indices]
+    start = np.asarray([start_map[name] for name in expected], dtype=np.float64)
+    start_error = float(np.max(np.abs(ordered_positions[0] - start)))
+    endpoint_delta = float(np.max(np.abs(ordered_positions[-1] - start)))
+    segments = np.diff(ordered_positions, axis=0)
+    waypoint_jump = float(np.max(np.abs(segments)))
+    path_length = float(np.sum(np.linalg.norm(segments, axis=1)))
+    duration = float(times[-1])
+    maximum_velocity = (
+        float(np.max(np.abs(np.asarray(velocity_rows, dtype=np.float64))))
+        if velocity_rows
+        else None
+    )
+    report.update(
+        {
+            "maximum_start_error_rad": start_error,
+            "maximum_waypoint_joint_jump_rad": waypoint_jump,
+            "maximum_endpoint_joint_delta_rad": endpoint_delta,
+            "joint_path_length_rad": path_length,
+            "maximum_absolute_velocity_rad_s": maximum_velocity,
+            "duration_s": duration,
+        }
+    )
+
+    comparisons = (
+        (
+            start_error,
+            float(limits.maximum_start_error_rad),
+            "trajectory first waypoint differs from its start state",
+        ),
+        (
+            waypoint_jump,
+            float(limits.maximum_waypoint_joint_jump_rad),
+            "trajectory contains an excessive adjacent waypoint joint jump",
+        ),
+        (
+            endpoint_delta,
+            float(limits.maximum_endpoint_joint_delta_rad),
+            "trajectory endpoint is too far from its start state",
+        ),
+        (
+            path_length,
+            float(limits.maximum_joint_path_length_rad),
+            "trajectory joint-space path is too long",
+        ),
+    )
+    for value, maximum, label in comparisons:
+        if value > maximum + 1.0e-12:
+            reasons.append(f"{label}: {value:.6f} > {maximum:.6f} rad")
+    if duration < float(limits.minimum_duration_s) - 1.0e-12:
+        reasons.append(
+            f"trajectory duration is too short: {duration:.6f} < "
+            f"{float(limits.minimum_duration_s):.6f} s"
+        )
+    if duration > float(limits.maximum_duration_s) + 1.0e-12:
+        reasons.append(
+            f"trajectory duration is too long: {duration:.6f} > "
+            f"{float(limits.maximum_duration_s):.6f} s"
+        )
+
+    report["passed"] = not reasons
+    if reasons:
+        return report, "trajectory sanity check failed: " + "; ".join(reasons)
+    return report, None
 
 
 def rotation_angle_rad(rotation) -> float:

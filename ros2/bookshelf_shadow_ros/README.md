@@ -205,16 +205,28 @@ book frame.
 
 ## Calibrated pre-insertion target report
 
-`calibrated_preinsert_target.launch.py` solves the rigid transform needed to
-place the measured book grasp at the nominal pre-insertion pose:
+`calibrated_preinsert_target.launch.py` defaults to
+`target_orientation_mode:=preserve_current_tcp`. On the first fresh live TF,
+it latches the current `link_tcp` orientation, changes only the target TCP
+translation, and uses the measured rigid grasp to keep the book centre at the
+nominal pre-insertion position. Restart the node to capture a new orientation.
+
+The node publishes both `/bookshelf_shadow/current_tcp_pose` and
+`/bookshelf_shadow/target_tcp_pose`. It also reports the resulting book-to-slot
+orientation error and fails the geometric target when it exceeds
+`maximum_preserved_book_orientation_error_deg` (15 degrees by default).
+
+The original fully aligned calculation remains available for comparison with
+`target_orientation_mode:=book_aligned`:
 
 ```text
 T_base_eef_target = T_base_slot * T_slot_book_target * inverse(T_eef_book)
 ```
 
-The target book is aligned with the slot, lifted by the trained controller's
-6 mm insertion offset, and placed with its front face 30 mm before the shelf
-mouth. The node publishes `PoseStamped` diagnostics for RViz and writes
+Both modes use the trained controller's 6 mm insertion offset and place the
+book's front face 30 mm before the shelf mouth. The preserved mode does not
+claim the book orientation is exact; that disagreement is explicitly reported.
+The node publishes `PoseStamped` diagnostics for RViz and writes
 `calibrated_preinsert_target_report.json`. It never creates IK, planning,
 trajectory, gripper, controller, or robot-command interfaces.
 
@@ -249,7 +261,7 @@ colcon \
   --packages-select bookshelf_shadow_ros
 ```
 
-Generate the target report without any camera, rosbag, or robot state:
+Generate the original book-aligned comparison report without robot state:
 
 ```bash
 cd /home/chris/RL/bookshelf
@@ -260,6 +272,7 @@ TARGET_DIR=$PWD/logs/calibrated_preinsert_target/$(date +%Y-%m-%d_%H-%M-%S)
 mkdir -p "$TARGET_DIR"
 
 ros2 launch bookshelf_shadow_ros calibrated_preinsert_target.launch.py \
+  target_orientation_mode:=book_aligned \
   output_dir:="$TARGET_DIR"
 ```
 

@@ -19,6 +19,20 @@ guarded_policy_tool_executor:
     tf_lookup_timeout_s: 0.10
     command_scale: 0.10
 
+    # Candidate limits for the first 10%-scaled physical step. Inspect the
+    # reported statistics; do not loosen a failed bound merely to execute.
+    require_trajectory_sanity: true
+    expected_arm_joint_names:
+      [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
+    minimum_trajectory_point_count: 2
+    require_trajectory_velocities: true
+    maximum_trajectory_start_error_rad: 0.02
+    maximum_trajectory_waypoint_joint_jump_rad: 0.05
+    maximum_trajectory_endpoint_joint_delta_rad: 0.10
+    maximum_trajectory_joint_path_length_rad: 0.30
+    minimum_trajectory_duration_s: 0.10
+    maximum_trajectory_duration_s: 15.0
+
     tcp_policy_tool_translation_xyz:
       - 0.009119326451322136
       - -0.04695895701970321

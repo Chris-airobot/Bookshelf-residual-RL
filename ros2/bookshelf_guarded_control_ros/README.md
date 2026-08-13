@@ -45,6 +45,14 @@ It has no gripper interface. A valid plan is short-lived, current joints must
 still match its start state, known prototype executor nodes must be absent, and
 one exact approval token authorizes at most one trajectory.
 
+Every local MoveIt result also passes a joint-trajectory sanity check before it
+can become `plan_valid`. The check requires exactly `joint1` through `joint7`,
+finite waypoint positions and velocities, strictly increasing timestamps, a
+first waypoint close to the planned start state, bounded adjacent waypoint and
+endpoint motion, bounded cumulative joint-space path length, and bounded
+duration. The measured statistics and rejection reasons are included under
+`trajectory_sanity` in `/bookshelf_guarded/plan_report`.
+
 ## Important planning-scene boundary
 
 MoveIt can only collision-check geometry present in its active planning scene.
