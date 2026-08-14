@@ -8,6 +8,11 @@ NODE = (
     / "calibrated_preinsert_plan_only_node.py"
 )
 LAUNCH = ROOT / "launch" / "calibrated_preinsert_plan_only.launch.py"
+CANDIDATE_LAUNCH = (
+    ROOT
+    / "launch"
+    / "calibrated_preinsert_spine_mount_candidate_plan_only.launch.py"
+)
 CONFIG = ROOT / "config" / "calibrated_preinsert_plan_only.yaml"
 SETUP = ROOT / "setup.py"
 
@@ -52,6 +57,37 @@ def test_launch_combines_target_calculation_and_plan_only_node():
     assert '"preserve_current_tcp"' in source
     assert 'executable="calibrated_preinsert_plan_only"' in source
     assert "guarded_policy_tool_executor" not in source
+
+
+def test_candidate_launch_layers_candidate_target_scene_and_plan_only_node():
+    source = CANDIDATE_LAUNCH.read_text(encoding="utf-8")
+    required = (
+        '"target_config"',
+        '"candidate_config"',
+        '"scene_config"',
+        '"bookshelf_scene_manager.launch.py"',
+        'executable="calibrated_preinsert_target"',
+        '"target_orientation_mode": "preserve_current_tcp"',
+        'executable="calibrated_preinsert_plan_only"',
+        "UNAPPROVED SPINE-MOUNT CANDIDATE PLAN-ONLY",
+        "Execution remains unauthorized",
+    )
+    for token in required:
+        assert token in source
+
+
+def test_candidate_plan_only_launch_has_no_execution_interface():
+    source = CANDIDATE_LAUNCH.read_text(encoding="utf-8")
+    forbidden = (
+        "ActionClient",
+        "ExecuteTrajectory",
+        "FollowJointTrajectory",
+        "send_goal",
+        "guarded_policy_tool_executor",
+        "guarded_policy_tool_single_step",
+    )
+    for token in forbidden:
+        assert token not in source
 
 
 def test_default_configuration_is_bounded_and_global():
