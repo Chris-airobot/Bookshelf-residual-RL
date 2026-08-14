@@ -9,6 +9,7 @@ from bookshelf_guarded_control_ros.planning_scene_math import (
     LOCAL_INSERTION,
     global_scene_status_error,
     local_handoff_error,
+    ros_uint8_constant,
     scene_status_error,
     shelf_box_from_slot,
     shelf_front_plane_error_m,
@@ -29,6 +30,19 @@ OVERLAY_CONFIG = (
 def _parameters(path, node_name):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
     return document[node_name]["ros__parameters"]
+
+
+def test_ros_uint8_constants_support_humble_bytes_and_integer_variants():
+    assert ros_uint8_constant(b"\x00") == 0
+    assert ros_uint8_constant(bytearray(b"\x01")) == 1
+    assert ros_uint8_constant(memoryview(b"\xff")) == 255
+    assert ros_uint8_constant(2) == 2
+
+
+@pytest.mark.parametrize("value", [b"", b"\x00\x01", -1, 256])
+def test_ros_uint8_constants_reject_invalid_values(value):
+    with pytest.raises(ValueError):
+        ros_uint8_constant(value)
 
 
 def test_shelf_box_front_face_starts_at_slot_mouth():

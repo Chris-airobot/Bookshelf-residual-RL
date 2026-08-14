@@ -23,6 +23,7 @@ from .planning_scene_math import (
     LOCAL_INSERTION,
     configured_box,
     local_handoff_error,
+    ros_uint8_constant,
     shelf_box_from_slot,
     shelf_front_plane_error_m,
 )
@@ -403,10 +404,10 @@ class BookshelfSceneManagerNode(Node):
         message = CollisionObject()
         message.id = object_id
         message.header.frame_id = box.frame_id
-        message.operation = int(operation)
+        message.operation = ros_uint8_constant(operation)
         if operation == CollisionObject.ADD:
             primitive = SolidPrimitive()
-            primitive.type = SolidPrimitive.BOX
+            primitive.type = ros_uint8_constant(SolidPrimitive.BOX)
             primitive.dimensions = [float(value) for value in box.size_xyz]
             message.primitives = [primitive]
             message.primitive_poses = [_transform_to_pose(box.transform_frame_box)]
