@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "kind": "bookshelf_recorded_preinsert_candidate_context",
+  "source": "Failed preserved-TCP plan-only target report from 2026-08-14",
+  "hardware_commanded": false,
+  "transform_base_slot": {
+    "translation_xyz_m": [
+      0.8916560198443868,
+      0.0931628273599439,
+      0.15450733501233452
+    ],
+    "quaternion_xyzw": [
+      0.00906172910018833,
+      -0.023600655105609606,
+      -0.007438163256347181,
+      0.9996527236353997
+    ]
+  },
+  "transform_base_eef_current": {
+    "matrix": [
+      [0.03656595208435842, 0.07059580773201521, 0.9968345715708443, 0.6533862498859929],
+      [-0.0014043054493950713, -0.9974970440072137, 0.0706942368448473, 0.07490861682727856],
+      [0.999330255258175, -0.003984862298111312, -0.03637529103795445, 0.0967000338846114],
+      [0.0, 0.0, 0.0, 1.0]
+    ]
+  },
+  "transform_eef_tcp": {
+    "translation_xyz_m": [0.0, 0.0, 0.172],
+    "quaternion_xyzw": [0.0, 0.0, 0.0, 1.0]
+  },
+  "maximum_preserved_book_orientation_error_deg": 15.0,
+  "maximum_candidate_target_translation_m": 0.15
+}

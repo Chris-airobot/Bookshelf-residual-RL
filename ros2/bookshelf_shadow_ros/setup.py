@@ -15,6 +15,7 @@ setup(
         ("share/bookshelf_shadow_ros", ["package.xml"]),
         (os.path.join("share", package_name, "launch"), glob("launch/*.py")),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
+        (os.path.join("share", package_name, "config"), glob("config/*.json")),
         (os.path.join("share", package_name, "rviz"), glob("rviz/*.rviz")),
         (os.path.join("share", package_name, "urdf"), glob("urdf/*.xacro")),
     ],
@@ -51,6 +52,8 @@ setup(
             "bookshelf_shadow_ros.experiment_logger_node:main",
             "physical_experiment_preflight = "
             "bookshelf_shadow_ros.physical_experiment_preflight:main",
+            "book_calibration_candidate_check = "
+            "bookshelf_shadow_ros.book_calibration_candidate_check:main",
             "offline_scene_visualizer = "
             "bookshelf_shadow_ros.offline_scene_visualizer_node:main",
         ],

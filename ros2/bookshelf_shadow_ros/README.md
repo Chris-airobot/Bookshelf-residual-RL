@@ -121,6 +121,67 @@ file so its measured `link_eef -> book` values override
 `approximate_smoke_only`. This calibration is grasp-specific: moving the book
 inside the gripper invalidates it.
 
+### Offline book-frame axis audit
+
+The optional frame audit compares the saved book convention with a candidate
+policy convention using only the recorded marker bag. It does not select the
+candidate or modify the active calibration. With `enable_frame_audit:=true`,
+the debug PNGs show the saved cuboid in cyan and the candidate in yellow, and
+the run also writes `book_frame_audit_report.json`.
+
+The diagnostic candidate keeps the measured book centre fixed and rotates only
+the semantic axes by +90 degrees about the saved book +Z axis. The 2026-08-14
+replay rejected that rotation: the saved spine-mount frame was 6.35 degrees
+from the simulator-axis hypothesis and the rotated frame was 91.19 degrees
+away. The diagnostic remains available to make that result reproducible; it is
+not an active calibration.
+
+```bash
+ros2 launch bookshelf_shadow_ros marker_book_bag_calibration.launch.py \
+  output_dir:="$OUTPUT_DIR" \
+  target_samples:=120 \
+  enable_rviz:=false \
+  enable_frame_audit:=true
+```
+
+The report always records `selection_authorized: false`,
+`active_configuration_modified: false`, and `hardware_commanded: false`.
+
+### Regenerated spine-mount calibration candidate
+
+The active target files still contain the older broad-cover marker convention.
+`spine_mount_book_calibration_candidate.yaml` is a separate override generated
+from 120/120 inliers in the same marker bag using the later measured
+narrow-spine mount. It also re-derives the virtual policy-tool transform so
+`T_book_policy_tool` remains exactly equal to the nominal simulator transform.
+It does not modify or select the active configuration.
+
+Run the deterministic recorded-pose regression without ROS:
+
+```bash
+python3 -m bookshelf_shadow_ros.book_calibration_candidate_check \
+  --base-config ros2/bookshelf_shadow_ros/config/calibrated_preinsert_target.yaml \
+  --candidate-config ros2/bookshelf_shadow_ros/config/spine_mount_book_calibration_candidate.yaml \
+  --recorded-context ros2/bookshelf_shadow_ros/config/recorded_preinsert_context_2026_08_14.json \
+  --output /tmp/bookshelf_spine_mount_candidate_check.json
+```
+
+The fixed regression reproduces the stale 84.73-degree rejection, then checks
+that the candidate is below the 15-degree limit, removes the unexpected
+`yaw_err` clip, retains simulator policy-tool parity, and requires a bounded
+target translation. To inspect live or replayed TF without planning, layer the
+candidate over a base or trial target file:
+
+```bash
+ros2 launch bookshelf_shadow_ros \
+  calibrated_preinsert_spine_mount_candidate.launch.py \
+  target_config:="$TRIAL_SLOT_CONFIG" \
+  output_dir:="$OUTPUT_DIR"
+```
+
+This launch contains no IK, planner, executor, trajectory, controller,
+gripper, or robot-command node.
+
 ## Calibrated static-slot shadow test
 
 `policy_calibrated_static_shadow.launch.py` combines two recorded quantities:

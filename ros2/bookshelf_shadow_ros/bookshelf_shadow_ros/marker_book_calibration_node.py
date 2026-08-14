@@ -12,7 +12,7 @@ import time
 
 import cv2
 from cv_bridge import CvBridge, CvBridgeError
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import Point, TransformStamped
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
@@ -34,6 +34,12 @@ from .marker_book_calibration import (
     MarkerBookCalibrationAccumulator,
     compose_eef_book_transform,
     make_book_marker_transform,
+)
+from .book_frame_audit import (
+    apply_book_axis_correction,
+    book_axis_correction_transform,
+    book_frame_audit_report,
+    expected_policy_book_rotation_in_eef,
 )
 from .policy_observation_math import (
     invert_transform,
@@ -127,6 +133,19 @@ class MarkerBookCalibrationNode(Node):
         self.book_size_xyz_m = np.asarray(
             self.mount["book_size_xyz_m"], dtype=np.float64
         )
+        self.frame_audit_enabled = bool(
+            self.get_parameter("enable_frame_audit").value
+        )
+        self.transform_old_book_policy_book = book_axis_correction_transform(
+            self.get_parameter("frame_audit_correction_quaternion_xyzw").value
+        )
+        self.expected_policy_book_rotation_eef = (
+            expected_policy_book_rotation_in_eef(
+                self.get_parameter(
+                    "frame_audit_expected_quaternion_eef_policy_book_xyzw"
+                ).value
+            )
+        )
         rotation_book_marker = self.mount.get("rotation_book_marker")
         if rotation_book_marker is None:
             self.transform_book_marker = make_book_marker_transform(
@@ -215,6 +234,11 @@ class MarkerBookCalibrationNode(Node):
         self.get_logger().info(
             "No action, IK, trajectory, gripper, or robot-command interface is created."
         )
+        if self.frame_audit_enabled:
+            self.get_logger().warning(
+                "Book-frame audit candidates are enabled for visualization only; "
+                "selection_authorized=false."
+            )
 
     def _declare_parameters(self):
         self.declare_parameter("image_topic", "/camera/color/image_raw")
@@ -229,6 +253,15 @@ class MarkerBookCalibrationNode(Node):
         self.declare_parameter("eef_frame", "link_eef")
         self.declare_parameter("camera_frame", "")
         self.declare_parameter("target_samples", 250)
+        self.declare_parameter("enable_frame_audit", False)
+        self.declare_parameter(
+            "frame_audit_correction_quaternion_xyzw",
+            [0.0, 0.0, math.sqrt(0.5), math.sqrt(0.5)],
+        )
+        self.declare_parameter(
+            "frame_audit_expected_quaternion_eef_policy_book_xyzw",
+            [math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0],
+        )
         self.declare_parameter("minimum_samples", 30)
         self.declare_parameter("minimum_inlier_fraction", 0.70)
         self.declare_parameter("maximum_reprojection_error_px", 3.0)
@@ -244,6 +277,9 @@ class MarkerBookCalibrationNode(Node):
         )
         self.declare_parameter("detected_marker_frame", "calibration_aruco0_marker")
         self.declare_parameter("detected_book_frame", "calibration_detected_book")
+        self.declare_parameter(
+            "frame_audit_candidate_frame", "calibration_policy_book_candidate"
+        )
         # Long enough to bridge ordinary message jitter while still removing a
         # stale visualization promptly after real detection loss.
         self.declare_parameter("visualization_lifetime_s", 1.0)
@@ -352,6 +388,7 @@ class MarkerBookCalibrationNode(Node):
             message.header.stamp,
             camera_frame,
             transform_camera_marker,
+            transform_eef_book,
         )
         if self.completed:
             return
@@ -394,6 +431,7 @@ class MarkerBookCalibrationNode(Node):
         stamp,
         camera_frame: str,
         transform_camera_marker: np.ndarray,
+        transform_eef_book: np.ndarray,
     ):
         marker_frame = str(self.get_parameter("detected_marker_frame").value)
         book_frame = str(self.get_parameter("detected_book_frame").value)
@@ -412,6 +450,22 @@ class MarkerBookCalibrationNode(Node):
                 transform_marker_book,
             ),
         ]
+        candidate_frame = str(
+            self.get_parameter("frame_audit_candidate_frame").value
+        )
+        if self.frame_audit_enabled:
+            transform_eef_candidate = apply_book_axis_correction(
+                transform_eef_book,
+                self.transform_old_book_policy_book,
+            )
+            transforms.append(
+                self._transform_message(
+                    stamp,
+                    str(self.get_parameter("eef_frame").value),
+                    candidate_frame,
+                    transform_eef_candidate,
+                )
+            )
         self.detected_tf_broadcaster.sendTransform(transforms)
 
         lifetime_s = max(
@@ -458,9 +512,106 @@ class MarkerBookCalibrationNode(Node):
         detected_marker.frame_locked = True
         detected_marker.lifetime.sec = lifetime_sec
         detected_marker.lifetime.nanosec = lifetime_nanosec
-        self.book_visualization_publisher.publish(
-            MarkerArray(markers=[book_marker, detected_marker])
+        markers = [book_marker, detected_marker]
+        if self.frame_audit_enabled:
+            candidate_book = self._book_cube_marker(
+                candidate_frame,
+                "bookshelf_book_frame_audit",
+                10,
+                (1.0, 0.75, 0.0, 0.42),
+                lifetime_sec,
+                lifetime_nanosec,
+            )
+            markers.append(candidate_book)
+            markers.extend(
+                self._axis_markers(
+                    book_frame,
+                    "saved",
+                    20,
+                    lifetime_sec,
+                    lifetime_nanosec,
+                )
+            )
+            markers.extend(
+                self._axis_markers(
+                    candidate_frame,
+                    "candidate",
+                    30,
+                    lifetime_sec,
+                    lifetime_nanosec,
+                )
+            )
+        self.book_visualization_publisher.publish(MarkerArray(markers=markers))
+
+    def _book_cube_marker(
+        self, frame_id, namespace, marker_id, rgba, lifetime_sec, lifetime_nanosec
+    ):
+        marker = Marker()
+        marker.header.frame_id = frame_id
+        marker.ns = namespace
+        marker.id = marker_id
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.orientation.w = 1.0
+        marker.scale.x = float(self.book_size_xyz_m[0])
+        marker.scale.y = float(self.book_size_xyz_m[1])
+        marker.scale.z = float(self.book_size_xyz_m[2])
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = rgba
+        marker.frame_locked = True
+        marker.lifetime.sec = lifetime_sec
+        marker.lifetime.nanosec = lifetime_nanosec
+        return marker
+
+    @staticmethod
+    def _axis_markers(
+        frame_id, label, first_id, lifetime_sec, lifetime_nanosec
+    ):
+        markers = []
+        axes = (
+            ("X depth", (1.0, 0.0, 0.0), (1.0, 0.1, 0.1, 0.95)),
+            ("Y thickness", (0.0, 1.0, 0.0), (0.1, 1.0, 0.1, 0.95)),
+            ("Z up", (0.0, 0.0, 1.0), (0.2, 0.4, 1.0, 0.95)),
         )
+        axis_length_m = 0.10
+        for offset, (axis_name, endpoint, rgba) in enumerate(axes):
+            endpoint = tuple(axis_length_m * value for value in endpoint)
+            marker = Marker()
+            marker.header.frame_id = frame_id
+            marker.ns = f"bookshelf_book_frame_audit_{label}"
+            marker.id = first_id + offset
+            marker.type = Marker.ARROW
+            marker.action = Marker.ADD
+            marker.points = [
+                Point(x=0.0, y=0.0, z=0.0),
+                Point(x=endpoint[0], y=endpoint[1], z=endpoint[2]),
+            ]
+            marker.scale.x = 0.004
+            marker.scale.y = 0.008
+            marker.scale.z = 0.012
+            marker.color.r, marker.color.g, marker.color.b, marker.color.a = rgba
+            marker.frame_locked = True
+            marker.lifetime.sec = lifetime_sec
+            marker.lifetime.nanosec = lifetime_nanosec
+            markers.append(marker)
+
+            text = Marker()
+            text.header.frame_id = frame_id
+            text.ns = f"bookshelf_book_frame_audit_{label}_labels"
+            text.id = first_id + 10 + offset
+            text.type = Marker.TEXT_VIEW_FACING
+            text.action = Marker.ADD
+            text.pose.position = Point(
+                x=endpoint[0], y=endpoint[1], z=endpoint[2]
+            )
+            text.pose.orientation.w = 1.0
+            text.scale.z = 0.018
+            text.color.r, text.color.g, text.color.b, text.color.a = rgba
+            text.text = f"{label}: {axis_name}"
+            text.frame_locked = True
+            text.lifetime.sec = lifetime_sec
+            text.lifetime.nanosec = lifetime_nanosec
+            markers.append(text)
+        return markers
 
     @staticmethod
     def _transform_message(stamp, parent: str, child: str, transform: np.ndarray):
@@ -565,7 +716,52 @@ class MarkerBookCalibrationNode(Node):
             transform_camera_book,
             camera_matrix,
             distortion,
+            color_bgr=(255, 255, 0),
         )
+        cv2.putText(
+            debug,
+            "saved book frame (cyan)",
+            (20, 62),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (255, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        if self.frame_audit_enabled:
+            transform_camera_candidate = apply_book_axis_correction(
+                transform_camera_book,
+                self.transform_old_book_policy_book,
+            )
+            self._draw_book_cuboid(
+                debug,
+                transform_camera_candidate,
+                camera_matrix,
+                distortion,
+                color_bgr=(0, 255, 255),
+            )
+            candidate_rotation_vector, _ = cv2.Rodrigues(
+                transform_camera_candidate[:3, :3]
+            )
+            cv2.drawFrameAxes(
+                debug,
+                camera_matrix,
+                distortion,
+                candidate_rotation_vector,
+                transform_camera_candidate[:3, 3].reshape(3, 1),
+                0.08,
+                2,
+            )
+            cv2.putText(
+                debug,
+                "candidate policy frame (yellow; axes X/Y/Z)",
+                (20, 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
         cv2.putText(
             debug,
             f"accepted sample {len(self.accumulator.samples)}",
@@ -583,7 +779,15 @@ class MarkerBookCalibrationNode(Node):
             debug,
         )
 
-    def _draw_book_cuboid(self, image, transform_camera_book, camera_matrix, distortion):
+    def _draw_book_cuboid(
+        self,
+        image,
+        transform_camera_book,
+        camera_matrix,
+        distortion,
+        *,
+        color_bgr,
+    ):
         half = 0.5 * self.book_size_xyz_m
         points = np.array(
             [
@@ -621,7 +825,7 @@ class MarkerBookCalibrationNode(Node):
                 image,
                 tuple(projected[first]),
                 tuple(projected[second]),
-                (255, 255, 0),
+                color_bgr,
                 2,
                 cv2.LINE_AA,
             )
@@ -666,6 +870,17 @@ class MarkerBookCalibrationNode(Node):
             and int(result["inlier_samples"]) >= minimum_samples
             and float(result["inlier_fraction"]) >= minimum_inlier_fraction
         )
+        frame_audit = None
+        if self.frame_audit_enabled and result is not None:
+            frame_audit = book_frame_audit_report(
+                result["transform_eef_book"],
+                transform_old_book_policy_book=(
+                    self.transform_old_book_policy_book
+                ),
+                expected_rotation_eef_policy_book=(
+                    self.expected_policy_book_rotation_eef
+                ),
+            )
         summary = {
             "schema_version": 1,
             "generated_at": datetime.now().astimezone().isoformat(),
@@ -692,16 +907,25 @@ class MarkerBookCalibrationNode(Node):
                 "transform_output": "T_eef_book (book pose expressed in link_eef)",
             },
             "result": self._serialise_result(result),
+            "frame_audit": frame_audit,
             "limitations": [
                 "The result is valid only while the book remains rigidly fixed in the recorded grasp.",
                 "The marker mounting measurements and axis mapping are treated as exact inputs.",
                 "The projected cuboid should be inspected before using the transform downstream.",
+                "Frame-audit candidates are never selected or promoted automatically.",
             ],
         }
         summary_path = output_dir / "marker_book_calibration_summary.json"
         summary_path.write_text(
             json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8"
         )
+        if frame_audit is not None:
+            audit_path = output_dir / "book_frame_audit_report.json"
+            audit_path.write_text(
+                json.dumps(frame_audit, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            self.get_logger().info(f"Book-frame audit written to {audit_path}")
 
         if calibration_valid:
             self._write_adapter_yaml(output_dir / "eef_book_calibration.yaml", result)

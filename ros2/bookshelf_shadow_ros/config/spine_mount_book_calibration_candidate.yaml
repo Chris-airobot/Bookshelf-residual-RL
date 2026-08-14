@@ -1,0 +1,58 @@
+# OFFLINE/SHADOW-ONLY candidate. This file does not authorize selection,
+# planning, execution, gripper commands, or robot motion.
+#
+# The book transform was regenerated from 120/120 inlier samples in the
+# 2026-08-05 marker bag using the physically measured narrow-spine cardboard
+# mount committed in real_book_aruco0_mount.yaml. The policy-tool transform was
+# re-derived to preserve the nominal simulator T_book_policy_tool exactly.
+calibrated_preinsert_target:
+  ros__parameters:
+    eef_book_translation_xyz:
+      - -0.0015624371872782563
+      - 0.0027389359956003947
+      - 0.18481640358639723
+    eef_book_quaternion_xyzw:
+      - 0.6673608340748282
+      - -0.005431339635170951
+      - 0.7446798305239211
+      - -0.007208862849399785
+    eef_book_transform_status: measured_aruco_spine_mount_replay_candidate_2026_08_14
+
+    eef_policy_tool_translation_xyz:
+      - 0.0031997991892250147
+      - 0.004497059585031187
+      - 0.1483148517240212
+    eef_policy_tool_quaternion_xyzw:
+      - 0.006420530319346958
+      - -0.07452678376214543
+      - 0.03063436487320243
+      - 0.9967276814563266
+    policy_tool_transform_status: derived_unverified_sim_to_xarm_spine_mount_candidate_2026_08_14
+
+policy_observation_adapter:
+  ros__parameters:
+    book_pose_source: eef_fixed
+    latch_eef_book_from_marker: false
+    use_configured_eef_book_transform: true
+    eef_book_translation_xyz:
+      - -0.0015624371872782563
+      - 0.0027389359956003947
+      - 0.18481640358639723
+    eef_book_quaternion_xyzw:
+      - 0.6673608340748282
+      - -0.005431339635170951
+      - 0.7446798305239211
+      - -0.007208862849399785
+    eef_book_transform_status: measured_aruco_spine_mount_replay_candidate_2026_08_14
+
+    tool_offset_xyz:
+      - 0.0031997991892250147
+      - 0.004497059585031187
+      - 0.1483148517240212
+    tool_offset_quaternion_xyzw:
+      - 0.006420530319346958
+      - -0.07452678376214543
+      - 0.03063436487320243
+      - 0.9967276814563266
+    policy_tool_transform_status: derived_unverified_sim_to_xarm_spine_mount_candidate_2026_08_14
+    require_verified_policy_tool_transform: false

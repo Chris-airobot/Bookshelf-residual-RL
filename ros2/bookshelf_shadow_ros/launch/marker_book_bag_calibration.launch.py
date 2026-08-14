@@ -37,6 +37,13 @@ def generate_launch_description():
             default_value="true",
             description="Start diagnostics-only RViz book visualization.",
         ),
+        DeclareLaunchArgument(
+            "enable_frame_audit",
+            default_value="false",
+            description=(
+                "Publish current/candidate book frames for human bag-only review."
+            ),
+        ),
     ]
     calibrator = Node(
         package="bookshelf_shadow_ros",
@@ -49,6 +56,9 @@ def generate_launch_description():
                 "output_dir": LaunchConfiguration("output_dir"),
                 "target_samples": ParameterValue(
                     LaunchConfiguration("target_samples"), value_type=int
+                ),
+                "enable_frame_audit": ParameterValue(
+                    LaunchConfiguration("enable_frame_audit"), value_type=bool
                 ),
             }
         ],
