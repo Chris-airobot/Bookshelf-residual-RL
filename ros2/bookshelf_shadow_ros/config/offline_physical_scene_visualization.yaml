@@ -5,6 +5,7 @@
 offline_scene_visualizer:
   ros__parameters:
     visualization_only: true
+    scene_configuration_confirmed: true
     base_frame: link_base
     tcp_frame: link_tcp
 

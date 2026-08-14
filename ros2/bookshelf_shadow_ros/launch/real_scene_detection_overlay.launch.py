@@ -40,7 +40,9 @@ def generate_launch_description():
     coarse_scene = Node(
         package="bookshelf_shadow_ros",
         executable="offline_scene_visualizer",
-        name="real_coarse_scene_overlay",
+        # Keep this name aligned with the node-scoped scene YAML. Renaming it
+        # causes ROS 2 to ignore the measured scene parameters silently.
+        name="offline_scene_visualizer",
         output="screen",
         parameters=[
             scene_config,

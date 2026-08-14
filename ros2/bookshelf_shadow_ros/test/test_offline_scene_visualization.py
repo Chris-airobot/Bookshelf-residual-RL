@@ -50,6 +50,7 @@ def _geometry():
 
 
 def test_default_scene_has_expected_coarse_dimensions_and_planes():
+    assert _parameters()["scene_configuration_confirmed"] is True
     geometry = _geometry()
 
     assert geometry.shelf_size_xyz == pytest.approx((0.30, 0.95, 0.40))

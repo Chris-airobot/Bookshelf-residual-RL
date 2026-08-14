@@ -50,6 +50,11 @@ class OfflineSceneVisualizerNode(Node):
         self._declare_parameters()
         if not bool(self.get_parameter("visualization_only").value):
             raise ValueError("visualization_only must remain true")
+        if not bool(self.get_parameter("scene_configuration_confirmed").value):
+            raise ValueError(
+                "scene_configuration_confirmed must be true; the reviewed "
+                "scene YAML was not applied to this node"
+            )
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
@@ -119,6 +124,7 @@ class OfflineSceneVisualizerNode(Node):
 
     def _declare_parameters(self) -> None:
         self.declare_parameter("visualization_only", True)
+        self.declare_parameter("scene_configuration_confirmed", False)
         self.declare_parameter("publish_joint_states", True)
         self.declare_parameter("base_frame", "link_base")
         self.declare_parameter("tcp_frame", "link_tcp")

@@ -48,6 +48,8 @@ def test_overlay_uses_live_robot_state_and_has_no_execution_interface():
     visualizer_source = VISUALIZER.read_text(encoding="utf-8")
     check_source = CHECK_NODE.read_text(encoding="utf-8")
 
+    assert 'name="offline_scene_visualizer"' in launch_source
+    assert 'name="real_coarse_scene_overlay"' not in launch_source
     assert '"publish_joint_states": False' in launch_source
     assert "robot_state_publisher" not in launch_source
     assert "xarm_description" not in launch_source
@@ -64,6 +66,18 @@ def test_overlay_uses_live_robot_state_and_has_no_execution_interface():
         assert forbidden not in launch_source
         assert forbidden not in visualizer_source
         assert forbidden not in check_source
+
+
+def test_overlay_scene_configuration_is_explicit_and_fail_closed():
+    scene = _parameters(SCENE_CONFIG, "offline_scene_visualizer")
+    visualizer_source = VISUALIZER.read_text(encoding="utf-8")
+
+    assert scene["scene_configuration_confirmed"] is True
+    assert 'self.declare_parameter("scene_configuration_confirmed", False)' in (
+        visualizer_source
+    )
+    assert "scene_configuration_confirmed must be true" in visualizer_source
+    assert "scene YAML was not applied" in visualizer_source
 
 
 def test_rviz_combines_robot_scene_slot_and_optional_point_cloud():
