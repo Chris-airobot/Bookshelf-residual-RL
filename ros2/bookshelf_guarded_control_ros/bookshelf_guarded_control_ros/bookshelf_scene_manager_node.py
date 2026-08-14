@@ -134,15 +134,17 @@ class BookshelfSceneManagerNode(Node):
         self.declare_parameter("maximum_shelf_front_plane_error_m", 0.005)
 
         self.declare_parameter("shelf_object_id", "bookshelf_global_keepout")
-        self.declare_parameter("shelf_box_size_xyz", [0.20, 0.70, 0.40])
+        self.declare_parameter("shelf_box_size_xyz", [0.30, 0.95, 0.40])
         self.declare_parameter(
-            "shelf_box_center_offset_slot_xyz", [0.10, 0.0, 0.0]
+            "shelf_box_center_offset_slot_xyz", [0.15, 0.0, 0.0]
         )
+        self.declare_parameter("shelf_level_with_base", True)
+        self.declare_parameter("shelf_bottom_height_base_m", 0.015)
 
         self.declare_parameter("table_enabled", True)
         self.declare_parameter("table_object_id", "bookshelf_worktable")
-        self.declare_parameter("table_box_size_xyz", [1.20, 1.20, 0.05])
-        self.declare_parameter("table_box_center_base_xyz", [0.55, 0.0, -0.025])
+        self.declare_parameter("table_box_size_xyz", [1.50, 0.60, 0.05])
+        self.declare_parameter("table_box_center_base_xyz", [0.75, 0.0, -0.025])
         self.declare_parameter(
             "table_box_quaternion_base_xyzw", [0.0, 0.0, 0.0, 1.0]
         )
@@ -333,6 +335,12 @@ class BookshelfSceneManagerNode(Node):
             center_offset_slot_xyz=self.get_parameter(
                 "shelf_box_center_offset_slot_xyz"
             ).value,
+            level_with_base=bool(
+                self.get_parameter("shelf_level_with_base").value
+            ),
+            bottom_height_base_m=float(
+                self.get_parameter("shelf_bottom_height_base_m").value
+            ),
         )
         table = configured_box(
             frame_id=self.base_frame,
@@ -449,6 +457,12 @@ class BookshelfSceneManagerNode(Node):
                         "shelf_box_center_offset_slot_xyz"
                     ).value
                 ],
+                "shelf_level_with_base": bool(
+                    self.get_parameter("shelf_level_with_base").value
+                ),
+                "shelf_bottom_height_base_m": float(
+                    self.get_parameter("shelf_bottom_height_base_m").value
+                ),
                 "table_box_size_xyz": [
                     float(value)
                     for value in self.get_parameter("table_box_size_xyz").value

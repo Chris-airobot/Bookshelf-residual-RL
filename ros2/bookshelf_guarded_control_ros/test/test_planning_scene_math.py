@@ -1,4 +1,8 @@
+from pathlib import Path
+
 import numpy as np
+import pytest
+import yaml
 
 from bookshelf_guarded_control_ros.planning_scene_math import (
     GLOBAL_APPROACH,
@@ -10,6 +14,21 @@ from bookshelf_guarded_control_ros.planning_scene_math import (
     shelf_front_plane_error_m,
 )
 from bookshelf_guarded_control_ros.policy_tool_control_math import make_transform
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCENE_CONFIG = ROOT / "config" / "bookshelf_scene_physical.yaml"
+OVERLAY_CONFIG = (
+    ROOT.parent
+    / "bookshelf_shadow_ros"
+    / "config"
+    / "offline_physical_scene_visualization.yaml"
+)
+
+
+def _parameters(path, node_name):
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return document[node_name]["ros__parameters"]
 
 
 def test_shelf_box_front_face_starts_at_slot_mouth():
@@ -31,6 +50,66 @@ def test_shelf_box_front_face_starts_at_slot_mouth():
         box.size_xyz,
         [0.10, 0.0, 0.0],
     ) == 0.0
+
+
+def test_level_shelf_matches_validated_overlay_geometry():
+    scene = _parameters(SCENE_CONFIG, "bookshelf_scene_manager")
+    overlay = _parameters(OVERLAY_CONFIG, "offline_scene_visualizer")
+    transform_base_slot = make_transform(
+        overlay["slot_translation_xyz"],
+        overlay["slot_quaternion_xyzw"],
+    )
+
+    assert scene["shelf_box_size_xyz"] == overlay["shelf_size_xyz"]
+    assert scene["shelf_box_center_offset_slot_xyz"] == (
+        overlay["shelf_center_offset_slot_xyz"]
+    )
+    assert scene["shelf_bottom_height_base_m"] == pytest.approx(
+        overlay["shelf_bottom_height_base_m"]
+    )
+    assert scene["table_box_size_xyz"] == overlay["table_size_xyz"]
+    assert scene["table_box_center_base_xyz"] == overlay["table_center_base_xyz"]
+    assert scene["table_box_quaternion_base_xyzw"] == (
+        overlay["table_quaternion_base_xyzw"]
+    )
+    assert scene["held_book_size_xyz"] == overlay["held_book_size_xyz"]
+    assert scene["held_book_center_tcp_xyz"] == overlay["held_book_center_tcp_xyz"]
+    assert scene["held_book_quaternion_tcp_xyzw"] == (
+        overlay["held_book_quaternion_tcp_xyzw"]
+    )
+
+    box = shelf_box_from_slot(
+        transform_base_slot,
+        base_frame="link_base",
+        size_xyz=scene["shelf_box_size_xyz"],
+        center_offset_slot_xyz=scene["shelf_box_center_offset_slot_xyz"],
+        level_with_base=scene["shelf_level_with_base"],
+        bottom_height_base_m=scene["shelf_bottom_height_base_m"],
+    )
+
+    slot_heading = transform_base_slot[:2, 0]
+    slot_heading /= np.linalg.norm(slot_heading)
+    assert box.transform_frame_box[:2, 0] == pytest.approx(slot_heading)
+    assert box.transform_frame_box[:3, 2] == pytest.approx([0.0, 0.0, 1.0])
+    assert box.transform_frame_box[2, 3] == pytest.approx(0.215)
+    assert shelf_front_plane_error_m(
+        box.size_xyz,
+        scene["shelf_box_center_offset_slot_xyz"],
+    ) == pytest.approx(0.0)
+
+
+def test_level_shelf_rejects_missing_bottom_height():
+    transform_base_slot = make_transform([0.8, 0.1, 0.25])
+
+    with pytest.raises(ValueError, match="shelf_bottom_height_base_m"):
+        shelf_box_from_slot(
+            transform_base_slot,
+            base_frame="link_base",
+            size_xyz=[0.30, 0.95, 0.40],
+            center_offset_slot_xyz=[0.15, 0.0, 0.0],
+            level_with_base=True,
+            bottom_height_base_m=None,
+        )
 
 
 def test_local_handoff_is_fail_closed():

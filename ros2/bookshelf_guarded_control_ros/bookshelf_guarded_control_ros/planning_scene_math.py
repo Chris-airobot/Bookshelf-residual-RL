@@ -39,6 +39,8 @@ def shelf_box_from_slot(
     base_frame: str,
     size_xyz,
     center_offset_slot_xyz,
+    level_with_base: bool = False,
+    bottom_height_base_m: float | None = None,
 ) -> BoxSpec:
     """Place the coarse bookshelf keep-out box relative to the slot mouth."""
 
@@ -47,10 +49,44 @@ def shelf_box_from_slot(
     offset = np.asarray(center_offset_slot_xyz, dtype=np.float64)
     if offset.shape != (3,) or not np.all(np.isfinite(offset)):
         raise ValueError("shelf_box_center_offset_slot_xyz must be a finite 3D vector")
+
+    if level_with_base:
+        if bottom_height_base_m is None:
+            raise ValueError("shelf_bottom_height_base_m must be finite")
+        bottom_height = float(bottom_height_base_m)
+        if not math.isfinite(bottom_height):
+            raise ValueError("shelf_bottom_height_base_m must be finite")
+        heading_xy = transform_base_slot[:2, 0]
+        heading_norm = float(np.linalg.norm(heading_xy))
+        if heading_norm < 1.0e-9:
+            raise ValueError("slot +X axis cannot define a level shelf heading")
+        shelf_x_axis = np.array(
+            [heading_xy[0] / heading_norm, heading_xy[1] / heading_norm, 0.0],
+            dtype=np.float64,
+        )
+        shelf_y_axis = np.array(
+            [-shelf_x_axis[1], shelf_x_axis[0], 0.0], dtype=np.float64
+        )
+        shelf_rotation = np.column_stack(
+            (shelf_x_axis, shelf_y_axis, np.array([0.0, 0.0, 1.0]))
+        )
+        shelf_center = transform_base_slot[:3, 3].copy()
+        shelf_center[:2] += (shelf_rotation @ offset)[:2]
+        shelf_center[2] = bottom_height + 0.5 * size[2] + offset[2]
+        transform_base_shelf = np.eye(4, dtype=np.float64)
+        transform_base_shelf[:3, :3] = shelf_rotation
+        transform_base_shelf[:3, 3] = shelf_center
+    else:
+        if bottom_height_base_m is not None:
+            raise ValueError(
+                "bottom_height_base_m requires level_with_base=True"
+            )
+        transform_base_shelf = transform_base_slot @ make_transform(offset)
+
     return BoxSpec(
         frame_id=str(base_frame),
         size_xyz=size,
-        transform_frame_box=transform_base_slot @ make_transform(offset),
+        transform_frame_box=transform_base_shelf,
     )
 
 

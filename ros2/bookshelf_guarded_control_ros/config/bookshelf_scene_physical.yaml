@@ -1,8 +1,8 @@
 # Single physical-geometry configuration for the AU bookshelf experiment.
 #
-# Tomorrow's measured values belong only in this file. The launch interface
-# accepts this file as one scene_config argument; no source edit is required.
-# Keep both review gates false until the boxes have been inspected in RViz.
+# Physical values are synchronized with the human-inspected RGB-D overlay from
+# physical_trial_20260813_01. Keep both review gates false until the held book
+# and the resulting MoveIt planning scene are reviewed for the current trial.
 bookshelf_scene_manager:
   ros__parameters:
     base_frame: link_base
@@ -23,17 +23,19 @@ bookshelf_scene_manager:
     activation_max_age_s: 0.50
     maximum_shelf_front_plane_error_m: 0.005
 
-    # Slot frame: +X enters the shelf, +Y is lateral and +Z is up.
-    # The X centre must remain half the X size so the front face begins at the
-    # detected slot mouth. Width/height are conservative global keep-out sizes.
+    # Slot frame: +X enters the shelf, +Y is lateral and +Z is up. The shelf is
+    # kept level and its book-supporting bottom is 15 mm above the table.
+    # The X centre remains half the X size so its front face starts at the slot.
     shelf_object_id: bookshelf_global_keepout
-    shelf_box_size_xyz: [0.20, 0.70, 0.40]  # MEASURE: depth, width, height
-    shelf_box_center_offset_slot_xyz: [0.10, 0.0, 0.0]  # MEASURE: Y/Z offsets
+    shelf_box_size_xyz: [0.30, 0.95, 0.40]
+    shelf_box_center_offset_slot_xyz: [0.15, 0.0, 0.0]
+    shelf_level_with_base: true
+    shelf_bottom_height_base_m: 0.015
 
     table_enabled: true
     table_object_id: bookshelf_worktable
-    table_box_size_xyz: [1.20, 1.20, 0.05]  # MEASURE
-    table_box_center_base_xyz: [0.55, 0.0, -0.025]  # MEASURE
+    table_box_size_xyz: [1.50, 0.60, 0.05]
+    table_box_center_base_xyz: [0.75, 0.0, -0.025]
     table_box_quaternion_base_xyzw: [0.0, 0.0, 0.0, 1.0]
 
     held_book_enabled: true
