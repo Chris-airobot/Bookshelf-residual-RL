@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="offline_xarm7_visualization">
+  <xacro:include filename="$(find xarm_description)/urdf/xarm_device_macro.xacro"/>
+
+  <xacro:xarm_device
+    dof="7"
+    robot_type="xarm"
+    add_gripper="true"
+    add_realsense_d435i="false"
+    load_gazebo_plugin="false"
+    ros2_control_plugin="mock_components/GenericSystem"
+    attach_to="world"
+    attach_xyz="0 0 0"
+    attach_rpy="0 0 0"/>
+</robot>

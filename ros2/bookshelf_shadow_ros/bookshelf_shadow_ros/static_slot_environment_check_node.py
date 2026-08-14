@@ -449,6 +449,29 @@ class StaticSlotEnvironmentCheckNode(Node):
                     color=color,
                 )
             )
+            deviation = self._marker(
+                "live_slot_check", 1, Marker.LINE_LIST, stamp
+            )
+            deviation.points = [
+                Point(
+                    x=float(self.reference_transform[0, 3]),
+                    y=float(self.reference_transform[1, 3]),
+                    z=float(self.reference_transform[2, 3]),
+                ),
+                Point(
+                    x=float(self.latest_live_transform[0, 3]),
+                    y=float(self.latest_live_transform[1, 3]),
+                    z=float(self.latest_live_transform[2, 3]),
+                ),
+            ]
+            deviation.scale.x = 0.006
+            (
+                deviation.color.r,
+                deviation.color.g,
+                deviation.color.b,
+                deviation.color.a,
+            ) = color
+            markers.append(deviation)
 
         label_transform = self.reference_transform @ make_transform(
             [0.0, 0.0, 0.5 * self.visual_slot_height_m + 0.04]
@@ -467,6 +490,14 @@ class StaticSlotEnvironmentCheckNode(Node):
             f"STATIC SLOT (cyan) | LIVE (green/red) | {state} "
             f"{self.gate.matching_samples}/{self.gate.required_matches}"
         )
+        if self.latest_comparison is not None:
+            comparison = self.latest_comparison
+            label.text += (
+                f" | dt={comparison['translation_error_m'] * 1000.0:.1f} mm"
+                f" dr={comparison['rotation_error_deg']:.1f} deg"
+                f" dw={comparison['width_error_m'] * 1000.0:.1f} mm"
+                f" conf={comparison['confidence']:.2f}"
+            )
         markers.append(label)
         return MarkerArray(markers=markers)
 

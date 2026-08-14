@@ -1,0 +1,34 @@
+# Read-only comparison between the approved physical slot and current RGB-D output.
+static_slot_environment_check:
+  ros__parameters:
+    base_frame: link_base
+
+    # Human-approved physical_trial_20260813_01 reference. These values must
+    # remain identical to offline_physical_scene_visualization.yaml.
+    static_slot_translation_xyz: [0.8916122508420743, 0.09316581811002701, 0.15450855100340025]
+    static_slot_quaternion_xyzw: [0.008532250326922688, -0.023165785138032358, -0.007036840460193575, 0.9996704606917397]
+    static_slot_width_m: 0.03970380872488022
+    static_slot_transform_status: captured_rgbd_static_human_approved_physical_trial_20260813_01
+
+    slot_depth_m: 0.20
+    visual_slot_height_m: 0.236
+
+    minimum_confidence: 0.60
+    maximum_translation_error_m: 0.010
+    maximum_rotation_error_deg: 5.0
+    maximum_width_error_m: 0.005
+    required_matching_samples: 30
+    pair_max_age_s: 0.10
+    stream_max_age_s: 1.0
+    message_max_age_s: 0.50
+    tf_lookup_timeout_s: 0.05
+
+    output_dir: /tmp/bookshelf_real_scene_overlay
+    live_pose_topic: /slot_detector/slot_pose
+    live_width_topic: /slot_detector/slot_width
+    live_confidence_topic: /slot_detector/confidence
+    marker_topic: /bookshelf_environment/slot_markers
+    static_pose_topic: /bookshelf_environment/static_slot_pose
+    live_pose_base_topic: /bookshelf_environment/live_slot_pose_base
+    passed_topic: /bookshelf_environment/static_slot_check_passed
+    status_topic: /bookshelf_environment/static_slot_check_status

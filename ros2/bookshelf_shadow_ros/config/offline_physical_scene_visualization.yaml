@@ -1,0 +1,56 @@
+# Visual-only reconstruction of the current AU bookshelf setup.
+#
+# This file is not a MoveIt planning-scene approval and cannot authorize motion.
+# Shelf/table placement is deliberately coarse and must be judged by eye in RViz.
+offline_scene_visualizer:
+  ros__parameters:
+    visualization_only: true
+    base_frame: link_base
+    tcp_frame: link_tcp
+
+    # Intended pre-insertion pose recorded from RViz joint sliders.
+    joint_names:
+      [joint1, joint2, joint3, joint4, joint5, joint6, joint7, drive_joint]
+    joint_positions:
+      [
+        1.937315469714,
+        1.466076571675,
+        4.974188368184,
+        0.453785605519,
+        3.473205211469,
+        0.837758040957,
+        4.468042885105,
+        0.0,
+      ]
+
+    # Human-approved physical_trial_20260813_01 static slot in link_base.
+    slot_translation_xyz: [0.8916122508420743, 0.09316581811002701, 0.15450855100340025]
+    slot_quaternion_xyzw: [0.008532250326922688, -0.023165785138032358, -0.007036840460193575, 0.9996704606917397]
+    slot_width_m: 0.03970380872488022
+    slot_visual_height_m: 0.236
+
+    # Slot +X enters the shelf. Preserve its horizontal heading, but keep the
+    # coarse shelf level and anchor its book-supporting bottom 15 mm above the table.
+    # The shelf is assumed laterally centred around the selected slot.
+    shelf_size_xyz: [0.30, 0.95, 0.40]
+    shelf_center_offset_slot_xyz: [0.15, 0.0, 0.0]
+    shelf_bottom_height_base_m: 0.015
+
+    # Coarse tabletop: 1.50 m along base X, 0.60 m along base Y, top at Z=0.
+    # The robot base is near the short end; the 1.5 m edge runs toward the shelf.
+    table_size_xyz: [1.50, 0.60, 0.05]
+    table_center_base_xyz: [0.75, 0.0, -0.025]
+    table_quaternion_base_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+    # Measured target-book rigid grasp expressed from link_tcp.
+    held_book_size_xyz: [0.156, 0.034, 0.236]
+    held_book_center_tcp_xyz: [0.0081243577, -0.0101568565, -0.0477412824]
+    held_book_quaternion_tcp_xyzw: [0.4756936127, 0.4680286672, 0.5317004003, 0.5214973038]
+
+    # Training convention: book centre 108 mm before the slot origin and 6 mm up.
+    preinsert_book_center_slot_xyz: [-0.108, 0.0, 0.006]
+
+    marker_topic: /bookshelf_offline_scene/markers
+    joint_state_topic: /joint_states
+    status_topic: /bookshelf_offline_scene/status
+    publish_rate_hz: 10.0
