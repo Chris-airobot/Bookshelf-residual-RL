@@ -12,19 +12,6 @@ from .policy_tool_control_math import make_transform, validated_transform
 
 GLOBAL_APPROACH = "global_approach"
 LOCAL_INSERTION = "local_insertion"
-
-
-def ros_uint8_constant(value) -> int:
-    """Normalize ROS uint8 constants emitted as integers or one-byte values."""
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        encoded = bytes(value)
-        if len(encoded) != 1:
-            raise ValueError("ROS uint8 byte constants must contain exactly one byte")
-        return encoded[0]
-    converted = int(value)
-    if not 0 <= converted <= 255:
-        raise ValueError(f"ROS uint8 constant is outside [0, 255]: {converted}")
-    return converted
 SCENE_MODES = (GLOBAL_APPROACH, LOCAL_INSERTION)
 
 

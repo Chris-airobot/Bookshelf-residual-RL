@@ -56,3 +56,11 @@ def test_repository_scene_uses_reviewed_coarse_dimensions():
 def test_scene_manager_shutdown_is_idempotent_after_sigint():
     source = NODE.read_text(encoding="utf-8")
     assert "if rclpy.ok():\n            rclpy.shutdown()" in source
+
+
+def test_scene_manager_preserves_generated_ros_uint8_constant_types():
+    source = NODE.read_text(encoding="utf-8")
+    assert "message.operation = operation" in source
+    assert "primitive.type = SolidPrimitive.BOX" in source
+    assert "int(operation)" not in source
+    assert "ros_uint8_constant" not in source
