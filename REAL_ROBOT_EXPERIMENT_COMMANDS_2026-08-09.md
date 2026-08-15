@@ -1,5 +1,8 @@
 # Real-Robot Experiment Commands — 2026-08-09
 
+> Superseded for the supervised physical run by
+> `REAL_ROBOT_EXPERIMENT_COMMANDS_2026-08-16.md`.
+
 This is the consolidated operator sequence for the xArm7 bookshelf experiment
 from the unified repository and unified ROS install. Do not source the retired
 `/tmp/bookshelf_marker_install` overlay.

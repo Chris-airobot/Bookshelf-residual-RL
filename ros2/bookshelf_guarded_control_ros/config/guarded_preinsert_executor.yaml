@@ -1,0 +1,26 @@
+# Committed fail-closed defaults. This configuration cannot command motion.
+guarded_preinsert_executor:
+  ros__parameters:
+    dry_run: true
+    allow_execution: false
+    planning_scene_complete: false
+    human_trajectory_review_complete: false
+    target_transform_physically_validated: false
+    approval_token: DISABLED
+    expected_scene_config_sha256: DISABLED
+    expected_target_transform_status: DISABLED
+    required_scene_mode: global_approach
+    required_planning_sequence: seeded_collision_aware_ik_then_joint_goal_plan
+    maximum_plan_age_s: 120.0
+    maximum_joint_state_age_s: 0.50
+    maximum_scene_status_age_s: 1.0
+    maximum_start_joint_drift_rad: 0.02
+    minimum_trajectory_point_count: 2
+    execution_action: /execute_trajectory
+    approval_topic: /bookshelf_preinsert/approve_once
+    result_topic: /bookshelf_preinsert/execution_report
+    plan_valid_topic: /bookshelf_preinsert/plan_valid
+    plan_report_topic: /bookshelf_preinsert/plan_report
+    planned_trajectory_topic: /bookshelf_preinsert/planned_trajectory
+    joint_states_topic: /joint_states
+    scene_status_topic: /bookshelf_scene/status

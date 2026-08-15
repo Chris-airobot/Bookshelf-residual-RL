@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -14,6 +15,7 @@ from moveit_msgs.msg import DisplayTrajectory, MoveItErrorCodes, RobotTrajectory
 from moveit_msgs.srv import GetMotionPlan, GetPositionIK
 import numpy as np
 import rclpy
+from rclpy.serialization import serialize_message
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
@@ -623,6 +625,9 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             {
                 "valid": True,
                 "collision_checked": True,
+                "trajectory_sha256": hashlib.sha256(
+                    serialize_message(response.trajectory)
+                ).hexdigest(),
                 "execution_ready": False,
                 "execution_authorized": False,
                 "human_review_required": True,
