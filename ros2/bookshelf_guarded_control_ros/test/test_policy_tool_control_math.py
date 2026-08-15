@@ -13,6 +13,7 @@ from bookshelf_guarded_control_ros.policy_tool_control_math import (
     execution_authorization_error,
     make_transform,
     maximum_named_joint_difference,
+    named_joint_target_branch_report,
     joint_trajectory_sanity,
     provenance_error,
     target_safety_error,
@@ -318,6 +319,28 @@ def test_named_joint_drift_uses_names_not_message_order():
         [0.11, 0.19],
     )
     assert math.isclose(difference, 0.01, abs_tol=1.0e-12)
+
+
+def test_named_ik_branch_report_accepts_near_and_rejects_distant_solution():
+    names = [f"joint{index}" for index in range(1, 8)]
+    current = [0.0] * 7
+    target = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7]
+
+    report, error = named_joint_target_branch_report(
+        names, current, list(reversed(names)), list(reversed(target)), names, 1.5
+    )
+    assert error is None
+    assert report["passed"] is True
+    assert report["largest_delta_joint"] == "joint7"
+    assert math.isclose(report["maximum_delta_rad"], 0.7)
+
+    target[-1] = 2.0
+    report, error = named_joint_target_branch_report(
+        names, current, names, target, names, 1.5
+    )
+    assert report["passed"] is False
+    assert "joint7" in error
+    assert "2.000000 > 1.500000" in error
 
 
 def _trajectory_inputs():

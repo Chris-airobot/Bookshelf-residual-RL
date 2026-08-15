@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import datetime
 import json
 import math
@@ -10,7 +11,7 @@ from pathlib import Path
 
 from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.msg import DisplayTrajectory, MoveItErrorCodes, RobotTrajectory
-from moveit_msgs.srv import GetMotionPlan
+from moveit_msgs.srv import GetMotionPlan, GetPositionIK
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
@@ -33,9 +34,13 @@ from .policy_tool_control_math import (
     joint_trajectory_sanity,
     make_transform,
     matrix_to_quaternion_xyzw,
+    named_joint_target_branch_report,
     transform_to_dict,
 )
-from .pose_motion_plan import build_pose_motion_plan_request
+from .pose_motion_plan import (
+    build_joint_motion_plan_request,
+    build_position_ik_request,
+)
 
 
 def _pose_to_transform(pose) -> np.ndarray:
@@ -82,6 +87,10 @@ class CalibratedPreinsertPlanOnlyNode(Node):
         self.plan_client = self.create_client(
             GetMotionPlan,
             str(self.get_parameter("planning_service").value),
+        )
+        self.ik_client = self.create_client(
+            GetPositionIK,
+            str(self.get_parameter("ik_service").value),
         )
 
         self.latest_target_valid = False
@@ -176,6 +185,10 @@ class CalibratedPreinsertPlanOnlyNode(Node):
         self.declare_parameter("planning_link", "link_tcp")
         self.declare_parameter("group_name", "xarm7")
         self.declare_parameter("planning_service", "/plan_kinematic_path")
+        self.declare_parameter("ik_service", "/compute_ik")
+        self.declare_parameter("ik_timeout_s", 1.0)
+        self.declare_parameter("ik_attempts", 10)
+        self.declare_parameter("ik_avoid_collisions", True)
         self.declare_parameter("planning_pipeline_id", "")
         self.declare_parameter("planner_id", "")
         self.declare_parameter("planning_attempts", 3)
@@ -207,6 +220,7 @@ class CalibratedPreinsertPlanOnlyNode(Node):
         self.declare_parameter("maximum_trajectory_endpoint_joint_delta_rad", 3.0)
         self.declare_parameter("require_near_current_goal_joints", True)
         self.declare_parameter("maximum_goal_joint_delta_rad", 1.5)
+        self.declare_parameter("joint_goal_tolerance_rad", 0.001)
         self.declare_parameter("maximum_trajectory_joint_path_length_rad", 10.0)
         self.declare_parameter("minimum_trajectory_duration_s", 0.10)
         self.declare_parameter("maximum_trajectory_duration_s", 90.0)
@@ -307,6 +321,8 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             return "preserved TCP orientation has not been latched"
         if debug.get("target_unexpected_clipped_labels"):
             return "calibrated target has unexpected clipped observation channels"
+        if not bool(self.get_parameter("require_near_current_goal_joints").value):
+            return "near-current IK branch validation is disabled"
         change = debug.get("preserved_tcp_orientation_change_deg")
         if change is None or not np.isfinite(float(change)):
             return "preserved TCP orientation diagnostic is unavailable"
@@ -420,22 +436,33 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             limits=self._trajectory_limits(),
         )
 
-    def _motion_plan_request(self, transform_base_tcp_target, target_id):
+    def _ik_request(self, transform_base_tcp_target, start_joint_state):
+        return build_position_ik_request(
+            target_pose=_transform_to_pose(transform_base_tcp_target),
+            start_joint_state=start_joint_state,
+            base_frame=self.base_frame,
+            planning_link=self.planning_link,
+            group_name=self.group_name,
+            timeout_s=float(self.get_parameter("ik_timeout_s").value),
+            attempts=int(self.get_parameter("ik_attempts").value),
+            avoid_collisions=bool(
+                self.get_parameter("ik_avoid_collisions").value
+            ),
+        )
+
+    def _motion_plan_request(self, target_joint_state, start_joint_state, target_id):
         expected_joint_names = tuple(
             str(value)
             for value in self.get_parameter("expected_arm_joint_names").value
         )
-        require_near_current = bool(
-            self.get_parameter("require_near_current_goal_joints").value
+        target_positions = dict(
+            zip(target_joint_state.name, target_joint_state.position)
         )
-        return build_pose_motion_plan_request(
-            target_pose=_transform_to_pose(transform_base_tcp_target),
-            start_joint_state=self.latest_joint_state,
-            base_frame=self.base_frame,
-            planning_link=self.planning_link,
+        return build_joint_motion_plan_request(
+            target_joint_names=expected_joint_names,
+            target_joint_positions=[target_positions[name] for name in expected_joint_names],
+            start_joint_state=start_joint_state,
             group_name=self.group_name,
-            workspace_min_xyz=self.get_parameter("workspace_min_xyz").value,
-            workspace_max_xyz=self.get_parameter("workspace_max_xyz").value,
             planning_pipeline_id=str(
                 self.get_parameter("planning_pipeline_id").value
             ),
@@ -448,19 +475,10 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             acceleration_scaling=float(
                 self.get_parameter("acceleration_scaling").value
             ),
-            position_tolerance_m=float(
-                self.get_parameter("position_tolerance_m").value
+            joint_tolerance_rad=float(
+                self.get_parameter("joint_goal_tolerance_rad").value
             ),
-            orientation_tolerance_rad=float(
-                self.get_parameter("orientation_tolerance_rad").value
-            ),
-            constraint_name=f"calibrated_preinsert_{target_id[:12]}",
-            goal_joint_names=(expected_joint_names if require_near_current else ()),
-            maximum_goal_joint_delta_rad=(
-                float(self.get_parameter("maximum_goal_joint_delta_rad").value)
-                if require_near_current
-                else None
-            ),
+            constraint_name=f"calibrated_preinsert_ik_{target_id[:12]}",
         )
 
     def _timer_callback(self):
@@ -491,29 +509,90 @@ class CalibratedPreinsertPlanOnlyNode(Node):
         if target_id == self.completed_target_id:
             self._republish_result()
             return
+        if not self.ik_client.wait_for_service(timeout_sec=0.05):
+            self._publish_invalid("MoveIt IK service is unavailable", report=report)
+            return
         if not self.plan_client.wait_for_service(timeout_sec=0.05):
             self._publish_invalid("MoveIt planning service is unavailable", report=report)
             return
 
+        start_joint_state = copy.deepcopy(self.latest_joint_state)
+        self.plan_pending = True
+        self.pending = (target, target_id, report, start_joint_state)
+        future = self.ik_client.call_async(self._ik_request(target, start_joint_state))
+        future.add_done_callback(self._ik_response_callback)
+        self._log_once(
+            f"ik:{target_id}",
+            f"Requesting collision-aware seeded IK for target {target_id[:12]}.",
+        )
+
+    def _ik_response_callback(self, future):
+        target, target_id, report, start_joint_state = self.pending
         try:
-            request = self._motion_plan_request(target, target_id)
-        except ValueError as exception:
-            self._publish_invalid(
-                f"motion plan request is invalid: {exception}", report=report
+            response = future.result()
+        except Exception as error:
+            self._finish_pending_invalid(
+                target_id, f"MoveIt IK call failed: {error}", report
             )
             return
 
-        self.plan_pending = True
-        self.pending = (target, target_id, report)
+        success = int(response.error_code.val) == int(MoveItErrorCodes.SUCCESS)
+        report.update(
+            {
+                "ik_checked": True,
+                "ik_collision_aware": bool(
+                    self.get_parameter("ik_avoid_collisions").value
+                ),
+                "ik_error_code": int(response.error_code.val),
+            }
+        )
+        if not success:
+            self._finish_pending_invalid(
+                target_id, "MoveIt did not return a valid IK solution", report
+            )
+            return
+
+        expected = tuple(
+            str(value)
+            for value in self.get_parameter("expected_arm_joint_names").value
+        )
+        branch_report, error = named_joint_target_branch_report(
+            start_joint_state.name,
+            start_joint_state.position,
+            response.solution.joint_state.name,
+            response.solution.joint_state.position,
+            expected,
+            float(self.get_parameter("maximum_goal_joint_delta_rad").value),
+        )
+        report["ik_joint_branch"] = branch_report
+        if error:
+            self._finish_pending_invalid(target_id, error, report)
+            return
+
+        try:
+            request = self._motion_plan_request(
+                response.solution.joint_state, start_joint_state, target_id
+            )
+        except (KeyError, ValueError) as exception:
+            self._finish_pending_invalid(
+                target_id, f"joint motion plan request is invalid: {exception}", report
+            )
+            return
         future = self.plan_client.call_async(request)
         future.add_done_callback(self._plan_response_callback)
         self._log_once(
             f"planning:{target_id}",
-            f"Requesting one PLAN-ONLY global path for target {target_id[:12]}.",
+            f"Planning to validated nearby IK branch for target {target_id[:12]}.",
         )
 
+    def _finish_pending_invalid(self, target_id, reason, report):
+        self.pending = None
+        self.plan_pending = False
+        self.completed_target_id = target_id
+        self._publish_invalid(reason, report=report)
+
     def _plan_response_callback(self, future):
-        target, target_id, report = self.pending
+        target, target_id, report, start_joint_state = self.pending
         self.pending = None
         self.plan_pending = False
         self.completed_target_id = target_id
@@ -588,6 +667,7 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             "target_calculator_debug": self.latest_target_debug,
             "target_policy_observation_valid": bool(self.latest_target_valid),
             "geometric_target_used_for_global_plan": True,
+            "ik_checked": False,
             "scene_status": self.latest_scene_status,
             "blocked_nodes": self._blocked_nodes_present(),
             "goal_joint_branch_constraint": {
@@ -599,6 +679,7 @@ class CalibratedPreinsertPlanOnlyNode(Node):
                     self.get_parameter("maximum_goal_joint_delta_rad").value
                 ),
             },
+            "planning_sequence": "seeded_collision_aware_ik_then_joint_goal_plan",
         }
 
     def _publish_target(self, transform):

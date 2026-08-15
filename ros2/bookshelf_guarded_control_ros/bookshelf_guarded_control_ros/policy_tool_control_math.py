@@ -401,6 +401,84 @@ def maximum_named_joint_difference(
     return max(abs(float(current[name]) - float(planned[name])) for name in common)
 
 
+def named_joint_target_branch_report(
+    current_names,
+    current_positions,
+    target_names,
+    target_positions,
+    expected_joint_names,
+    maximum_joint_delta_rad,
+) -> tuple[dict, str | None]:
+    """Check that a named IK result remains near the supplied current state."""
+
+    expected = tuple(str(value) for value in expected_joint_names)
+    current_names = tuple(str(value) for value in current_names)
+    target_names = tuple(str(value) for value in target_names)
+    reasons = []
+    report = {
+        "passed": False,
+        "maximum_allowed_delta_rad": float(maximum_joint_delta_rad),
+        "largest_delta_joint": None,
+        "maximum_delta_rad": None,
+        "per_joint": {},
+        "reasons": reasons,
+    }
+    if not expected or len(set(expected)) != len(expected):
+        reasons.append("expected joint names are empty or duplicated")
+    if len(current_names) != len(current_positions) or len(set(current_names)) != len(
+        current_names
+    ):
+        reasons.append("current joint names and positions are inconsistent")
+    if len(target_names) != len(target_positions) or len(set(target_names)) != len(
+        target_names
+    ):
+        reasons.append("IK joint names and positions are inconsistent")
+    if not set(expected).issubset(current_names):
+        reasons.append("current state is missing expected arm joints")
+    if not set(expected).issubset(target_names):
+        reasons.append("IK result is missing expected arm joints")
+    maximum = float(maximum_joint_delta_rad)
+    if not math.isfinite(maximum) or maximum <= 0.0:
+        reasons.append("maximum IK joint delta must be finite and positive")
+    if reasons:
+        return report, "IK branch check failed: " + "; ".join(reasons)
+
+    current = dict(zip(current_names, current_positions))
+    target = dict(zip(target_names, target_positions))
+    deltas = {}
+    for name in expected:
+        start = float(current[name])
+        goal = float(target[name])
+        if not math.isfinite(start) or not math.isfinite(goal):
+            reasons.append(f"joint {name} has a non-finite current or IK position")
+            continue
+        signed = goal - start
+        absolute = abs(signed)
+        deltas[name] = absolute
+        report["per_joint"][name] = {
+            "current_position_rad": start,
+            "target_position_rad": goal,
+            "signed_delta_rad": signed,
+            "absolute_delta_rad": absolute,
+            "absolute_delta_deg": math.degrees(absolute),
+        }
+    if reasons:
+        return report, "IK branch check failed: " + "; ".join(reasons)
+
+    largest = max(deltas, key=deltas.get)
+    report["largest_delta_joint"] = largest
+    report["maximum_delta_rad"] = deltas[largest]
+    if deltas[largest] > maximum + 1.0e-12:
+        reasons.append(
+            f"IK target joint {largest} is too far from current state: "
+            f"{deltas[largest]:.6f} > {maximum:.6f} rad"
+        )
+    report["passed"] = not reasons
+    if reasons:
+        return report, "IK branch check failed: " + "; ".join(reasons)
+    return report, None
+
+
 def joint_trajectory_sanity(
     joint_names,
     point_positions,

@@ -20,6 +20,7 @@ SETUP = ROOT / "setup.py"
 def test_preinsert_planner_has_planning_but_no_execution_interface():
     source = NODE.read_text(encoding="utf-8")
     assert "GetMotionPlan" in source
+    assert "GetPositionIK" in source
     assert "self.create_client(" in source
     forbidden = (
         "ActionClient",
@@ -51,9 +52,10 @@ def test_trajectory_sanity_precedes_valid_plan_publication():
 
 def test_invalid_joint_branch_request_is_reported_fail_closed():
     source = NODE.read_text(encoding="utf-8")
-    assert "except ValueError as exception:" in source
-    assert 'f"motion plan request is invalid: {exception}"' in source
+    assert "named_joint_target_branch_report(" in source
+    assert "near-current IK branch validation is disabled" in source
     assert '"goal_joint_branch_constraint"' in source
+    assert '"seeded_collision_aware_ik_then_joint_goal_plan"' in source
 
 
 def test_launch_combines_target_calculation_and_plan_only_node():
@@ -107,6 +109,9 @@ def test_default_configuration_is_bounded_and_global():
         "require_trajectory_sanity: true",
         "require_near_current_goal_joints: true",
         "maximum_goal_joint_delta_rad: 1.5",
+        "ik_service: /compute_ik",
+        "ik_avoid_collisions: true",
+        "joint_goal_tolerance_rad: 0.001",
         "guarded_policy_tool_executor",
     )
     for value in required:

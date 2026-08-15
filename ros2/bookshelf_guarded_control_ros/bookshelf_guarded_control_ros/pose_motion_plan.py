@@ -1,8 +1,8 @@
-"""Shared construction of collision-aware MoveIt pose-plan requests."""
+"""Shared construction of collision-aware MoveIt planning requests."""
 
 import math
 
-from geometry_msgs.msg import Pose
+from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.msg import (
     BoundingVolume,
     Constraints,
@@ -11,7 +11,7 @@ from moveit_msgs.msg import (
     PositionConstraint,
     RobotState,
 )
-from moveit_msgs.srv import GetMotionPlan
+from moveit_msgs.srv import GetMotionPlan, GetPositionIK
 from shape_msgs.msg import SolidPrimitive
 
 
@@ -33,8 +33,6 @@ def build_pose_motion_plan_request(
     position_tolerance_m: float,
     orientation_tolerance_rad: float,
     constraint_name: str,
-    goal_joint_names=(),
-    maximum_goal_joint_delta_rad: float | None = None,
 ):
     """Build a service request only; this function cannot execute a trajectory."""
 
@@ -78,41 +76,95 @@ def build_pose_motion_plan_request(
     orientation.absolute_z_axis_tolerance = float(orientation_tolerance_rad)
     orientation.weight = 1.0
 
-    joint_constraints = []
-    if maximum_goal_joint_delta_rad is not None:
-        tolerance = float(maximum_goal_joint_delta_rad)
-        if not math.isfinite(tolerance) or tolerance <= 0.0:
-            raise ValueError("maximum goal joint delta must be finite and positive")
-        start_positions = dict(
-            zip(start_joint_state.name, start_joint_state.position)
+    motion_request.goal_constraints = [
+        Constraints(
+            name=str(constraint_name),
+            position_constraints=[position],
+            orientation_constraints=[orientation],
         )
-        for joint_name in goal_joint_names:
-            name = str(joint_name)
-            if name not in start_positions:
-                raise ValueError(
-                    f"start joint state is missing constrained joint {name!r}"
-                )
-            position_value = float(start_positions[name])
-            if not math.isfinite(position_value):
-                raise ValueError(
-                    f"start position for constrained joint {name!r} is not finite"
-                )
-            joint_constraints.append(
+    ]
+    return request
+
+
+def build_position_ik_request(
+    *,
+    target_pose: Pose,
+    start_joint_state,
+    base_frame: str,
+    planning_link: str,
+    group_name: str,
+    timeout_s: float,
+    attempts: int,
+    avoid_collisions: bool,
+):
+    """Build a seeded, collision-aware IK service request without execution."""
+
+    request = GetPositionIK.Request()
+    ik_request = request.ik_request
+    ik_request.group_name = str(group_name)
+    ik_request.robot_state = RobotState(joint_state=start_joint_state)
+    ik_request.avoid_collisions = bool(avoid_collisions)
+    ik_request.ik_link_name = str(planning_link)
+    ik_request.pose_stamped = PoseStamped()
+    ik_request.pose_stamped.header.frame_id = str(base_frame)
+    ik_request.pose_stamped.pose = target_pose
+    timeout_ns = int(round(max(float(timeout_s), 0.0) * 1.0e9))
+    ik_request.timeout.sec = timeout_ns // 1_000_000_000
+    ik_request.timeout.nanosec = timeout_ns % 1_000_000_000
+    ik_request.attempts = max(int(attempts), 1)
+    return request
+
+
+def build_joint_motion_plan_request(
+    *,
+    target_joint_names,
+    target_joint_positions,
+    start_joint_state,
+    group_name: str,
+    planning_pipeline_id: str,
+    planner_id: str,
+    planning_attempts: int,
+    allowed_planning_time_s: float,
+    velocity_scaling: float,
+    acceleration_scaling: float,
+    joint_tolerance_rad: float,
+    constraint_name: str,
+):
+    """Build a joint-goal planning request for a separately validated IK result."""
+
+    names = [str(value) for value in target_joint_names]
+    positions = [float(value) for value in target_joint_positions]
+    if not names or len(names) != len(positions) or len(set(names)) != len(names):
+        raise ValueError("joint goal names and positions are empty or inconsistent")
+    tolerance = float(joint_tolerance_rad)
+    if not all(math.isfinite(value) for value in positions):
+        raise ValueError("joint goal positions must be finite")
+    if not math.isfinite(tolerance) or tolerance <= 0.0:
+        raise ValueError("joint goal tolerance must be finite and positive")
+
+    request = GetMotionPlan.Request()
+    motion_request = request.motion_plan_request
+    motion_request.group_name = str(group_name)
+    motion_request.pipeline_id = str(planning_pipeline_id)
+    motion_request.planner_id = str(planner_id)
+    motion_request.num_planning_attempts = int(planning_attempts)
+    motion_request.allowed_planning_time = float(allowed_planning_time_s)
+    motion_request.max_velocity_scaling_factor = float(velocity_scaling)
+    motion_request.max_acceleration_scaling_factor = float(acceleration_scaling)
+    motion_request.start_state = RobotState(joint_state=start_joint_state)
+    motion_request.goal_constraints = [
+        Constraints(
+            name=str(constraint_name),
+            joint_constraints=[
                 JointConstraint(
                     joint_name=name,
-                    position=position_value,
+                    position=position,
                     tolerance_above=tolerance,
                     tolerance_below=tolerance,
                     weight=1.0,
                 )
-            )
-
-    motion_request.goal_constraints = [
-        Constraints(
-            name=str(constraint_name),
-            joint_constraints=joint_constraints,
-            position_constraints=[position],
-            orientation_constraints=[orientation],
+                for name, position in zip(names, positions)
+            ],
         )
     ]
     return request
