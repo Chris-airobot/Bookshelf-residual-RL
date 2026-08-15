@@ -38,6 +38,10 @@ calibrated_preinsert_plan_only:
     maximum_trajectory_start_error_rad: 0.02
     maximum_trajectory_waypoint_joint_jump_rad: 0.20
     maximum_trajectory_endpoint_joint_delta_rad: 3.0
+    # Keep pose IK on the robot's current joint branch. This prevents a nearby
+    # TCP target from selecting an equivalent posture reached by a long turn.
+    require_near_current_goal_joints: true
+    maximum_goal_joint_delta_rad: 1.5
     maximum_trajectory_joint_path_length_rad: 10.0
     minimum_trajectory_duration_s: 0.10
     maximum_trajectory_duration_s: 90.0

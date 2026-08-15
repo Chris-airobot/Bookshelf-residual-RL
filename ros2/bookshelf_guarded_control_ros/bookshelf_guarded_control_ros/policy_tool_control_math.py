@@ -431,6 +431,8 @@ def joint_trajectory_sanity(
         "maximum_start_error_rad": None,
         "maximum_waypoint_joint_jump_rad": None,
         "maximum_endpoint_joint_delta_rad": None,
+        "largest_endpoint_delta_joint": None,
+        "per_joint": {},
         "joint_path_length_rad": None,
         "maximum_absolute_velocity_rad_s": None,
         "duration_s": None,
@@ -537,6 +539,8 @@ def joint_trajectory_sanity(
     start_error = float(np.max(np.abs(ordered_positions[0] - start)))
     endpoint_delta = float(np.max(np.abs(ordered_positions[-1] - start)))
     segments = np.diff(ordered_positions, axis=0)
+    signed_endpoint_deltas = ordered_positions[-1] - start
+    absolute_endpoint_deltas = np.abs(signed_endpoint_deltas)
     waypoint_jump = float(np.max(np.abs(segments)))
     path_length = float(np.sum(np.linalg.norm(segments, axis=1)))
     duration = float(times[-1])
@@ -545,11 +549,39 @@ def joint_trajectory_sanity(
         if velocity_rows
         else None
     )
+    per_joint = {}
+    for index, name in enumerate(expected):
+        joint_segments = segments[:, index]
+        joint_velocities = (
+            np.asarray(velocity_rows, dtype=np.float64)[:, name_indices[index]]
+            if velocity_rows
+            else None
+        )
+        per_joint[name] = {
+            "start_position_rad": float(start[index]),
+            "first_waypoint_position_rad": float(ordered_positions[0, index]),
+            "endpoint_position_rad": float(ordered_positions[-1, index]),
+            "signed_endpoint_delta_rad": float(signed_endpoint_deltas[index]),
+            "absolute_endpoint_delta_rad": float(absolute_endpoint_deltas[index]),
+            "absolute_endpoint_delta_deg": float(
+                math.degrees(absolute_endpoint_deltas[index])
+            ),
+            "path_travel_rad": float(np.sum(np.abs(joint_segments))),
+            "maximum_waypoint_jump_rad": float(np.max(np.abs(joint_segments))),
+            "maximum_absolute_velocity_rad_s": (
+                float(np.max(np.abs(joint_velocities)))
+                if joint_velocities is not None
+                else None
+            ),
+        }
+    largest_endpoint_index = int(np.argmax(absolute_endpoint_deltas))
     report.update(
         {
             "maximum_start_error_rad": start_error,
             "maximum_waypoint_joint_jump_rad": waypoint_jump,
             "maximum_endpoint_joint_delta_rad": endpoint_delta,
+            "largest_endpoint_delta_joint": expected[largest_endpoint_index],
+            "per_joint": per_joint,
             "joint_path_length_rad": path_length,
             "maximum_absolute_velocity_rad_s": maximum_velocity,
             "duration_s": duration,

@@ -345,6 +345,16 @@ def test_joint_trajectory_sanity_accepts_small_reordered_arm_path():
     assert report["passed"] is True
     assert math.isclose(report["maximum_endpoint_joint_delta_rad"], 0.01)
     assert report["maximum_absolute_velocity_rad_s"] == 0.02
+    assert report["largest_endpoint_delta_joint"] == "joint1"
+    assert list(report["per_joint"]) == [f"joint{index}" for index in range(1, 8)]
+    assert math.isclose(
+        report["per_joint"]["joint1"]["endpoint_position_rad"], 0.01
+    )
+    assert math.isclose(
+        report["per_joint"]["joint1"]["absolute_endpoint_delta_deg"],
+        math.degrees(0.01),
+    )
+    assert math.isclose(report["per_joint"]["joint1"]["path_travel_rad"], 0.01)
 
 
 def test_joint_trajectory_sanity_rejects_wrong_joints_and_missing_velocity():

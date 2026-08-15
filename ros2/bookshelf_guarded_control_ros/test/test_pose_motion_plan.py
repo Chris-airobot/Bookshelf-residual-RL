@@ -34,6 +34,8 @@ def test_pose_plan_request_uses_current_state_and_bounded_pose_constraints():
         position_tolerance_m=0.001,
         orientation_tolerance_rad=0.017,
         constraint_name="calibrated_preinsert_test",
+        goal_joint_names=joint_state.name,
+        maximum_goal_joint_delta_rad=1.5,
     )
 
     motion = request.motion_plan_request
@@ -53,3 +55,42 @@ def test_pose_plan_request_uses_current_state_and_bounded_pose_constraints():
     primitive = constraints.position_constraints[0].constraint_region.primitives[0]
     assert list(primitive.dimensions) == [0.002, 0.002, 0.002]
     assert constraints.orientation_constraints[0].orientation == pose.orientation
+    assert [constraint.joint_name for constraint in constraints.joint_constraints] == list(
+        joint_state.name
+    )
+    for index, constraint in enumerate(constraints.joint_constraints):
+        assert constraint.position == joint_state.position[index]
+        assert constraint.tolerance_above == 1.5
+        assert constraint.tolerance_below == 1.5
+
+
+def test_pose_plan_request_rejects_missing_current_goal_joint():
+    pose = Pose()
+    pose.orientation.w = 1.0
+    joint_state = JointState(name=["joint1"], position=[0.0])
+
+    try:
+        build_pose_motion_plan_request(
+            target_pose=pose,
+            start_joint_state=joint_state,
+            base_frame="link_base",
+            planning_link="link_tcp",
+            group_name="xarm7",
+            workspace_min_xyz=[0.20, -0.60, 0.05],
+            workspace_max_xyz=[1.00, 0.60, 1.00],
+            planning_pipeline_id="",
+            planner_id="",
+            planning_attempts=3,
+            allowed_planning_time_s=5.0,
+            velocity_scaling=0.05,
+            acceleration_scaling=0.05,
+            position_tolerance_m=0.001,
+            orientation_tolerance_rad=0.017,
+            constraint_name="missing_joint_test",
+            goal_joint_names=["joint1", "joint2"],
+            maximum_goal_joint_delta_rad=1.5,
+        )
+    except ValueError as error:
+        assert "joint2" in str(error)
+    else:
+        raise AssertionError("missing constrained joint was accepted")

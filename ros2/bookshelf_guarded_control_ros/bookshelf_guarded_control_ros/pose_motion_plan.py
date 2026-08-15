@@ -1,9 +1,12 @@
 """Shared construction of collision-aware MoveIt pose-plan requests."""
 
+import math
+
 from geometry_msgs.msg import Pose
 from moveit_msgs.msg import (
     BoundingVolume,
     Constraints,
+    JointConstraint,
     OrientationConstraint,
     PositionConstraint,
     RobotState,
@@ -30,6 +33,8 @@ def build_pose_motion_plan_request(
     position_tolerance_m: float,
     orientation_tolerance_rad: float,
     constraint_name: str,
+    goal_joint_names=(),
+    maximum_goal_joint_delta_rad: float | None = None,
 ):
     """Build a service request only; this function cannot execute a trajectory."""
 
@@ -73,9 +78,39 @@ def build_pose_motion_plan_request(
     orientation.absolute_z_axis_tolerance = float(orientation_tolerance_rad)
     orientation.weight = 1.0
 
+    joint_constraints = []
+    if maximum_goal_joint_delta_rad is not None:
+        tolerance = float(maximum_goal_joint_delta_rad)
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("maximum goal joint delta must be finite and positive")
+        start_positions = dict(
+            zip(start_joint_state.name, start_joint_state.position)
+        )
+        for joint_name in goal_joint_names:
+            name = str(joint_name)
+            if name not in start_positions:
+                raise ValueError(
+                    f"start joint state is missing constrained joint {name!r}"
+                )
+            position_value = float(start_positions[name])
+            if not math.isfinite(position_value):
+                raise ValueError(
+                    f"start position for constrained joint {name!r} is not finite"
+                )
+            joint_constraints.append(
+                JointConstraint(
+                    joint_name=name,
+                    position=position_value,
+                    tolerance_above=tolerance,
+                    tolerance_below=tolerance,
+                    weight=1.0,
+                )
+            )
+
     motion_request.goal_constraints = [
         Constraints(
             name=str(constraint_name),
+            joint_constraints=joint_constraints,
             position_constraints=[position],
             orientation_constraints=[orientation],
         )

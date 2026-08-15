@@ -49,6 +49,13 @@ def test_trajectory_sanity_precedes_valid_plan_publication():
     assert sanity < valid < publish
 
 
+def test_invalid_joint_branch_request_is_reported_fail_closed():
+    source = NODE.read_text(encoding="utf-8")
+    assert "except ValueError as exception:" in source
+    assert 'f"motion plan request is invalid: {exception}"' in source
+    assert '"goal_joint_branch_constraint"' in source
+
+
 def test_launch_combines_target_calculation_and_plan_only_node():
     source = LAUNCH.read_text(encoding="utf-8")
     assert '"target_config"' in source
@@ -98,6 +105,8 @@ def test_default_configuration_is_bounded_and_global():
         "maximum_target_translation_m: 0.75",
         "maximum_target_rotation_deg: 5.0",
         "require_trajectory_sanity: true",
+        "require_near_current_goal_joints: true",
+        "maximum_goal_joint_delta_rad: 1.5",
         "guarded_policy_tool_executor",
     )
     for value in required:

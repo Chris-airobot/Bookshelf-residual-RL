@@ -205,6 +205,8 @@ class CalibratedPreinsertPlanOnlyNode(Node):
         self.declare_parameter("maximum_trajectory_start_error_rad", 0.02)
         self.declare_parameter("maximum_trajectory_waypoint_joint_jump_rad", 0.20)
         self.declare_parameter("maximum_trajectory_endpoint_joint_delta_rad", 3.0)
+        self.declare_parameter("require_near_current_goal_joints", True)
+        self.declare_parameter("maximum_goal_joint_delta_rad", 1.5)
         self.declare_parameter("maximum_trajectory_joint_path_length_rad", 10.0)
         self.declare_parameter("minimum_trajectory_duration_s", 0.10)
         self.declare_parameter("maximum_trajectory_duration_s", 90.0)
@@ -419,6 +421,13 @@ class CalibratedPreinsertPlanOnlyNode(Node):
         )
 
     def _motion_plan_request(self, transform_base_tcp_target, target_id):
+        expected_joint_names = tuple(
+            str(value)
+            for value in self.get_parameter("expected_arm_joint_names").value
+        )
+        require_near_current = bool(
+            self.get_parameter("require_near_current_goal_joints").value
+        )
         return build_pose_motion_plan_request(
             target_pose=_transform_to_pose(transform_base_tcp_target),
             start_joint_state=self.latest_joint_state,
@@ -446,6 +455,12 @@ class CalibratedPreinsertPlanOnlyNode(Node):
                 self.get_parameter("orientation_tolerance_rad").value
             ),
             constraint_name=f"calibrated_preinsert_{target_id[:12]}",
+            goal_joint_names=(expected_joint_names if require_near_current else ()),
+            maximum_goal_joint_delta_rad=(
+                float(self.get_parameter("maximum_goal_joint_delta_rad").value)
+                if require_near_current
+                else None
+            ),
         )
 
     def _timer_callback(self):
@@ -480,9 +495,17 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             self._publish_invalid("MoveIt planning service is unavailable", report=report)
             return
 
+        try:
+            request = self._motion_plan_request(target, target_id)
+        except ValueError as exception:
+            self._publish_invalid(
+                f"motion plan request is invalid: {exception}", report=report
+            )
+            return
+
         self.plan_pending = True
         self.pending = (target, target_id, report)
-        future = self.plan_client.call_async(self._motion_plan_request(target, target_id))
+        future = self.plan_client.call_async(request)
         future.add_done_callback(self._plan_response_callback)
         self._log_once(
             f"planning:{target_id}",
@@ -567,6 +590,15 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             "geometric_target_used_for_global_plan": True,
             "scene_status": self.latest_scene_status,
             "blocked_nodes": self._blocked_nodes_present(),
+            "goal_joint_branch_constraint": {
+                "required": bool(
+                    self.get_parameter("require_near_current_goal_joints").value
+                ),
+                "center": "current_joint_state",
+                "maximum_delta_rad": float(
+                    self.get_parameter("maximum_goal_joint_delta_rad").value
+                ),
+            },
         }
 
     def _publish_target(self, transform):
