@@ -187,7 +187,6 @@ class CalibratedPreinsertPlanOnlyNode(Node):
         self.declare_parameter("planning_service", "/plan_kinematic_path")
         self.declare_parameter("ik_service", "/compute_ik")
         self.declare_parameter("ik_timeout_s", 1.0)
-        self.declare_parameter("ik_attempts", 10)
         self.declare_parameter("ik_avoid_collisions", True)
         self.declare_parameter("planning_pipeline_id", "")
         self.declare_parameter("planner_id", "")
@@ -444,7 +443,6 @@ class CalibratedPreinsertPlanOnlyNode(Node):
             planning_link=self.planning_link,
             group_name=self.group_name,
             timeout_s=float(self.get_parameter("ik_timeout_s").value),
-            attempts=int(self.get_parameter("ik_attempts").value),
             avoid_collisions=bool(
                 self.get_parameter("ik_avoid_collisions").value
             ),

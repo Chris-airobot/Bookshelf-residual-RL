@@ -94,7 +94,6 @@ def build_position_ik_request(
     planning_link: str,
     group_name: str,
     timeout_s: float,
-    attempts: int,
     avoid_collisions: bool,
 ):
     """Build a seeded, collision-aware IK service request without execution."""
@@ -111,7 +110,6 @@ def build_position_ik_request(
     timeout_ns = int(round(max(float(timeout_s), 0.0) * 1.0e9))
     ik_request.timeout.sec = timeout_ns // 1_000_000_000
     ik_request.timeout.nanosec = timeout_ns % 1_000_000_000
-    ik_request.attempts = max(int(attempts), 1)
     return request
 
 

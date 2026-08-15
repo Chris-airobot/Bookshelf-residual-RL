@@ -8,7 +8,6 @@ calibrated_preinsert_plan_only:
     planning_service: /plan_kinematic_path
     ik_service: /compute_ik
     ik_timeout_s: 1.0
-    ik_attempts: 10
     ik_avoid_collisions: true
     planning_pipeline_id: ""
     planner_id: ""

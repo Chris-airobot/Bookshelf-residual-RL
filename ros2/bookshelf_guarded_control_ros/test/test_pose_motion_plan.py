@@ -73,7 +73,6 @@ def test_seeded_ik_and_validated_joint_goal_requests_are_separate():
         planning_link="link_tcp",
         group_name="xarm7",
         timeout_s=1.25,
-        attempts=10,
         avoid_collisions=True,
     ).ik_request
     assert ik_request.group_name == "xarm7"
@@ -83,7 +82,6 @@ def test_seeded_ik_and_validated_joint_goal_requests_are_separate():
     assert ik_request.avoid_collisions is True
     assert ik_request.timeout.sec == 1
     assert ik_request.timeout.nanosec == 250_000_000
-    assert ik_request.attempts == 10
 
     motion = build_joint_motion_plan_request(
         target_joint_names=joint_state.name,
