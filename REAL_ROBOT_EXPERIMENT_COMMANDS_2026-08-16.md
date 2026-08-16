@@ -28,6 +28,7 @@ export INSTALL=/home/riot/Chris/bookshelf_unified_ws/install
 export TRIAL_NAME=physical_trial_20260816_01
 export TRIAL_SLOT_CONFIG=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_20260813_01/trial_static_slot.yaml
 export SCENE_CONFIG=/home/riot/BookshelfFiles/experiment_configs/physical_trial_20260813_01_bookshelf_scene.yaml
+export CALIBRATION_CONFIG=/home/riot/Chris/bookshelf-unified/ros2/bookshelf_shadow_ros/config/spine_mount_book_calibration_candidate.yaml
 export POLICY=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz
 export ENVELOPE=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json
 EOF
@@ -90,6 +91,53 @@ The calibrated detector also publishes the cyan live book box on
 `/bookshelf_policy/book_boxes`; compare it with the physical book before
 accepting any corrected scene transform.
 
+### 2A. Stable disagreement: generate synchronized candidates and stop
+
+Use this only when the live candidate is stable and the held-book gate fails
+because the current rigid grasp differs from the saved scene. This command
+writes unapproved files; it does not change the active scene, request a plan, or
+command hardware.
+
+```bash
+source /tmp/bookshelf_trial_env.sh
+
+HELD_REPORT=/home/riot/BookshelfFiles/experiment_logs/environment_checks/$TRIAL_NAME/held_book_pose_check/held_book_pose_check.json
+CONTEXT=$REPO/ros2/bookshelf_shadow_ros/config/recorded_preinsert_context_2026_08_14.json
+BASE_TARGET=$REPO/ros2/bookshelf_shadow_ros/config/calibrated_preinsert_target.yaml
+CANDIDATE_DIR=/home/riot/BookshelfFiles/experiment_configs/book_candidates/$(date +%Y-%m-%d_%H-%M-%S)
+
+ros2 run bookshelf_shadow_ros supervised_book_calibration_candidate \
+  --held-book-report "$HELD_REPORT" \
+  --scene-config "$SCENE_CONFIG" \
+  --eef-tcp-context "$CONTEXT" \
+  --base-target-config "$BASE_TARGET" \
+  --output-dir "$CANDIDATE_DIR"
+
+python3 -m json.tool \
+  "$CANDIDATE_DIR/supervised_book_calibration_report.json"
+```
+
+Require 30/30 stable samples, policy-tool parity, zero-delta TCP identity, and
+the offline pre-insertion regression to pass. Require no unexpected observation
+clips and every safety authorization value to remain false.
+
+After human review, append the candidate paths to the trial environment:
+
+```bash
+cat >> /tmp/bookshelf_trial_env.sh <<EOF
+export CALIBRATION_CONFIG=$CANDIDATE_DIR/supervised_book_calibration_candidate.yaml
+export SCENE_CONFIG=$CANDIDATE_DIR/supervised_bookshelf_scene_candidate.yaml
+EOF
+```
+
+Stop and restart Terminal 1 so the checker reloads the candidate scene. Rerun
+Section 2 and require the held-book gate to pass 30/30. The generated scene
+keeps `hardware_measurements_confirmed: false` and
+`allow_local_insertion: false`. Do not continue to Section 3 until a person at
+the robot has reviewed the candidate against the physical book. After setting
+only `hardware_measurements_confirmed: true`, restart Terminal 1 once more so
+the report hash matches the reviewed scene. Keep `allow_local_insertion: false`.
+
 ## 3. Riot PC Terminal 2 - Fresh Global Plan Only
 
 ```bash
@@ -100,6 +148,7 @@ echo "$RUN" > /tmp/bookshelf_preinsert_run_path.txt
 ros2 launch bookshelf_guarded_control_ros \
   calibrated_preinsert_spine_mount_candidate_plan_only.launch.py \
   target_config:="$TRIAL_SLOT_CONFIG" \
+  candidate_config:="$CALIBRATION_CONFIG" \
   scene_config:="$SCENE_CONFIG" \
   output_dir:="$RUN"
 ```
@@ -158,7 +207,12 @@ DEFAULT_CONFIG=$REPO/ros2/bookshelf_guarded_control_ros/config/guarded_preinsert
 PHYSICAL_CONFIG=/home/riot/BookshelfFiles/experiment_configs/guarded_preinsert_executor_physical.yaml
 SCENE_SHA=$(sha256sum "$SCENE_CONFIG" | awk '{print $1}')
 TOKEN=$(openssl rand -hex 16)
-TARGET_STATUS=derived_unverified_sim_to_xarm_spine_mount_candidate_2026_08_14
+TARGET_STATUS=$(python3 - "$CALIBRATION_CONFIG" <<'PY'
+import sys, yaml
+data = yaml.safe_load(open(sys.argv[1]))
+print(data["calibrated_preinsert_target"]["ros__parameters"]["policy_tool_transform_status"])
+PY
+)
 
 python3 - "$DEFAULT_CONFIG" "$PHYSICAL_CONFIG" "$SCENE_SHA" "$TOKEN" "$TARGET_STATUS" <<'PY'
 import pathlib, sys, yaml

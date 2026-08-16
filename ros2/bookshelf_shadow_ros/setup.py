@@ -54,6 +54,8 @@ setup(
             "bookshelf_shadow_ros.physical_experiment_preflight:main",
             "book_calibration_candidate_check = "
             "bookshelf_shadow_ros.book_calibration_candidate_check:main",
+            "supervised_book_calibration_candidate = "
+            "bookshelf_shadow_ros.supervised_book_calibration_candidate:main",
             "offline_scene_visualizer = "
             "bookshelf_shadow_ros.offline_scene_visualizer_node:main",
         ],

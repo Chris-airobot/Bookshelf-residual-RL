@@ -182,6 +182,43 @@ ros2 launch bookshelf_shadow_ros \
 This launch contains no IK, planner, executor, trajectory, controller,
 gripper, or robot-command node.
 
+### Supervised candidate from a current rigid grasp
+
+If the live held-book gate is stable but disagrees with the recorded grasp, do
+not loosen the gate and do not update only the MoveIt box. Generate synchronized
+unapproved candidates from the gate's 30-sample mean:
+
+```bash
+HELD_REPORT=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_20260816_bookcheck_01/held_book_pose_check/held_book_pose_check.json
+SOURCE_SCENE=/home/riot/BookshelfFiles/experiment_configs/physical_trial_20260813_01_bookshelf_scene.yaml
+CONTEXT=$PWD/ros2/bookshelf_shadow_ros/config/recorded_preinsert_context_2026_08_14.json
+BASE_TARGET=$PWD/ros2/bookshelf_shadow_ros/config/calibrated_preinsert_target.yaml
+OUTPUT=/home/riot/BookshelfFiles/experiment_configs/book_candidates/$(date +%Y-%m-%d_%H-%M-%S)
+
+ros2 run bookshelf_shadow_ros supervised_book_calibration_candidate \
+  --held-book-report "$HELD_REPORT" \
+  --scene-config "$SOURCE_SCENE" \
+  --eef-tcp-context "$CONTEXT" \
+  --base-target-config "$BASE_TARGET" \
+  --output-dir "$OUTPUT"
+```
+
+The command refuses incomplete, unstable, or non-read-only reports. It derives
+`T_link_eef_book` from the stable `T_link_tcp_book`, re-derives the virtual
+policy tool while preserving simulator `T_book_policy_tool`, runs the recorded
+pre-insertion regression, and writes:
+
+- `supervised_book_calibration_candidate.yaml` for target and observation nodes;
+- `supervised_bookshelf_scene_candidate.yaml` for the matching MoveIt box;
+- `supervised_book_calibration_report.json` with hashes and safety results.
+
+Both scene review holds are forced to `false`; generation never selects the
+candidate. Restart the observation bringup with the candidate scene and require
+the 30-sample held-book gate to pass. The candidate target may then be inspected
+read-only by passing it as `candidate_config` to
+`calibrated_preinsert_spine_mount_candidate.launch.py`. Do not plan or execute
+until the numerical checks and the physical/RViz review both pass.
+
 ## Calibrated static-slot shadow test
 
 `policy_calibrated_static_shadow.launch.py` combines two recorded quantities:
