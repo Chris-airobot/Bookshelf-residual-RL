@@ -18,6 +18,48 @@ MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
+CURRENT_RESET_NOISE = (
+    math.radians(1.5),
+    0.003,
+    0.003,
+    0.0015,
+    math.radians(3.0),
+)
+FINAL_TRAINING_RESET_NOISE = (
+    math.radians(3.0),
+    0.008,
+    0.006,
+    0.003,
+    math.radians(8.0),
+)
+RESET_NOISE_KEYS = (
+    "arm_joint_noise",
+    "grasp_x_jitter",
+    "grasp_y_jitter",
+    "grasp_z_jitter",
+    "grasp_yaw_jitter",
+)
+
+
+def scaled_training_reset_noise(scale: float) -> tuple[float, ...]:
+    """Scale the final training randomization while preserving its proportions."""
+
+    value = float(scale)
+    if value < 0.0 or not math.isfinite(value):
+        raise ValueError("reset-noise scale must be finite and non-negative")
+    return tuple(value * maximum for maximum in FINAL_TRAINING_RESET_NOISE)
+
+
+def resolve_reset_noise(
+    *, old_reset_noise: bool, reset_noise_scale: float | None
+) -> tuple[float, ...]:
+    if old_reset_noise and reset_noise_scale is not None:
+        raise ValueError("--old-reset-noise and --reset-noise-scale are mutually exclusive")
+    if reset_noise_scale is not None:
+        return scaled_training_reset_noise(reset_noise_scale)
+    return FINAL_TRAINING_RESET_NOISE if old_reset_noise else CURRENT_RESET_NOISE
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("output", type=Path)
@@ -25,12 +67,24 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=20260812)
     parser.add_argument("--slot-clearance", type=float, default=0.003)
     parser.add_argument("--old-reset-noise", action="store_true")
+    parser.add_argument(
+        "--reset-noise-scale",
+        type=float,
+        default=None,
+        help=(
+            "Scale all final-training reset perturbation maxima together; "
+            "1.0 is the training boundary and values above 1.0 are OOD."
+        ),
+    )
     args = parser.parse_args()
 
-    if args.old_reset_noise:
-        noise = (math.radians(3.0), 0.008, 0.006, 0.003, math.radians(8.0))
-    else:
-        noise = (math.radians(1.5), 0.003, 0.003, 0.0015, math.radians(3.0))
+    try:
+        noise = resolve_reset_noise(
+            old_reset_noise=args.old_reset_noise,
+            reset_noise_scale=args.reset_noise_scale,
+        )
+    except ValueError as error:
+        parser.error(str(error))
     output = MODULE.write_generated_frozen_scenario_bank(
         args.output,
         scenario_count=args.scenarios,
