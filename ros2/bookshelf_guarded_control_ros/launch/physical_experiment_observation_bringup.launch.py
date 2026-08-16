@@ -4,6 +4,8 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -36,6 +38,13 @@ def generate_launch_description():
             "frozen_check",
         ]
     )
+    held_book_check_output = PathJoinSubstitution(
+        [
+            LaunchConfiguration("environment_check_output_root"),
+            LaunchConfiguration("trial_name"),
+            "held_book_pose_check",
+        ]
+    )
 
     return LaunchDescription(
         [
@@ -46,6 +55,13 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "trial_slot_config",
                 description="Human-approved trial_static_slot.yaml.",
+            ),
+            DeclareLaunchArgument(
+                "scene_config",
+                description=(
+                    "Reviewed physical scene YAML containing the fixed "
+                    "T_link_tcp_book used by MoveIt."
+                ),
             ),
             DeclareLaunchArgument(
                 "repository_path",
@@ -78,6 +94,19 @@ def generate_launch_description():
             DeclareLaunchArgument("record_camera", default_value="true"),
             DeclareLaunchArgument("minimum_free_space_gb", default_value="5.0"),
             DeclareLaunchArgument(
+                "enable_calibrated_book_detection",
+                default_value="true",
+                description=(
+                    "Detect ArUco Original ID 0 and publish the measured book frame."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "book_detection_target_samples", default_value="250"
+            ),
+            DeclareLaunchArgument(
+                "book_pose_required_stable_samples", default_value="30"
+            ),
+            DeclareLaunchArgument(
                 "show_rviz",
                 default_value="false",
                 description="Keep false over SSH; opt in only on the Riot desktop.",
@@ -86,16 +115,23 @@ def generate_launch_description():
                 msg=(
                     "Starting PHYSICAL EXPERIMENT OBSERVATION BRINGUP: xArm, "
                     "camera, TF, MoveIt, automatic logging, RGB-D slot detection, "
-                    "and frozen-slot verification. This launch starts no policy "
-                    "executor, plan request, gripper command, or trajectory command."
+                    "frozen-slot verification, and live held-book pose checking. "
+                    "This launch starts no policy executor, plan request, gripper "
+                    "command, or trajectory command."
                 )
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(hardware_launch),
                 launch_arguments={
                     "enable_robot_control": "true",
-                    "enable_calibrated_book_detection": "false",
+                    "enable_calibrated_book_detection": LaunchConfiguration(
+                        "enable_calibrated_book_detection"
+                    ),
                     "enable_legacy_three_book_detection": "false",
+                    "calibration_output_dir": held_book_check_output,
+                    "calibration_target_samples": LaunchConfiguration(
+                        "book_detection_target_samples"
+                    ),
                     "show_rviz": LaunchConfiguration("show_rviz"),
                 }.items(),
             ),
@@ -122,6 +158,24 @@ def generate_launch_description():
                     "output_dir": frozen_check_output,
                     "start_live_detector": "true",
                 }.items(),
+            ),
+            Node(
+                package="bookshelf_guarded_control_ros",
+                executable="held_book_pose_check",
+                name="held_book_pose_check",
+                output="screen",
+                parameters=[
+                    {
+                        "scene_config_path": LaunchConfiguration("scene_config"),
+                        "required_stable_samples": ParameterValue(
+                            LaunchConfiguration(
+                                "book_pose_required_stable_samples"
+                            ),
+                            value_type=int,
+                        ),
+                        "output_dir": held_book_check_output,
+                    }
+                ],
             ),
         ]
     )

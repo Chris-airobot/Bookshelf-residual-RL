@@ -65,6 +65,8 @@ class BookshelfSceneManagerNode(Node):
         self.latest_slot_pose_ns = None
         self.latest_activation_ready = False
         self.latest_activation_ns = None
+        self.latest_held_book_pose_check_passed = False
+        self.latest_held_book_pose_check_ns = None
         self.current_mode = None
         self.scene_applied = False
         self.apply_pending = False
@@ -101,6 +103,12 @@ class BookshelfSceneManagerNode(Node):
             self._activation_callback,
             10,
         )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("held_book_pose_check_topic").value),
+            self._held_book_pose_check_callback,
+            10,
+        )
         self.create_service(
             SetBool,
             str(self.get_parameter("set_local_insertion_service").value),
@@ -131,6 +139,12 @@ class BookshelfSceneManagerNode(Node):
         )
         self.declare_parameter("slot_message_max_age_s", 1.0)
         self.declare_parameter("activation_max_age_s", 0.50)
+        self.declare_parameter("require_held_book_pose_check", True)
+        self.declare_parameter(
+            "held_book_pose_check_topic",
+            "/bookshelf_scene/held_book_pose_check_passed",
+        )
+        self.declare_parameter("held_book_pose_check_max_age_s", 1.0)
         self.declare_parameter("maximum_shelf_front_plane_error_m", 0.005)
 
         self.declare_parameter("shelf_object_id", "bookshelf_global_keepout")
@@ -198,6 +212,10 @@ class BookshelfSceneManagerNode(Node):
         self.latest_activation_ready = bool(message.data)
         self.latest_activation_ns = self._now_ns()
 
+    def _held_book_pose_check_callback(self, message: Bool):
+        self.latest_held_book_pose_check_passed = bool(message.data)
+        self.latest_held_book_pose_check_ns = self._now_ns()
+
     def _fresh(self, timestamp_ns, maximum_age_s: float) -> bool:
         if timestamp_ns is None:
             return False
@@ -222,6 +240,9 @@ class BookshelfSceneManagerNode(Node):
             float(self.get_parameter("slot_message_max_age_s").value),
         ):
             return "approved static slot pose is stale"
+        held_book_error = self._held_book_pose_check_error()
+        if held_book_error:
+            return held_book_error
         try:
             error = self._shelf_front_error()
         except ValueError as exception:
@@ -234,6 +255,20 @@ class BookshelfSceneManagerNode(Node):
                 "shelf box front face does not coincide with the slot mouth: "
                 f"error={error:.6f} m"
             )
+        return None
+
+    def _held_book_pose_check_error(self) -> str | None:
+        if not bool(self.get_parameter("require_held_book_pose_check").value):
+            return None
+        if self.latest_held_book_pose_check_ns is None:
+            return "live held-book pose check is unavailable"
+        if not self._fresh(
+            self.latest_held_book_pose_check_ns,
+            float(self.get_parameter("held_book_pose_check_max_age_s").value),
+        ):
+            return "live held-book pose check is stale"
+        if not self.latest_held_book_pose_check_passed:
+            return "live held-book pose disagrees with the configured MoveIt box"
         return None
 
     def _set_local_insertion_callback(self, request, response):
@@ -254,6 +289,13 @@ class BookshelfSceneManagerNode(Node):
             )
             return response
 
+        held_book_error = self._held_book_pose_check_error()
+        if held_book_error:
+            response.success = False
+            response.message = held_book_error
+            self.last_reason = held_book_error
+            self._publish_status()
+            return response
         try:
             front_error = self._shelf_front_error()
         except ValueError as exception:
@@ -298,12 +340,14 @@ class BookshelfSceneManagerNode(Node):
         return response
 
     def _timer_callback(self):
+        error = self._global_input_error()
         if not self.scene_applied and not self.apply_pending:
-            error = self._global_input_error()
             if error is None:
                 self._request_scene(GLOBAL_APPROACH)
             else:
                 self.last_reason = error
+        elif error is not None:
+            self.last_reason = error
         self._publish_status()
 
     def _request_scene(self, mode: str) -> bool:
@@ -444,6 +488,14 @@ class BookshelfSceneManagerNode(Node):
                 self.get_parameter("allow_local_insertion").value
             ),
             "activation_ready": self.latest_activation_ready,
+            "held_book_pose_check_required": bool(
+                self.get_parameter("require_held_book_pose_check").value
+            ),
+            "held_book_pose_check_passed": self.latest_held_book_pose_check_passed,
+            "held_book_pose_check_fresh": self._fresh(
+                self.latest_held_book_pose_check_ns,
+                float(self.get_parameter("held_book_pose_check_max_age_s").value),
+            ),
             "reason": self.last_reason,
             "scene_config": self._config_provenance(),
             "geometry": {
@@ -483,6 +535,12 @@ class BookshelfSceneManagerNode(Node):
                         "held_book_center_tcp_xyz"
                     ).value
                 ],
+                "held_book_quaternion_tcp_xyzw": [
+                    float(value)
+                    for value in self.get_parameter(
+                        "held_book_quaternion_tcp_xyzw"
+                    ).value
+                ],
             },
             "objects": {
                 "bookshelf_keepout": bool(
@@ -518,7 +576,11 @@ class BookshelfSceneManagerNode(Node):
     def _publish_status(self):
         status = self._status()
         self.status_publisher.publish(String(data=json.dumps(status, sort_keys=True)))
-        ready = bool(self.scene_applied and self.current_mode is not None)
+        ready = bool(
+            self.scene_applied
+            and self.current_mode is not None
+            and self._held_book_pose_check_error() is None
+        )
         self.ready_publisher.publish(Bool(data=ready))
         self.mode_publisher.publish(String(data=self.current_mode or "unconfigured"))
 

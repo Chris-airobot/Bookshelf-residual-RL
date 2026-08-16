@@ -87,5 +87,10 @@ def test_automatic_logger_records_approval_and_execution_evidence():
         "/bookshelf_preinsert/execution_report",
         "/bookshelf_guarded/approve_once",
         "/bookshelf_guarded/execution_report",
+        "/bookshelf_scene/held_book_pose_check_passed",
+        "/bookshelf_scene/held_book_pose_check_status",
+        "/bookshelf_scene/live_held_book_pose_tcp",
+        "/bookshelf_scene/configured_held_book_pose_tcp",
+        "/bookshelf_policy/book_boxes",
     ):
         assert topic in source

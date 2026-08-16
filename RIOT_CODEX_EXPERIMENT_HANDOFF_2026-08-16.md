@@ -82,7 +82,11 @@ book, robot, scene, target, or joint state changes.
 ## Verified Software Capabilities
 
 - `physical_experiment_observation_bringup.launch.py` combines robot, camera,
-  TF, MoveIt, automatic logging, slot detection, and frozen-slot checking.
+  TF, MoveIt, automatic logging, slot detection, frozen-slot checking, calibrated
+  held-book marker detection, and a live-versus-configured book-pose gate.
+- The global planning scene remains unavailable until the marker-derived
+  `T_link_tcp_book` agrees with the frozen attached-book transform for 30 stable
+  samples. The gate is read-only and never rewrites the scene YAML.
 - Observation bringup starts no trajectory executor.
 - The calibrated pre-insertion bridge performs seeded collision-aware IK and
   MoveIt planning only.

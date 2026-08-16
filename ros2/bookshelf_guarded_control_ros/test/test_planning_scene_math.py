@@ -145,6 +145,8 @@ def test_runtime_scene_status_requires_local_mode_table_and_book():
         "mode": LOCAL_INSERTION,
         "scene_applied": True,
         "hardware_measurements_confirmed": True,
+        "held_book_pose_check_passed": True,
+        "held_book_pose_check_fresh": True,
         "objects": {
             "bookshelf_keepout": False,
             "table": True,
@@ -171,6 +173,8 @@ def test_global_scene_status_requires_keepout_table_and_held_book():
         "mode": GLOBAL_APPROACH,
         "scene_applied": True,
         "hardware_measurements_confirmed": True,
+        "held_book_pose_check_passed": True,
+        "held_book_pose_check_fresh": True,
         "objects": {
             "bookshelf_keepout": True,
             "table": True,
@@ -187,3 +191,9 @@ def test_global_scene_status_requires_keepout_table_and_held_book():
         "objects": {**status["objects"], "bookshelf_keepout": False},
     }
     assert "keep-out" in global_scene_status_error(no_keepout)
+
+    failed_book_check = {**status, "held_book_pose_check_passed": False}
+    assert "held-book" in global_scene_status_error(failed_book_check)
+
+    stale_book_check = {**status, "held_book_pose_check_fresh": False}
+    assert "stale" in global_scene_status_error(stale_book_check)

@@ -173,6 +173,10 @@ def scene_status_error(
         return "planning scene has not been applied"
     if not bool(status.get("hardware_measurements_confirmed")):
         return "planning scene hardware measurements are unconfirmed"
+    if not bool(status.get("held_book_pose_check_passed")):
+        return "live held-book pose check has not passed"
+    if not bool(status.get("held_book_pose_check_fresh")):
+        return "live held-book pose check is stale"
     objects = status.get("objects")
     if not isinstance(objects, dict):
         return "planning scene object status is unavailable"
@@ -199,6 +203,10 @@ def global_scene_status_error(status) -> str | None:
         return "planning scene has not been applied"
     if not bool(status.get("hardware_measurements_confirmed")):
         return "planning scene hardware measurements are unconfirmed"
+    if not bool(status.get("held_book_pose_check_passed")):
+        return "live held-book pose check has not passed"
+    if not bool(status.get("held_book_pose_check_fresh")):
+        return "live held-book pose check is stale"
     objects = status.get("objects")
     if not isinstance(objects, dict):
         return "planning scene object status is unavailable"

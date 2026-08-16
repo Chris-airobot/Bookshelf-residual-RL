@@ -13,6 +13,7 @@ collision scene, and complete RViz path have been checked against the real setup
 
 - Stop if the physical book is not rigidly held in the reviewed grasp.
 - Stop if live and frozen slot poses disagree.
+- Stop if the live marker-derived book pose and configured attached-book box disagree.
 - Stop if the robot, book, shelf, table, target, or path differs from RViz.
 - Stop if any person cannot reach the robot stop control immediately.
 - Never loosen a failed trajectory, IK, scene, provenance, or joint-drift gate.
@@ -53,6 +54,7 @@ ros2 launch bookshelf_guarded_control_ros \
   physical_experiment_observation_bringup.launch.py \
   trial_name:="$TRIAL_NAME" \
   trial_slot_config:="$TRIAL_SLOT_CONFIG" \
+  scene_config:="$SCENE_CONFIG" \
   show_rviz:=false
 ```
 
@@ -68,6 +70,8 @@ source /tmp/bookshelf_trial_env.sh
 
 ros2 service list | grep -E '^/compute_ik$|^/plan_kinematic_path$|^/apply_planning_scene$'
 ros2 topic echo --once /bookshelf_environment/static_slot_check_passed
+ros2 topic echo --once /bookshelf_scene/held_book_pose_check_passed
+ros2 topic echo --once /bookshelf_scene/held_book_pose_check_status --field data
 
 ros2 node list | grep -E \
   'guarded_preinsert_executor|guarded_policy_tool_executor|policy_to_robot|cartesian_action_executor|action_executor' \
@@ -75,7 +79,16 @@ ros2 node list | grep -E \
   || echo 'PASS: no execution node'
 ```
 
-All three services must exist and the frozen-slot result must be `true`.
+All three services must exist. Both the frozen-slot result and held-book pose
+check must be `true`. If the held-book check fails, inspect
+`configured_difference`, `live_candidate_transform_tcp_book`, and
+`configured_transform_tcp_book` in its status. Do not plan or execute by
+loosening the comparison tolerances. The check never updates the scene YAML.
+After one stable agreement, the result remains latched through ordinary marker
+occlusion because the grasp is rigid. A later stable disagreement revokes it.
+The calibrated detector also publishes the cyan live book box on
+`/bookshelf_policy/book_boxes`; compare it with the physical book before
+accepting any corrected scene transform.
 
 ## 3. Riot PC Terminal 2 - Fresh Global Plan Only
 

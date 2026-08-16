@@ -34,6 +34,8 @@ setup(
             "bookshelf_guarded_control_ros.calibrated_preinsert_plan_only_node:main",
             "guarded_preinsert_executor = "
             "bookshelf_guarded_control_ros.guarded_preinsert_executor_node:main",
+            "held_book_pose_check = "
+            "bookshelf_guarded_control_ros.held_book_pose_check_node:main",
             "policy_tool_plan_checker = "
             "bookshelf_guarded_control_ros.policy_tool_plan_checker_node:main",
             "guarded_policy_tool_executor = "
