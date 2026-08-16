@@ -25,3 +25,12 @@ def test_capture_condition_is_written_to_manifest():
     assert '"capture_condition": LaunchConfiguration("capture_condition")' in launch_source
     assert '"capture_condition": str(' in logger_source
     assert '"raw_replay_inputs_recorded": bool(' in logger_source
+
+
+def test_manifest_is_finalized_before_shutdown_graph_access():
+    source = LOGGER.read_text(encoding="utf-8")
+    destroy_source = source[source.index("    def destroy_node(self):") :]
+    manifest_index = destroy_source.index("self._write_manifest(completed=True)")
+    graph_index = destroy_source.index("self._write_graph_snapshot()")
+    assert manifest_index < graph_index
+    assert "except (KeyboardInterrupt, ExternalShutdownException):" in source

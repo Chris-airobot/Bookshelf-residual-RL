@@ -12,6 +12,7 @@ import platform
 import socket
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from std_msgs.msg import Bool, String
 
@@ -187,8 +188,12 @@ class ExperimentLoggerNode(Node):
         )
 
     def destroy_node(self):
-        self._write_graph_snapshot()
+        # Persist completion before touching the ROS graph. During launch-wide
+        # SIGINT shutdown the context may already be invalid, while the
+        # filesystem is still available for finalizing the manifest.
         self._write_manifest(completed=True)
+        if rclpy.ok():
+            self._write_graph_snapshot()
         super().destroy_node()
 
 
@@ -197,7 +202,7 @@ def main(args=None):
     node = ExperimentLoggerNode()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()
