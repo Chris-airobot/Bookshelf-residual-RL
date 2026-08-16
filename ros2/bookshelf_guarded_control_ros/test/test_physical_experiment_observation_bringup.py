@@ -21,6 +21,11 @@ def test_observation_bringup_combines_required_nonexecuting_launches():
         '"enable_legacy_three_book_detection": "false"',
         '"start_live_detector": "true"',
         '"show_rviz"',
+        '"record_raw_replay_inputs"',
+        '"capture_condition"',
+        '"capture_duration_s"',
+        "TimerAction",
+        "event=Shutdown(",
     )
     for token in required:
         assert token in source

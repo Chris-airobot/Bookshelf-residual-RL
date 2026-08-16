@@ -1,12 +1,58 @@
 """Start the physical observation stack and automatic logging without planning."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.actions import (
+    DeclareLaunchArgument,
+    EmitEvent,
+    IncludeLaunchDescription,
+    LogInfo,
+    OpaqueFunction,
+    TimerAction,
+)
+from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+CAPTURE_CONDITIONS = {"unspecified", "no_book", "book_attached"}
+
+
+def _bounded_capture(context):
+    condition = LaunchConfiguration("capture_condition").perform(context).strip()
+    if condition not in CAPTURE_CONDITIONS:
+        expected = ", ".join(sorted(CAPTURE_CONDITIONS))
+        raise RuntimeError(
+            f"capture_condition must be one of {expected}; got {condition!r}"
+        )
+
+    duration_s = float(
+        LaunchConfiguration("capture_duration_s").perform(context)
+    )
+    if duration_s < 0.0:
+        raise RuntimeError("capture_duration_s must be non-negative")
+    if duration_s == 0.0:
+        return [LogInfo(msg=f"Stationary capture condition: {condition}; manual stop")]
+    return [
+        LogInfo(
+            msg=(
+                f"Stationary capture condition: {condition}; "
+                f"automatic clean shutdown after {duration_s:.1f} seconds"
+            )
+        ),
+        TimerAction(
+            period=duration_s,
+            actions=[
+                EmitEvent(
+                    event=Shutdown(
+                        reason=f"stationary {condition} capture duration complete"
+                    )
+                )
+            ],
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -92,6 +138,24 @@ def generate_launch_description():
                 ),
             ),
             DeclareLaunchArgument("record_camera", default_value="true"),
+            DeclareLaunchArgument(
+                "record_raw_replay_inputs",
+                default_value="false",
+                description=(
+                    "Record raw RGB-D inputs for direct offline replay. Enable "
+                    "for bounded stationary dataset captures."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "capture_condition",
+                default_value="unspecified",
+                description="unspecified, no_book, or book_attached.",
+            ),
+            DeclareLaunchArgument(
+                "capture_duration_s",
+                default_value="0.0",
+                description="Automatic shutdown delay; 0 keeps the launch running.",
+            ),
             DeclareLaunchArgument("minimum_free_space_gb", default_value="5.0"),
             DeclareLaunchArgument(
                 "enable_calibrated_book_detection",
@@ -146,6 +210,10 @@ def generate_launch_description():
                         "activation_envelope"
                     ),
                     "record_camera": LaunchConfiguration("record_camera"),
+                    "record_raw_replay_inputs": LaunchConfiguration(
+                        "record_raw_replay_inputs"
+                    ),
+                    "capture_condition": LaunchConfiguration("capture_condition"),
                     "minimum_free_space_gb": LaunchConfiguration(
                         "minimum_free_space_gb"
                     ),
@@ -177,5 +245,6 @@ def generate_launch_description():
                     }
                 ],
             ),
+            OpaqueFunction(function=_bounded_capture),
         ]
     )

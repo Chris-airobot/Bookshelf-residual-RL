@@ -60,6 +60,8 @@ class ExperimentLoggerNode(Node):
         self.declare_parameter("policy_bundle_path", "")
         self.declare_parameter("activation_envelope_path", "")
         self.declare_parameter("camera_recording", True)
+        self.declare_parameter("raw_replay_inputs_recorded", False)
+        self.declare_parameter("capture_condition", "unspecified")
         self.declare_parameter(
             "observation_valid_topic", "/bookshelf_policy/observation_valid"
         )
@@ -155,6 +157,12 @@ class ExperimentLoggerNode(Node):
             "hardware_commanded_by_logger": False,
             "camera_recording": bool(
                 self.get_parameter("camera_recording").value
+            ),
+            "raw_replay_inputs_recorded": bool(
+                self.get_parameter("raw_replay_inputs_recorded").value
+            ),
+            "capture_condition": str(
+                self.get_parameter("capture_condition").value
             ),
             "host": {
                 "hostname": socket.gethostname(),

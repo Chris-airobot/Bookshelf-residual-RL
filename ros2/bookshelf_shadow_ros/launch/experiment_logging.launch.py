@@ -80,6 +80,13 @@ CAMERA_TOPICS = [
     "/camera/aligned_depth_to_color/image_raw/compressedDepth",
 ]
 
+RAW_REPLAY_TOPICS = [
+    "/camera/color/image_raw",
+    "/camera/depth/image_rect_raw",
+    "/camera/aligned_depth_to_color/image_raw",
+    "/robot_description",
+]
+
 
 def _as_bool(value):
     return str(value).strip().lower() in ("1", "true", "yes", "on")
@@ -109,7 +116,14 @@ def _launch_setup(context):
     record_camera = _as_bool(
         LaunchConfiguration("record_camera").perform(context)
     )
-    topics = CORE_TOPICS + (CAMERA_TOPICS if record_camera else [])
+    record_raw_replay_inputs = _as_bool(
+        LaunchConfiguration("record_raw_replay_inputs").perform(context)
+    )
+    topics = list(CORE_TOPICS)
+    if record_camera:
+        topics += CAMERA_TOPICS
+    if record_raw_replay_inputs:
+        topics += RAW_REPLAY_TOPICS
     bag_dir = run_dir / "rosbag"
     recorder = ExecuteProcess(
         cmd=[
@@ -146,6 +160,11 @@ def _launch_setup(context):
                 "camera_recording": ParameterValue(
                     LaunchConfiguration("record_camera"), value_type=bool
                 ),
+                "raw_replay_inputs_recorded": ParameterValue(
+                    LaunchConfiguration("record_raw_replay_inputs"),
+                    value_type=bool,
+                ),
+                "capture_condition": LaunchConfiguration("capture_condition"),
             }
         ],
     )
@@ -154,6 +173,7 @@ def _launch_setup(context):
         LogInfo(
             msg=(
                 f"Compressed camera recording: {record_camera}; "
+                f"raw replay inputs: {record_raw_replay_inputs}; "
                 f"free space before recording: {free_gb:.2f} GiB"
             )
         ),
@@ -174,6 +194,19 @@ def generate_launch_description():
             DeclareLaunchArgument("policy_bundle", default_value=""),
             DeclareLaunchArgument("activation_envelope", default_value=""),
             DeclareLaunchArgument("record_camera", default_value="true"),
+            DeclareLaunchArgument(
+                "record_raw_replay_inputs",
+                default_value="false",
+                description=(
+                    "Record raw RGB, raw and aligned depth, and robot_description "
+                    "for direct offline detector replay. This uses more disk space."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "capture_condition",
+                default_value="unspecified",
+                description="Dataset condition label stored in manifest.json.",
+            ),
             DeclareLaunchArgument("minimum_free_space_gb", default_value="5.0"),
             LogInfo(
                 msg=(
