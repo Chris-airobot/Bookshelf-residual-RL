@@ -29,6 +29,9 @@ offline_scene_visualizer:
     slot_quaternion_xyzw: [0.008532250326922688, -0.023165785138032358, -0.007036840460193575, 0.9996704606917397]
     slot_width_m: 0.03970380872488022
     slot_visual_height_m: 0.236
+    # Replay-only display correction: align the green slot and pre-insertion
+    # reference with the independently measured physical support height.
+    anchor_slot_to_shelf_support_height: true
 
     # Slot +X enters the shelf. Preserve its horizontal heading, but keep the
     # coarse shelf level and anchor its book-supporting bottom 15 mm above the table.

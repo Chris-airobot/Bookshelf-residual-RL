@@ -36,6 +36,8 @@ setup(
             "sim_rgb_camera_viewer = bookshelf_shadow_ros.sim_rgb_camera_viewer:main",
             "slot_detection_audit = "
             "bookshelf_shadow_ros.slot_detection_audit_node:main",
+            "slot_orientation_audit = "
+            "bookshelf_shadow_ros.slot_orientation_audit_node:main",
             "static_slot_environment_check = "
             "bookshelf_shadow_ros.static_slot_environment_check_node:main",
             "static_slot_capture = "
@@ -58,6 +60,10 @@ setup(
             "bookshelf_shadow_ros.supervised_book_calibration_candidate:main",
             "offline_scene_visualizer = "
             "bookshelf_shadow_ros.offline_scene_visualizer_node:main",
+            "eef_tcp_context_capture = "
+            "bookshelf_shadow_ros.eef_tcp_context_capture_node:main",
+            "stationary_capture_pipeline = "
+            "bookshelf_shadow_ros.stationary_capture_pipeline:main",
         ],
     },
 )

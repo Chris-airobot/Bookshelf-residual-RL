@@ -86,6 +86,9 @@ class OfflineSceneVisualizerNode(Node):
             preinsert_book_center_slot_xyz=self.get_parameter(
                 "preinsert_book_center_slot_xyz"
             ).value,
+            anchor_slot_to_shelf_support_height=self.get_parameter(
+                "anchor_slot_to_shelf_support_height"
+            ).value,
         )
         self.held_book_center_tcp_xyz = self._vector(
             "held_book_center_tcp_xyz", 3
@@ -146,6 +149,7 @@ class OfflineSceneVisualizerNode(Node):
         self.declare_parameter("slot_quaternion_xyzw", [0.0, 0.0, 0.0, 1.0])
         self.declare_parameter("slot_width_m", 0.04)
         self.declare_parameter("slot_visual_height_m", 0.25)
+        self.declare_parameter("anchor_slot_to_shelf_support_height", False)
         self.declare_parameter("shelf_size_xyz", [0.30, 0.95, 0.40])
         self.declare_parameter("shelf_center_offset_slot_xyz", [0.15, 0.0, 0.0])
         self.declare_parameter("shelf_bottom_height_base_m", 0.015)
@@ -242,9 +246,14 @@ class OfflineSceneVisualizerNode(Node):
         _set_color(opening, (0.15, 1.0, 0.35, 1.0))
 
         label_position = start + np.array([0.0, 0.0, 0.18])
+        slot_label = (
+            "support-aligned slot reference"
+            if self.geometry.slot_support_anchored
+            else "approved slot"
+        )
         label = self._text(
             12,
-            f"approved slot | width {self.geometry.slot_width_m * 1000.0:.1f} mm",
+            f"{slot_label} | width {self.geometry.slot_width_m * 1000.0:.1f} mm",
             label_position,
             (0.2, 1.0, 0.4, 1.0),
         )
@@ -344,6 +353,7 @@ class OfflineSceneVisualizerNode(Node):
             "tcp_frame": self.tcp_frame,
             "shelf_front_plane_error_m": shelf_front_plane_error_m(self.geometry),
             "shelf_bottom_height_m": shelf_bottom_height_m(self.geometry),
+            "slot_support_anchored": self.geometry.slot_support_anchored,
             "table_top_height_m": table_top_height_m(self.geometry),
             "joint_names": list(self.joint_names),
             "joint_positions": list(self.joint_positions),

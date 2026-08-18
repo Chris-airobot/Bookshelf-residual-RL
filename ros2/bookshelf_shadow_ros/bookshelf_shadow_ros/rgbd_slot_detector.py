@@ -98,7 +98,9 @@ class RgbdSlotDetector(Node):
         self.declare_parameter("roi_x_min", 0.12)
         self.declare_parameter("roi_x_max", 0.88)
         self.declare_parameter("roi_y_min", 0.18)
-        self.declare_parameter("roi_y_max", 0.84)
+        # Include as much of the lower book boundary as this camera view allows.
+        # Absolute support height is handled separately in the base frame.
+        self.declare_parameter("roi_y_max", 0.98)
         self.declare_parameter("minimum_depth_m", 0.15)
         self.declare_parameter("maximum_depth_m", 1.50)
         self.declare_parameter("front_plane_inlier_m", 0.012)

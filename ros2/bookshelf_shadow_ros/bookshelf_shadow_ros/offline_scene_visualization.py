@@ -22,6 +22,7 @@ class OfflineSceneGeometry:
     held_book_size_xyz: tuple[float, float, float]
     slot_width_m: float
     slot_visual_height_m: float
+    slot_support_anchored: bool
 
 
 def positive_vector(values, *, length: int, label: str) -> tuple[float, ...]:
@@ -70,6 +71,7 @@ def build_offline_scene_geometry(
     table_quaternion_base_xyzw,
     held_book_size_xyz,
     preinsert_book_center_slot_xyz,
+    anchor_slot_to_shelf_support_height: bool = False,
 ) -> OfflineSceneGeometry:
     """Compose the coarse physical boxes in their explicit source frames."""
 
@@ -117,6 +119,18 @@ def build_offline_scene_geometry(
         raise ValueError("slot_visual_height_m must be positive")
 
     transform_base_slot = make_transform(slot_translation, slot_quaternion)
+    slot_support_anchored = bool(anchor_slot_to_shelf_support_height)
+    if slot_support_anchored:
+        up_axis = transform_base_slot[:3, 2]
+        up_axis = up_axis / float(np.linalg.norm(up_axis))
+        if float(up_axis[2]) < 0.0:
+            up_axis = -up_axis
+        if float(up_axis[2]) < 0.5:
+            raise ValueError("slot up axis is not sufficiently vertical")
+        lower_edge_z = float(
+            transform_base_slot[2, 3] - 0.5 * slot_height * up_axis[2]
+        )
+        transform_base_slot[2, 3] += shelf_bottom_height - lower_edge_z
     shelf_heading_xy = transform_base_slot[:2, 0]
     heading_norm = float(np.linalg.norm(shelf_heading_xy))
     if heading_norm < 1e-9:
@@ -149,6 +163,7 @@ def build_offline_scene_geometry(
         held_book_size_xyz=held_book_size,
         slot_width_m=slot_width,
         slot_visual_height_m=slot_height,
+        slot_support_anchored=slot_support_anchored,
     )
 
 

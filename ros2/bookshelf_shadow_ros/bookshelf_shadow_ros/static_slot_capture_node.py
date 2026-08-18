@@ -97,6 +97,10 @@ class StaticSlotCaptureNode(Node):
         if not self.base_frame:
             raise ValueError("base_frame must not be empty")
         self.target_samples = int(self.get_parameter("target_samples").value)
+        self.finalization_retry_interval_samples = int(
+            self.get_parameter("finalization_retry_interval_samples").value
+        )
+        self.use_latest_tf = bool(self.get_parameter("use_latest_tf").value)
         self.minimum_confidence = float(
             self.get_parameter("minimum_confidence").value
         )
@@ -108,6 +112,10 @@ class StaticSlotCaptureNode(Node):
         )
         if self.target_samples < 1:
             raise ValueError("target_samples must be at least one")
+        if self.finalization_retry_interval_samples < 1:
+            raise ValueError(
+                "finalization_retry_interval_samples must be at least one"
+            )
         if not 0.0 <= self.minimum_confidence <= 1.0:
             raise ValueError("minimum_confidence must be in [0, 1]")
         if not 0.0 < self.minimum_slot_width_m < self.maximum_slot_width_m:
@@ -166,6 +174,8 @@ class StaticSlotCaptureNode(Node):
         self.last_transform_base_source = None
         self.last_source_frame = None
         self.completed = False
+        self.last_finalize_attempt_sample_count = 0
+        self.last_filter_error = None
         self.report = None
         self.git_provenance = _git_revision(
             str(self.get_parameter("repository_path").value)
@@ -180,6 +190,7 @@ class StaticSlotCaptureNode(Node):
             "invalid_pose": 0,
             "stale_message": 0,
             "tf_unavailable": 0,
+            "finalization_attempts": 0,
         }
 
         self.create_subscription(
@@ -214,10 +225,16 @@ class StaticSlotCaptureNode(Node):
         self.get_logger().info(
             f"Collecting {self.target_samples} accepted samples in {self.base_frame}."
         )
+        if self.use_latest_tf:
+            self.get_logger().warning(
+                "Using latest-available TF for an explicitly stationary replay. "
+                "Do not enable this mode for a moving robot."
+            )
 
     def _declare_parameters(self):
         self.declare_parameter("base_frame", "link_base")
         self.declare_parameter("target_samples", 120)
+        self.declare_parameter("finalization_retry_interval_samples", 30)
         self.declare_parameter("minimum_samples", 60)
         self.declare_parameter("minimum_inlier_fraction", 0.80)
         self.declare_parameter("minimum_confidence", 0.60)
@@ -229,6 +246,7 @@ class StaticSlotCaptureNode(Node):
         self.declare_parameter("pair_max_age_s", 0.10)
         self.declare_parameter("message_max_age_s", 0.50)
         self.declare_parameter("tf_lookup_timeout_s", 0.05)
+        self.declare_parameter("use_latest_tf", False)
         self.declare_parameter("slot_depth_m", 0.20)
         self.declare_parameter("visual_slot_height_m", 0.25)
         self.declare_parameter("repository_path", "")
@@ -317,9 +335,9 @@ class StaticSlotCaptureNode(Node):
             else:
                 timeout = float(self.get_parameter("tf_lookup_timeout_s").value)
                 lookup_time = (
-                    Time.from_msg(self.latest_pose.header.stamp)
-                    if stamp_ns > 0
-                    else Time()
+                    Time()
+                    if self.use_latest_tf or stamp_ns <= 0
+                    else Time.from_msg(self.latest_pose.header.stamp)
                 )
                 tf_message = self.tf_buffer.lookup_transform(
                     self.base_frame,
@@ -348,10 +366,20 @@ class StaticSlotCaptureNode(Node):
         self.last_transform_base_source = transform_base_source
         self.last_source_frame = source_frame
         self.counters["accepted_samples"] += 1
-        if len(self.accumulator.samples) >= self.target_samples:
-            self._finalize()
+        sample_count = len(self.accumulator.samples)
+        if (
+            sample_count >= self.target_samples
+            and (
+                self.last_finalize_attempt_sample_count == 0
+                or sample_count - self.last_finalize_attempt_sample_count
+                >= self.finalization_retry_interval_samples
+            )
+        ):
+            self._finalize(allow_retry=True)
 
-    def _finalize(self):
+    def _finalize(self, *, allow_retry: bool = False):
+        self.last_finalize_attempt_sample_count = len(self.accumulator.samples)
+        self.counters["finalization_attempts"] += 1
         try:
             result = self.accumulator.result()
             candidate = serializable_capture_result(result)
@@ -369,6 +397,19 @@ class StaticSlotCaptureNode(Node):
                     "confidence",
                 }
             }
+        except ValueError as error:
+            self.last_filter_error = str(error)
+            if allow_retry:
+                self.get_logger().warning(
+                    "Robust filtering is not yet consistent; continuing the "
+                    f"stationary capture: {error}"
+                )
+                self._publish_status(
+                    "collecting additional samples after robust filtering: "
+                    f"{error}"
+                )
+                return False
+            report = self._base_report(valid=False, reason=str(error))
         except Exception as error:
             report = self._base_report(valid=False, reason=str(error))
         self.report = report
@@ -381,6 +422,7 @@ class StaticSlotCaptureNode(Node):
             )
         else:
             self.get_logger().error(f"Static slot capture failed: {report['reason']}")
+        return bool(report["valid"])
 
     def _base_report(self, *, valid: bool, reason: str | None) -> dict:
         report = {
@@ -396,6 +438,14 @@ class StaticSlotCaptureNode(Node):
             "source_frame": self.last_source_frame,
             "counters": dict(self.counters),
             "target_samples": self.target_samples,
+            "finalization_retry_interval_samples": (
+                self.finalization_retry_interval_samples
+            ),
+            "tf_lookup_mode": (
+                "latest_available_stationary"
+                if self.use_latest_tf
+                else "message_timestamp"
+            ),
             "source_topics": {
                 "pose": str(self.get_parameter("live_pose_topic").value),
                 "width": str(self.get_parameter("live_width_topic").value),
@@ -429,6 +479,8 @@ class StaticSlotCaptureNode(Node):
             }
         if self.git_provenance is not None:
             report["git"] = self.git_provenance
+        if self.last_filter_error is not None:
+            report["last_filter_error"] = self.last_filter_error
         return report
 
     def _publish_status(self, reason: str | None):
@@ -522,6 +574,9 @@ class StaticSlotCaptureNode(Node):
 
     def write_incomplete_report(self):
         if self.completed:
+            return
+        if len(self.accumulator.samples) >= self.target_samples:
+            self._finalize(allow_retry=False)
             return
         report = self._base_report(
             valid=False,

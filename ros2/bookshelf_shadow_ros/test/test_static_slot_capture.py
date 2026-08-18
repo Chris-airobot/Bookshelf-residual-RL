@@ -72,6 +72,35 @@ def test_capture_requires_enough_stable_inliers():
         accumulator.result()
 
 
+def test_capture_can_recover_when_later_stationary_samples_resolve_quantization():
+    accumulator = StaticSlotCaptureAccumulator(
+        minimum_samples=60,
+        minimum_inlier_fraction=0.80,
+    )
+    for index in range(57):
+        accumulator.add(
+            _sample(index, [0.85, 0.075, 0.172], width=0.0372)
+        )
+    for index in range(57, 90):
+        accumulator.add(
+            _sample(index, [0.85, 0.075, 0.172], width=0.0378)
+        )
+
+    with pytest.raises(ValueError, match="minimum_samples"):
+        accumulator.result()
+
+    for index in range(90, 290):
+        accumulator.add(
+            _sample(index, [0.85, 0.075, 0.172], width=0.0378)
+        )
+
+    result = accumulator.result()
+    assert result["input_samples"] == 290
+    assert result["inlier_samples"] == 233
+    assert result["inlier_fraction"] > 0.80
+    assert result["width_m"] == pytest.approx(0.0378)
+
+
 def _candidate_report(path: Path):
     report = {
         "schema_version": 1,

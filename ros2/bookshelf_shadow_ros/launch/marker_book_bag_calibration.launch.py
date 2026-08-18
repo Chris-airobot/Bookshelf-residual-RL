@@ -44,6 +44,16 @@ def generate_launch_description():
                 "Publish current/candidate book frames for human bag-only review."
             ),
         ),
+        DeclareLaunchArgument(
+            "capture_eef_tcp_context",
+            default_value="true",
+            description="Capture the fixed link_eef to link_tcp TF context.",
+        ),
+        DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="false",
+            description="Use rosbag /clock for offline replay.",
+        ),
     ]
     calibrator = Node(
         package="bookshelf_shadow_ros",
@@ -59,6 +69,26 @@ def generate_launch_description():
                 ),
                 "enable_frame_audit": ParameterValue(
                     LaunchConfiguration("enable_frame_audit"), value_type=bool
+                ),
+                "use_sim_time": ParameterValue(
+                    LaunchConfiguration("use_sim_time"), value_type=bool
+                ),
+            }
+        ],
+    )
+    eef_tcp_context = Node(
+        package="bookshelf_shadow_ros",
+        executable="eef_tcp_context_capture",
+        name="eef_tcp_context_capture",
+        output="screen",
+        condition=IfCondition(LaunchConfiguration("capture_eef_tcp_context")),
+        parameters=[
+            {
+                "output_path": PathJoinSubstitution(
+                    [LaunchConfiguration("output_dir"), "eef_tcp_context.json"]
+                ),
+                "use_sim_time": ParameterValue(
+                    LaunchConfiguration("use_sim_time"), value_type=bool
                 ),
             }
         ],
@@ -90,6 +120,7 @@ def generate_launch_description():
                 )
             ),
             calibrator,
+            eef_tcp_context,
             rviz,
         ]
     )

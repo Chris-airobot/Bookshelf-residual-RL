@@ -53,6 +53,40 @@ def _transform_to_pose(transform: np.ndarray) -> Pose:
     return pose
 
 
+def _anchor_slot_lower_edge_to_height(
+    transform_base_slot: np.ndarray,
+    *,
+    slot_height_m: float,
+    support_height_base_m: float,
+) -> tuple[np.ndarray, float]:
+    """Set base Z so the slot's lower edge meets the measured support height."""
+
+    transform = np.asarray(transform_base_slot, dtype=np.float64).copy()
+    if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+        raise ValueError("transform_base_slot must be a finite 4x4 transform")
+    slot_height = float(slot_height_m)
+    support_height = float(support_height_base_m)
+    if not np.isfinite(slot_height) or slot_height <= 0.0:
+        raise ValueError("slot_height_m must be positive")
+    if not np.isfinite(support_height):
+        raise ValueError("support_height_base_m must be finite")
+
+    up_axis = transform[:3, 2]
+    up_norm = float(np.linalg.norm(up_axis))
+    if up_norm < 1.0e-9:
+        raise ValueError("slot up axis is invalid")
+    up_axis = up_axis / up_norm
+    if float(up_axis[2]) < 0.0:
+        up_axis = -up_axis
+    if float(up_axis[2]) < 0.5:
+        raise ValueError("slot up axis is not sufficiently vertical in base frame")
+
+    lower_edge = transform[:3, 3] - 0.5 * slot_height * up_axis
+    correction_base_z = support_height - float(lower_edge[2])
+    transform[2, 3] += correction_base_z
+    return transform, float(correction_base_z)
+
+
 class StaticSlotEnvironmentCheckNode(Node):
     def __init__(self):
         super().__init__("static_slot_environment_check")
@@ -78,6 +112,16 @@ class StaticSlotEnvironmentCheckNode(Node):
         self.visual_slot_height_m = float(
             self.get_parameter("visual_slot_height_m").value
         )
+        self.show_static_reference_markers = bool(
+            self.get_parameter("show_static_reference_markers").value
+        )
+        self.anchor_live_slot_to_support_height = bool(
+            self.get_parameter("anchor_live_slot_to_support_height").value
+        )
+        self.support_height_base_m = float(
+            self.get_parameter("support_height_base_m").value
+        )
+        self.latest_support_anchor_correction_m = None
         if min(
             self.reference_width_m, self.slot_depth_m, self.visual_slot_height_m
         ) <= 0.0:
@@ -182,6 +226,9 @@ class StaticSlotEnvironmentCheckNode(Node):
         self.declare_parameter("static_slot_transform_status", "unconfigured")
         self.declare_parameter("slot_depth_m", 0.20)
         self.declare_parameter("visual_slot_height_m", 0.25)
+        self.declare_parameter("show_static_reference_markers", True)
+        self.declare_parameter("anchor_live_slot_to_support_height", False)
+        self.declare_parameter("support_height_base_m", 0.0)
         self.declare_parameter("minimum_confidence", 0.60)
         self.declare_parameter("maximum_translation_error_m", 0.010)
         self.declare_parameter("maximum_rotation_error_deg", 5.0)
@@ -244,6 +291,7 @@ class StaticSlotEnvironmentCheckNode(Node):
             self.gate.reset()
             self.latest_comparison = None
             self.latest_live_transform = None
+            self.latest_support_anchor_correction_m = None
             self._publish("live slot estimate is missing or stale")
         else:
             self._publish(self.latest_reason)
@@ -258,6 +306,7 @@ class StaticSlotEnvironmentCheckNode(Node):
             self.gate.reset()
             self.latest_comparison = None
             self.latest_live_transform = None
+            self.latest_support_anchor_correction_m = None
             self._publish("waiting for synchronized pose, width, and confidence")
             return
         if not self.latest_pose.header.frame_id:
@@ -290,6 +339,15 @@ class StaticSlotEnvironmentCheckNode(Node):
             transform_base_live = transform_base_source @ _pose_to_transform(
                 self.latest_pose.pose
             )
+            support_anchor_correction = None
+            if self.anchor_live_slot_to_support_height:
+                transform_base_live, support_anchor_correction = (
+                    _anchor_slot_lower_edge_to_height(
+                        transform_base_live,
+                        slot_height_m=self.visual_slot_height_m,
+                        support_height_base_m=self.support_height_base_m,
+                    )
+                )
             comparison = compare_slot_measurement(
                 self.reference_transform,
                 transform_base_live,
@@ -303,6 +361,7 @@ class StaticSlotEnvironmentCheckNode(Node):
             return
 
         self.latest_live_transform = transform_base_live
+        self.latest_support_anchor_correction_m = support_anchor_correction
         self.latest_comparison = comparison
         self.gate.update(comparison["matches"])
         live_pose = PoseStamped()
@@ -321,6 +380,7 @@ class StaticSlotEnvironmentCheckNode(Node):
         self.gate.reset()
         self.latest_comparison = None
         self.latest_live_transform = None
+        self.latest_support_anchor_correction_m = None
         self._publish(reason)
 
     def _status(self, reason=None) -> dict:
@@ -335,6 +395,12 @@ class StaticSlotEnvironmentCheckNode(Node):
             "required_matching_samples": self.gate.required_matches,
             "reason": reason,
             "base_frame": self.base_frame,
+            "live_slot_support_anchor": {
+                "enabled": self.anchor_live_slot_to_support_height,
+                "support_height_base_m": self.support_height_base_m,
+                "correction_base_z_m": self.latest_support_anchor_correction_m,
+                "reference_configuration_modified": False,
+            },
             "static_slot": {
                 "translation_xyz": self.reference_transform[:3, 3].tolist(),
                 "quaternion_xyzw": matrix_to_quaternion_xyzw(
@@ -400,41 +466,48 @@ class StaticSlotEnvironmentCheckNode(Node):
         delete_all.action = Marker.DELETEALL
         markers.append(delete_all)
 
-        volume_transform = self.reference_transform @ make_transform(
-            [0.5 * self.slot_depth_m, 0.0, 0.0]
-        )
-        volume = self._marker("configured_static_slot", 0, Marker.CUBE, stamp)
-        volume.pose = _transform_to_pose(volume_transform)
-        volume.scale.x = self.slot_depth_m
-        volume.scale.y = self.reference_width_m
-        volume.scale.z = self.visual_slot_height_m
-        volume.color.r, volume.color.g, volume.color.b, volume.color.a = (
-            0.05,
-            0.75,
-            1.0,
-            0.16,
-        )
-        markers.append(volume)
+        if self.show_static_reference_markers:
+            volume_transform = self.reference_transform @ make_transform(
+                [0.5 * self.slot_depth_m, 0.0, 0.0]
+            )
+            volume = self._marker("configured_static_slot", 0, Marker.CUBE, stamp)
+            volume.pose = _transform_to_pose(volume_transform)
+            volume.scale.x = self.slot_depth_m
+            volume.scale.y = self.reference_width_m
+            volume.scale.z = self.visual_slot_height_m
+            volume.color.r, volume.color.g, volume.color.b, volume.color.a = (
+                0.05,
+                0.75,
+                1.0,
+                0.16,
+            )
+            markers.append(volume)
 
-        outline = self._slot_outline(
-            namespace="configured_static_slot",
-            marker_id=1,
-            stamp=stamp,
-            transform=self.reference_transform,
-            width=self.reference_width_m,
-            color=(0.05, 0.75, 1.0, 1.0),
-        )
-        markers.append(outline)
+            markers.append(
+                self._slot_outline(
+                    namespace="configured_static_slot",
+                    marker_id=1,
+                    stamp=stamp,
+                    transform=self.reference_transform,
+                    width=self.reference_width_m,
+                    color=(0.05, 0.75, 1.0, 1.0),
+                )
+            )
 
-        axis = self._marker("configured_static_slot", 2, Marker.ARROW, stamp)
-        axis.pose = _transform_to_pose(self.reference_transform)
-        axis.points = [
-            Point(x=0.0, y=0.0, z=0.0),
-            Point(x=min(self.slot_depth_m, 0.10), y=0.0, z=0.0),
-        ]
-        axis.scale.x, axis.scale.y, axis.scale.z = 0.006, 0.012, 0.018
-        axis.color.r, axis.color.g, axis.color.b, axis.color.a = 0.0, 0.35, 1.0, 1.0
-        markers.append(axis)
+            axis = self._marker("configured_static_slot", 2, Marker.ARROW, stamp)
+            axis.pose = _transform_to_pose(self.reference_transform)
+            axis.points = [
+                Point(x=0.0, y=0.0, z=0.0),
+                Point(x=min(self.slot_depth_m, 0.10), y=0.0, z=0.0),
+            ]
+            axis.scale.x, axis.scale.y, axis.scale.z = 0.006, 0.012, 0.018
+            axis.color.r, axis.color.g, axis.color.b, axis.color.a = (
+                0.0,
+                0.35,
+                1.0,
+                1.0,
+            )
+            markers.append(axis)
 
         if self.latest_live_transform is not None and self.latest_comparison is not None:
             matching = bool(self.latest_comparison["matches"])
@@ -473,7 +546,13 @@ class StaticSlotEnvironmentCheckNode(Node):
             ) = color
             markers.append(deviation)
 
-        label_transform = self.reference_transform @ make_transform(
+        label_anchor = self.reference_transform
+        if (
+            not self.show_static_reference_markers
+            and self.latest_live_transform is not None
+        ):
+            label_anchor = self.latest_live_transform
+        label_transform = label_anchor @ make_transform(
             [0.0, 0.0, 0.5 * self.visual_slot_height_m + 0.04]
         )
         label = self._marker("configured_static_slot", 3, Marker.TEXT_VIEW_FACING, stamp)
@@ -486,9 +565,12 @@ class StaticSlotEnvironmentCheckNode(Node):
         state = "PASS" if self.gate.passed else "CHECKING"
         if reason and not self.gate.passed:
             state = "NO MATCH"
-        label.text = (
-            f"STATIC SLOT (cyan) | LIVE (green/red) | {state} "
-            f"{self.gate.matching_samples}/{self.gate.required_matches}"
+        if self.show_static_reference_markers:
+            label.text = "STATIC SLOT (cyan) | LIVE (green/red)"
+        else:
+            label.text = "LIVE SLOT (green/red) | REFERENCE HIDDEN"
+        label.text += (
+            f" | {state} {self.gate.matching_samples}/{self.gate.required_matches}"
         )
         if self.latest_comparison is not None:
             comparison = self.latest_comparison

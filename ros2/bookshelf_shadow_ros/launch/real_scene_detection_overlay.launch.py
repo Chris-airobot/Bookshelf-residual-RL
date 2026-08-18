@@ -15,6 +15,9 @@ def generate_launch_description():
     output_dir = LaunchConfiguration("output_dir")
     start_live_detector = LaunchConfiguration("start_live_detector")
     show_rviz = LaunchConfiguration("show_rviz")
+    show_debug_image = LaunchConfiguration("show_debug_image")
+    enable_orientation_audit = LaunchConfiguration("enable_orientation_audit")
+    orientation_audit_samples = LaunchConfiguration("orientation_audit_samples")
     use_sim_time = LaunchConfiguration("use_sim_time")
     image_topic = LaunchConfiguration("image_topic")
     depth_topic = LaunchConfiguration("depth_topic")
@@ -79,6 +82,33 @@ def generate_launch_description():
         condition=IfCondition(show_rviz),
     )
 
+    debug_image_view = Node(
+        package="rqt_image_view",
+        executable="rqt_image_view",
+        name="slot_detector_debug_image_view",
+        output="screen",
+        arguments=["/slot_detector/debug_image"],
+        condition=IfCondition(show_debug_image),
+    )
+
+    orientation_audit = Node(
+        package="bookshelf_shadow_ros",
+        executable="slot_orientation_audit",
+        name="slot_orientation_audit",
+        output="screen",
+        condition=IfCondition(enable_orientation_audit),
+        parameters=[
+            {
+                "output_dir": output_dir,
+                "target_samples": ParameterValue(
+                    orientation_audit_samples,
+                    value_type=int,
+                ),
+                "use_sim_time": ParameterValue(use_sim_time, value_type=bool),
+            }
+        ],
+    )
+
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -116,6 +146,23 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("start_live_detector", default_value="true"),
             DeclareLaunchArgument("show_rviz", default_value="true"),
+            DeclareLaunchArgument(
+                "show_debug_image",
+                default_value="true",
+                description="Open the annotated RGB slot-detection image.",
+            ),
+            DeclareLaunchArgument(
+                "enable_orientation_audit",
+                default_value="false",
+                description=(
+                    "Write read-only live-versus-reference slot orientation statistics."
+                ),
+            ),
+            DeclareLaunchArgument(
+                "orientation_audit_samples",
+                default_value="700",
+                description="Number of paired live orientation samples to audit.",
+            ),
             DeclareLaunchArgument("use_sim_time", default_value="false"),
             DeclareLaunchArgument(
                 "image_topic", default_value="/camera/color/image_raw"
@@ -138,6 +185,8 @@ def generate_launch_description():
             detector,
             coarse_scene,
             slot_check,
+            orientation_audit,
             rviz,
+            debug_image_view,
         ]
     )

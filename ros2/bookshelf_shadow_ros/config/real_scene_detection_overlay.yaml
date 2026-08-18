@@ -12,6 +12,13 @@ static_slot_environment_check:
 
     slot_depth_m: 0.20
     visual_slot_height_m: 0.236
+    # Replay view focuses on the newly detected slot. The saved reference is
+    # still used numerically for the status report but is not drawn in cyan.
+    show_static_reference_markers: false
+    # The camera view ends before the physical support surface. Anchor only the
+    # red live visualization to the independently measured shelf bottom.
+    anchor_live_slot_to_support_height: true
+    support_height_base_m: 0.015
 
     minimum_confidence: 0.60
     maximum_translation_error_m: 0.010

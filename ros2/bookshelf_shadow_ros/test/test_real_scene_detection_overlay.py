@@ -11,6 +11,7 @@ LAUNCH = ROOT / "launch" / "real_scene_detection_overlay.launch.py"
 RVIZ = ROOT / "rviz" / "real_scene_detection_overlay.rviz"
 VISUALIZER = ROOT / "bookshelf_shadow_ros" / "offline_scene_visualizer_node.py"
 CHECK_NODE = ROOT / "bookshelf_shadow_ros" / "static_slot_environment_check_node.py"
+DETECTOR = ROOT / "bookshelf_shadow_ros" / "rgbd_slot_detector.py"
 
 
 def _parameters(path, node_name):
@@ -43,6 +44,23 @@ def test_live_check_keeps_fixed_fail_closed_tolerances():
     assert check["maximum_width_error_m"] == pytest.approx(0.005)
 
 
+def test_replay_hides_stale_reference_and_includes_lower_shelf_edge():
+    check = _parameters(CHECK_CONFIG, "static_slot_environment_check")
+    check_source = CHECK_NODE.read_text(encoding="utf-8")
+    detector_source = DETECTOR.read_text(encoding="utf-8")
+
+    assert check["show_static_reference_markers"] is False
+    assert check["anchor_live_slot_to_support_height"] is True
+    assert check["support_height_base_m"] == pytest.approx(0.015)
+    assert 'self.declare_parameter("show_static_reference_markers", True)' in (
+        check_source
+    )
+    assert 'self.declare_parameter("roi_y_max", 0.98)' in detector_source
+    assert 'self.declare_parameter("anchor_live_slot_to_support_height", False)' in (
+        check_source
+    )
+
+
 def test_overlay_uses_live_robot_state_and_has_no_execution_interface():
     launch_source = LAUNCH.read_text(encoding="utf-8")
     visualizer_source = VISUALIZER.read_text(encoding="utf-8")
@@ -51,6 +69,11 @@ def test_overlay_uses_live_robot_state_and_has_no_execution_interface():
     assert 'name="offline_scene_visualizer"' in launch_source
     assert 'name="real_coarse_scene_overlay"' not in launch_source
     assert '"publish_joint_states": False' in launch_source
+    assert 'package="rqt_image_view"' in launch_source
+    assert 'arguments=["/slot_detector/debug_image"]' in launch_source
+    assert 'executable="slot_orientation_audit"' in launch_source
+    assert 'condition=IfCondition(enable_orientation_audit)' in launch_source
+    assert 'DeclareLaunchArgument(\n                "show_debug_image"' in launch_source
     assert "robot_state_publisher" not in launch_source
     assert "xarm_description" not in launch_source
     assert "create_subscription(" in check_source

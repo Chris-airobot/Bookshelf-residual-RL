@@ -46,6 +46,9 @@ def _geometry():
         preinsert_book_center_slot_xyz=values[
             "preinsert_book_center_slot_xyz"
         ],
+        anchor_slot_to_shelf_support_height=values[
+            "anchor_slot_to_shelf_support_height"
+        ],
     )
 
 
@@ -60,6 +63,12 @@ def test_default_scene_has_expected_coarse_dimensions_and_planes():
     )
     assert geometry.held_book_size_xyz == pytest.approx((0.156, 0.034, 0.236))
     assert geometry.slot_width_m == pytest.approx(0.03970380872488022)
+    assert geometry.slot_support_anchored is True
+    slot_up = geometry.transform_base_slot[:3, 2]
+    slot_lower_edge = (
+        geometry.transform_base_slot[:3, 3] - 0.5 * geometry.slot_visual_height_m * slot_up
+    )
+    assert slot_lower_edge[2] == pytest.approx(0.015, abs=1e-12)
     assert shelf_front_plane_error_m(geometry) == pytest.approx(0.0, abs=1e-12)
     assert shelf_bottom_height_m(geometry) == pytest.approx(0.015, abs=1e-12)
     assert table_top_height_m(geometry) == pytest.approx(0.0, abs=1e-12)
