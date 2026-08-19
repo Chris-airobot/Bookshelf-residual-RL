@@ -16,6 +16,8 @@ def test_marker_vision_bringup_has_manual_robot_control_but_no_policy_executor()
     assert '"enable_legacy_three_book_detection"' in source
     assert 'default_value="false"' in source
     assert "marker_book_bag_calibration.launch.py" in source
+    assert '"detected_marker_frame": "target_book_marker"' in source
+    assert '"detected_book_frame": "target_book_center"' in source
     forbidden = (
         "guarded_policy_tool_executor",
         "policy_to_robot_node",

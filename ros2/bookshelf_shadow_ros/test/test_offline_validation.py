@@ -63,6 +63,20 @@ def test_shadow_source_audit_allows_preflight_prohibited_node_literals(tmp_path)
     assert audit_shadow_source_tree(tmp_path) == []
 
 
+def test_shadow_source_audit_allows_stationary_pipeline_blocklist_only(tmp_path):
+    pipeline = tmp_path / "stationary_capture_pipeline.py"
+    policy_process = "policy_" + "to_" + "robot"
+    cartesian_process = "cartesian_" + "action_" + "executor"
+    pipeline.write_text(
+        "EXECUTION_NODE_FRAGMENTS = (\n"
+        f"    {policy_process!r},\n"
+        f"    {cartesian_process!r},\n"
+        ")\n",
+        encoding="utf-8",
+    )
+    assert audit_shadow_source_tree(tmp_path) == []
+
+
 def test_portable_controller_constants_match_simulator_source():
     result = controller_config_parity(ENV_CFG)
     assert result["passed"], result["mismatches"]

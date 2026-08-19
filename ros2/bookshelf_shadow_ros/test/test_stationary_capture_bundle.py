@@ -243,6 +243,9 @@ def test_bundle_derives_tcp_book_and_keeps_every_review_hold_closed():
     assert scene["hardware_measurements_confirmed"] is False
     assert scene["allow_local_insertion"] is False
     adapter = candidate["policy_observation_adapter"]["ros__parameters"]
+    assert adapter["book_pose_source"] == "marker"
+    assert adapter["latch_eef_book_from_marker"] is False
+    assert adapter["use_configured_eef_book_transform"] is True
     assert adapter["require_verified_policy_tool_transform"] is True
 
 
@@ -294,6 +297,8 @@ def test_bag_launches_forward_sim_time_and_capture_eef_tcp_context():
     assert 'DeclareLaunchArgument(\n            "capture_use_latest_tf"' in slot_launch
     assert 'LaunchConfiguration("capture_use_latest_tf")' in slot_launch
     assert 'DeclareLaunchArgument(\n            "use_sim_time"' in book_launch
+    assert 'DeclareLaunchArgument(\n            "detected_marker_frame"' in book_launch
+    assert 'DeclareLaunchArgument(\n            "detected_book_frame"' in book_launch
     assert "eef_tcp_context_capture" in book_launch
     assert "stationary_capture_pipeline" in setup
     assert "eef_tcp_context_capture" in setup

@@ -54,6 +54,16 @@ def generate_launch_description():
             default_value="false",
             description="Use rosbag /clock for offline replay.",
         ),
+        DeclareLaunchArgument(
+            "detected_marker_frame",
+            default_value="calibration_aruco0_marker",
+            description="Dynamic TF child frame for the detected marker.",
+        ),
+        DeclareLaunchArgument(
+            "detected_book_frame",
+            default_value="calibration_detected_book",
+            description="Dynamic TF child frame for the marker-derived book centre.",
+        ),
     ]
     calibrator = Node(
         package="bookshelf_shadow_ros",
@@ -69,6 +79,12 @@ def generate_launch_description():
                 ),
                 "enable_frame_audit": ParameterValue(
                     LaunchConfiguration("enable_frame_audit"), value_type=bool
+                ),
+                "detected_marker_frame": LaunchConfiguration(
+                    "detected_marker_frame"
+                ),
+                "detected_book_frame": LaunchConfiguration(
+                    "detected_book_frame"
                 ),
                 "use_sim_time": ParameterValue(
                     LaunchConfiguration("use_sim_time"), value_type=bool

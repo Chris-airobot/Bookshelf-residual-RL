@@ -380,7 +380,7 @@ def build_stationary_calibration_bundle(
         },
         "policy_observation_adapter": {
             "ros__parameters": {
-                "book_pose_source": "eef_fixed",
+                "book_pose_source": "marker",
                 "latch_eef_book_from_marker": False,
                 "use_configured_eef_book_transform": True,
                 "eef_book_translation_xyz": transform_eef_book[:3, 3].tolist(),

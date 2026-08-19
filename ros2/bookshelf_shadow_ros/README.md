@@ -61,6 +61,36 @@ Use the generated YAML as `check_config`, `target_config`, and
 `adapter_config`. Its adjacent provenance JSON binds the approved configuration
 to the candidate SHA256.
 
+### Promote one synchronized A/B/C calibration
+
+After `stationary_capture_pipeline` has produced a valid cross-view slot and
+book/tool bundle, review the View A slot, View B identity check, projected book,
+policy-tool axes, and coarse physical scene. Then promote every linked transform
+together:
+
+```bash
+ros2 run bookshelf_shadow_ros promote_stationary_calibration \
+  --bundle /path/to/stationary_calibration_bundle_candidate.json \
+  --shadow-replay-pipeline-report \
+    /path/to/stationary_shadow_replay_pipeline_report.json \
+  --output-dir /path/to/reviewed_trial \
+  --reviewer OPERATOR_NAME \
+  --slot-approval-token VISUALLY_APPROVED_STATIC_SLOT \
+  --book-approval-token VISUALLY_APPROVED_BOOK_PROJECTION \
+  --policy-tool-approval-token VERIFIED_POLICY_TOOL_FRAME \
+  --scene-approval-token REVIEWED_PHYSICAL_SCENE
+```
+
+The offline command verifies every recorded source hash and the linked shadow
+replay hashes, requires marker-only book observations and one frozen slot,
+checks EEF/book/TCP composition, preserves the simulator book-to-policy-tool
+convention, and checks that zero policy displacement reproduces the current
+TCP. A matching legacy `eef_fixed` candidate may be migrated to `marker` only
+through this evidence-bound path. It atomically writes `trial_static_slot.yaml`
+and adjacent provenance into a new directory. Pass the same YAML as both
+`target_config` and `scene_config`; local insertion and robot execution remain
+disabled.
+
 ## Calibrate the grasped book frame from the recorded marker bag
 
 The recorded calibration view uses `DICT_ARUCO_ORIGINAL`, marker ID 0, a
@@ -133,8 +163,16 @@ The diagnostic candidate keeps the measured book centre fixed and rotates only
 the semantic axes by +90 degrees about the saved book +Z axis. The 2026-08-14
 replay rejected that rotation: the saved spine-mount frame was 6.35 degrees
 from the simulator-axis hypothesis and the rotated frame was 91.19 degrees
-away. The diagnostic remains available to make that result reproducible; it is
-not an active calibration.
+away. Current debug images therefore render the diagnostic-preferred policy
+book frame in yellow: it overlays the cyan saved frame when the stale +90
+degree candidate is worse. The rejected transform remains in the JSON report
+for reproducibility; it is not an active calibration.
+
+For insertion, the approved slot is frozen in `link_base`, while the policy
+adapter requires the continuously updated `target_book_center` marker frame.
+The measured fixed TCP-to-book transform remains a grasp/collision reference;
+it is not substituted for live book perception. Missing or stale marker TF
+makes the policy observation invalid.
 
 ```bash
 ros2 launch bookshelf_shadow_ros marker_book_bag_calibration.launch.py \
@@ -919,3 +957,21 @@ simulator-derived per-channel envelope, and a consecutive-sample requirement.
 See [OFFLINE_HANDOFF.md](OFFLINE_HANDOFF.md) for the acceptance logic and the
 remaining physical checks. The gate only enables shadow inference; it never
 authorizes hardware execution.
+
+## Offline frozen-slot/live-book replay
+
+`stationary_shadow_replay` either regenerates the unapproved A/B/C calibration
+candidate or consumes a completed `stationary_capture_pipeline` directory. It
+freezes the slot from View A and replays the attached-book Bag C through
+continuous marker detection, the 12D observation adapter, and the
+residual-policy shadow node. Bag B remains an independent consistency check;
+it is never averaged into the primary slot pose. Reusing a completed candidate
+avoids repeating the timing-sensitive RGB-D calibration during policy-shadow
+development; its YAML hash and measured EEF-to-book transform are checked
+before replay.
+
+The command writes `stationary_shadow_replay_report.json`, a per-sample CSV,
+and policy activation diagnostics. A Bag C captured away from the insertion
+region may pass observation validation while policy activation remains closed.
+The launch contains no planner, executor, controller, gripper, or robot-command
+client, and it never promotes the generated candidate.

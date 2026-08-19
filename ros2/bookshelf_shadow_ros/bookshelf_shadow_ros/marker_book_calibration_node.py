@@ -454,16 +454,15 @@ class MarkerBookCalibrationNode(Node):
             self.get_parameter("frame_audit_candidate_frame").value
         )
         if self.frame_audit_enabled:
-            transform_eef_candidate = apply_book_axis_correction(
-                transform_eef_book,
-                self.transform_old_book_policy_book,
+            transform_eef_policy_book, _ = self._diagnostic_policy_book_transform(
+                transform_eef_book
             )
             transforms.append(
                 self._transform_message(
                     stamp,
                     str(self.get_parameter("eef_frame").value),
                     candidate_frame,
-                    transform_eef_candidate,
+                    transform_eef_policy_book,
                 )
             )
         self.detected_tf_broadcaster.sendTransform(transforms)
@@ -525,17 +524,8 @@ class MarkerBookCalibrationNode(Node):
             markers.append(candidate_book)
             markers.extend(
                 self._axis_markers(
-                    book_frame,
-                    "saved",
-                    20,
-                    lifetime_sec,
-                    lifetime_nanosec,
-                )
-            )
-            markers.extend(
-                self._axis_markers(
                     candidate_frame,
-                    "candidate",
+                    "policy_book",
                     30,
                     lifetime_sec,
                     lifetime_nanosec,
@@ -720,7 +710,7 @@ class MarkerBookCalibrationNode(Node):
         )
         cv2.putText(
             debug,
-            "saved book frame (cyan)",
+            "live policy book frame (cyan)",
             (20, 62),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.65,
@@ -729,9 +719,13 @@ class MarkerBookCalibrationNode(Node):
             cv2.LINE_AA,
         )
         if self.frame_audit_enabled:
-            transform_camera_candidate = apply_book_axis_correction(
-                transform_camera_book,
-                self.transform_old_book_policy_book,
+            transform_eef_book = self.transform_eef_camera @ transform_camera_book
+            transform_eef_policy_book, preferred_source = (
+                self._diagnostic_policy_book_transform(transform_eef_book)
+            )
+            transform_camera_candidate = (
+                invert_transform(self.transform_eef_camera)
+                @ transform_eef_policy_book
             )
             self._draw_book_cuboid(
                 debug,
@@ -754,7 +748,7 @@ class MarkerBookCalibrationNode(Node):
             )
             cv2.putText(
                 debug,
-                "candidate policy frame (yellow; axes X/Y/Z)",
+                f"policy book frame (yellow; {preferred_source} axes)",
                 (20, 90),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.65,
@@ -778,6 +772,22 @@ class MarkerBookCalibrationNode(Node):
             str(output_dir / f"sample_{len(self.accumulator.samples):04d}.png"),
             debug,
         )
+
+    def _diagnostic_policy_book_transform(self, transform_eef_book):
+        audit = book_frame_audit_report(
+            transform_eef_book,
+            transform_old_book_policy_book=self.transform_old_book_policy_book,
+            expected_rotation_eef_policy_book=self.expected_policy_book_rotation_eef,
+        )
+        if audit["candidate_preferred"]:
+            return (
+                apply_book_axis_correction(
+                    transform_eef_book,
+                    self.transform_old_book_policy_book,
+                ),
+                "corrected",
+            )
+        return np.asarray(transform_eef_book, dtype=np.float64), "saved"
 
     def _draw_book_cuboid(
         self,
@@ -1010,7 +1020,8 @@ class MarkerBookCalibrationNode(Node):
         payload = {
             "policy_observation_adapter": {
                 "ros__parameters": {
-                    "book_pose_source": "eef_fixed",
+                    "book_pose_source": "marker",
+                    "latch_eef_book_from_marker": False,
                     "use_configured_eef_book_transform": True,
                     "eef_book_translation_xyz": [
                         float(value) for value in result["translation_xyz_m"]

@@ -52,9 +52,35 @@ def test_stale_cover_rotation_candidate_reduces_same_grasp_axis_error():
         "candidate_rotation_error_to_same_grasp_hypothesis_deg"
     ] == pytest.approx(6.3604064198)
     assert report["candidate_improvement_deg"] > 80.0
+    assert report["candidate_preferred"] is True
+    assert report["diagnostic_preferred_frame"] == "candidate"
     assert report["selection_authorized"] is False
     assert report["active_configuration_modified"] is False
     assert report["hardware_commanded"] is False
+
+
+def test_measured_spine_frame_rejects_stale_quarter_turn_candidate():
+    recorded = make_transform(
+        [0.006189808263520789, 0.004397635899244547, 0.18076520526773382],
+        [
+            0.7170947434170492,
+            0.01281329455160485,
+            0.6961397093730864,
+            0.03162994594249451,
+        ],
+    )
+
+    report = book_frame_audit_report(recorded)
+
+    assert report["saved_rotation_error_to_same_grasp_hypothesis_deg"] == pytest.approx(
+        4.2643303096
+    )
+    assert report[
+        "candidate_rotation_error_to_same_grasp_hypothesis_deg"
+    ] == pytest.approx(86.4217228016)
+    assert report["candidate_improvement_deg"] < -80.0
+    assert report["candidate_preferred"] is False
+    assert report["diagnostic_preferred_frame"] == "saved"
 
 
 def test_axis_correction_rejects_translation():

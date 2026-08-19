@@ -793,21 +793,27 @@ def audit_shadow_source_tree(source_root) -> list[dict]:
                         and isinstance(element.value, str)
                     )
 
-        # The physical preflight names prohibited processes only so it can
-        # prove they are absent from the live ROS graph. Those literals are
-        # audit inputs, not subprocess or launch targets.
+        # The physical preflight and stationary replay pipeline name prohibited
+        # processes only so they can prove those nodes are absent. Those exact
+        # blocklist literals are audit inputs, not subprocess or launch targets.
         prohibited_process_name_nodes = set()
-        if path.name == "physical_experiment_preflight.py":
+        blocklist_names = {
+            "physical_experiment_preflight.py": {
+                "CRITICAL_NODE_NAMES",
+                "PROHIBITED_EXECUTION_NODES",
+                "REQUIRED_HARDWARE_NODES",
+            },
+            "stationary_capture_pipeline.py": {
+                "EXECUTION_NODE_FRAGMENTS",
+            },
+        }.get(path.name, set())
+        if blocklist_names:
             for statement in tree.body:
                 if not isinstance(statement, ast.Assign):
                     continue
                 if not any(
                     isinstance(target, ast.Name)
-                    and target.id in {
-                        "CRITICAL_NODE_NAMES",
-                        "PROHIBITED_EXECUTION_NODES",
-                        "REQUIRED_HARDWARE_NODES",
-                    }
+                    and target.id in blocklist_names
                     for target in statement.targets
                 ):
                     continue

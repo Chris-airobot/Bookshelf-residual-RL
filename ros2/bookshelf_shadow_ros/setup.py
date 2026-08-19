@@ -64,6 +64,12 @@ setup(
             "bookshelf_shadow_ros.eef_tcp_context_capture_node:main",
             "stationary_capture_pipeline = "
             "bookshelf_shadow_ros.stationary_capture_pipeline:main",
+            "stationary_shadow_replay = "
+            "bookshelf_shadow_ros.stationary_shadow_replay:main",
+            "stationary_shadow_replay_audit = "
+            "bookshelf_shadow_ros.stationary_shadow_replay_audit_node:main",
+            "promote_stationary_calibration = "
+            "bookshelf_shadow_ros.stationary_calibration_promotion:main",
         ],
     },
 )

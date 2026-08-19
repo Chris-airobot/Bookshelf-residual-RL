@@ -1,0 +1,79 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.30
+      Cell Size: 0.1
+      Class: rviz_default_plugins/Grid
+      Color: 120; 125; 132
+      Enabled: true
+      Name: Base Grid
+      Plane: XY
+      Plane Cell Count: 20
+      Reference Frame: link_base
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Name: Recorded xArm7
+      Visual Enabled: true
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 1
+      Marker Scale: 0.08
+      Name: Recorded and Detected TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Live Marker Book
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_policy/book_boxes
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Frozen Slot and Insertion Axis
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_shadow/stationary_replay_markers
+  Enabled: true
+  Global Options:
+    Background Color: 32; 35; 39
+    Fixed Frame: link_base
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.6
+      Focal Point:
+        X: 0.72
+        Y: 0.08
+        Z: 0.17
+      Name: Stationary Shadow Replay
+      Pitch: 0.35
+      Target Frame: link_base
+      Yaw: 3.14
+Window Geometry:
+  Height: 900
+  Width: 1400

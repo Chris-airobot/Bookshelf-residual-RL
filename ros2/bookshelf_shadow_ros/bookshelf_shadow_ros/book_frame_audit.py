@@ -89,6 +89,7 @@ def book_frame_audit_report(
     )
     current_error = _rotation_error_deg(expected, current[:3, :3])
     candidate_error = _rotation_error_deg(expected, candidate[:3, :3])
+    candidate_preferred = candidate_error + 1.0e-6 < current_error
     return {
         "schema_version": 1,
         "kind": "bookshelf_book_frame_axis_audit",
@@ -118,6 +119,10 @@ def book_frame_audit_report(
         "saved_rotation_error_to_same_grasp_hypothesis_deg": current_error,
         "candidate_rotation_error_to_same_grasp_hypothesis_deg": candidate_error,
         "candidate_improvement_deg": current_error - candidate_error,
+        "diagnostic_preferred_frame": (
+            "candidate" if candidate_preferred else "saved"
+        ),
+        "candidate_preferred": candidate_preferred,
         "human_visual_review_required": True,
         "limitations": [
             "The expected xArm-to-simulator hand-axis correspondence is a hypothesis.",

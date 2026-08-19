@@ -69,6 +69,8 @@ def generate_launch_description():
         launch_arguments={
             "output_dir": LaunchConfiguration("calibration_output_dir"),
             "target_samples": LaunchConfiguration("calibration_target_samples"),
+            "detected_marker_frame": "target_book_marker",
+            "detected_book_frame": "target_book_center",
             # The real-xArm bringup owns the single old-style MoveIt RViz.
             "enable_rviz": "false",
         }.items(),

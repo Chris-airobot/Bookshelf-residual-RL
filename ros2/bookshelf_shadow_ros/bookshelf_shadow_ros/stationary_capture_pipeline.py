@@ -36,6 +36,9 @@ PIPELINE_NODE_NAMES = (
     "/static_slot_capture",
     "/marker_book_calibration",
     "/eef_tcp_context_capture",
+    "/policy_observation_adapter",
+    "/policy_shadow_inference",
+    "/stationary_shadow_replay_audit",
 )
 
 

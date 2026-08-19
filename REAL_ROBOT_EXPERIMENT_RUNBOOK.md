@@ -393,3 +393,67 @@ Stop the experiment without execution if any of these occurs:
 - the reviewed executor configuration or approval token is missing;
 - automatic logging is not active;
 - the operator cannot immediately stop the robot.
+
+## Appendix: Offline Stationary A/B/C Calibration
+
+This workflow processes the three stationary observation bags without starting
+MoveIt, a controller, a gripper interface, or a robot-command node:
+
+- View A: close slot view, no book;
+- View B: independent slot view, no book;
+- View C: book attached in the intended rigid grasp at a safe stationary pose.
+
+The command replays only raw RGB, aligned depth, CameraInfo, `/tf`, and
+`/tf_static`. Recorded detector outputs and controller/action topics are not
+replayed. A and B are processed independently and must agree before a fused
+slot candidate is written. C produces `T_link_eef_book`, captures the fixed
+`T_link_eef_link_tcp`, and derives the TCP book and virtual policy-tool
+candidate transforms.
+
+### Alienware Terminal
+
+```bash
+source /opt/ros/humble/setup.bash
+
+cd /home/chris/Chris/bookshelf-unified
+
+colcon --log-base /tmp/bookshelf_stationary_pipeline_log \
+  build \
+  --base-paths ros2/bookshelf_shadow_ros \
+  --build-base /tmp/bookshelf_stationary_pipeline_build \
+  --install-base /tmp/bookshelf_stationary_pipeline_install \
+  --packages-select bookshelf_shadow_ros
+
+source /tmp/bookshelf_stationary_pipeline_install/setup.bash
+
+ROOT=/home/chris/BookshelfFiles/real_robot_bags/stationary_captures_20260817_abc
+OUT=/home/chris/BookshelfFiles/evaluation_results/stationary_capture_pipeline/$(date +%Y-%m-%d_%H-%M-%S)
+
+ros2 run bookshelf_shadow_ros stationary_capture_pipeline \
+  --view-a-run "$ROOT/2026-08-17_23-04-44_slot_close_view_a_20260817_230444" \
+  --view-b-run "$ROOT/2026-08-17_23-07-06_slot_close_view_b_20260817_230706" \
+  --book-run "$ROOT/2026-08-17_23-17-21_book_attached_safe_pose_20260817_231721" \
+  --repository /home/chris/Chris/bookshelf-unified \
+  --slot-minimum-confidence 0.55 \
+  --output-dir "$OUT"
+```
+
+The `0.55` threshold is specific to the recorded alternate View B, whose
+stable detector confidence lies around `0.58-0.61`. It does not bypass the
+120-sample robust filter or the independent A/B pose and width agreement gate.
+
+The expected final files are:
+
+- `capture_input_audit.json`;
+- `view_a/static_slot_capture_candidate.json`;
+- `view_b/static_slot_capture_candidate.json`;
+- `static_slot_cross_view_candidate.json`;
+- `book/marker_book_calibration_summary.json`;
+- `book/eef_tcp_context.json`;
+- `stationary_calibration_candidate.yaml`;
+- `stationary_calibration_bundle_candidate.json`.
+
+Even when every candidate is valid, the generated bundle states
+`candidate_selected=false`, `execution_authorized=false`, and
+`hardware_commanded=false`. Human visual review and the existing separate
+promotion gates remain mandatory.
