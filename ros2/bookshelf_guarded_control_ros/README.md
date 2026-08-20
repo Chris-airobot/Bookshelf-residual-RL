@@ -128,15 +128,15 @@ ros2 launch bookshelf_guarded_control_ros physical_policy_deployment.launch.py \
   approved_config:=/path/to/trial_static_slot.yaml \
   policy_bundle:=/path/to/bookshelf_shadow_actor.npz \
   activation_envelope:=/path/to/activation_envelope.json \
-  execution_mode:=shadow
+  operation:=calculate
 ```
 
 The policy launch explicitly disables nested hardware and marker-detector
 bringup. It starts the slot diagnostic, held-book gate, logging, observation
-adapter, shadow inference, and audit exactly once. `shadow` starts no planner
-or executor. `plan_only` adds checked MoveIt planning without execution.
-`single_step` adds the existing one-shot guarded executor, but remains closed
-unless local-scene permission and a non-default approval token are both set.
+adapter, policy calculation, and audit exactly once. `calculate` starts no
+planner or executor. `plan` adds checked MoveIt planning without execution.
+`move_once` adds the existing one-shot guarded executor, but remains closed
+unless a non-default approval token is set.
 Stop both terminals before restarting either stack.
 
 ## Build and test

@@ -6,6 +6,7 @@ import numpy as np
 from bookshelf_shadow_ros.policy_activation import (
     PolicyActivationLimits,
     PolicyActivationTracker,
+    activation_allows_policy_calculation,
     activation_decision_dict,
     build_activation_envelope,
     evaluate_policy_activation,
@@ -133,3 +134,12 @@ def test_build_activation_envelope_adds_margin_and_absolute_limit():
     assert np.all(lower >= -0.70)
     assert np.all(upper <= 0.70)
     assert np.all(lower < upper)
+
+
+def test_activation_warnings_do_not_block_when_disabled():
+    assert activation_allows_policy_calculation(False, False)
+
+
+def test_activation_checks_still_block_when_enabled():
+    assert not activation_allows_policy_calculation(False, True)
+    assert activation_allows_policy_calculation(True, True)

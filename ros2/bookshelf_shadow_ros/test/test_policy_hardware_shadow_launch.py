@@ -22,3 +22,9 @@ def test_shadow_launch_remains_read_only():
         "guarded_policy_tool_executor",
     ):
         assert forbidden not in source
+
+
+def test_activation_checks_can_be_made_diagnostic_only():
+    source = LAUNCH.read_text(encoding="utf-8")
+    assert '"block_on_activation_checks"' in source
+    assert 'LaunchConfiguration("block_on_activation_checks")' in source

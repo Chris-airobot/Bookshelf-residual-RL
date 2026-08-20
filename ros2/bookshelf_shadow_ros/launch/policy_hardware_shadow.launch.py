@@ -29,7 +29,7 @@ def generate_launch_description():
     inference_config_argument = DeclareLaunchArgument(
         "inference_config",
         default_value=default_inference_config,
-        description="Shadow policy inference parameter file.",
+        description="Policy inference parameter file.",
     )
     bundle_argument = DeclareLaunchArgument(
         "policy_bundle",
@@ -45,15 +45,23 @@ def generate_launch_description():
         default_value="true",
         description="Fail closed unless the simulator activation envelope is loaded.",
     )
+    block_on_activation_checks_argument = DeclareLaunchArgument(
+        "block_on_activation_checks",
+        default_value="true",
+        description=(
+            "When false, activation checks are reported but do not block policy "
+            "calculation."
+        ),
+    )
     audit_config_argument = DeclareLaunchArgument(
         "audit_config",
         default_value=default_audit_config,
-        description="Complete shadow-stream audit parameter file.",
+        description="Policy-stream audit parameter file.",
     )
     enable_audit_argument = DeclareLaunchArgument(
         "enable_audit",
         default_value="true",
-        description="Record the read-only observation and policy stream.",
+        description="Record the observation and calculated policy stream.",
     )
     audit_output_argument = DeclareLaunchArgument(
         "audit_output_dir",
@@ -117,6 +125,10 @@ def generate_launch_description():
                     LaunchConfiguration("require_activation_envelope"),
                     value_type=bool,
                 ),
+                "block_on_activation_checks": ParameterValue(
+                    LaunchConfiguration("block_on_activation_checks"),
+                    value_type=bool,
+                ),
             },
         ],
     )
@@ -149,6 +161,7 @@ def generate_launch_description():
             bundle_argument,
             activation_envelope_argument,
             require_activation_envelope_argument,
+            block_on_activation_checks_argument,
             audit_config_argument,
             enable_audit_argument,
             audit_output_argument,

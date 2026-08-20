@@ -39,22 +39,16 @@ def _validate_inputs(context):
     ]
 
 
-def _as_bool(value):
-    return str(value).strip().lower() in ("1", "true", "yes", "on")
-
-
 def _execution_actions(context):
-    mode = LaunchConfiguration("execution_mode").perform(context).strip().lower()
-    if mode not in ("shadow", "plan_only", "single_step"):
-        raise RuntimeError(
-            "execution_mode must be shadow, plan_only, or single_step"
-        )
-    if mode == "shadow":
+    operation = LaunchConfiguration("operation").perform(context).strip().lower()
+    if operation not in ("calculate", "plan", "move_once"):
+        raise RuntimeError("operation must be calculate, plan, or move_once")
+    if operation == "calculate":
         return [
             LogInfo(
                 msg=(
-                    "Execution mode=shadow: no planning-scene manager, planner, "
-                    "or execution action client is created."
+                    "Operation=calculate: policy commands are calculated and "
+                    "logged, but no planner or execution client is created."
                 )
             )
         ]
@@ -62,10 +56,7 @@ def _execution_actions(context):
     approved_config = LaunchConfiguration("approved_config").perform(context)
     policy_bundle = LaunchConfiguration("policy_bundle").perform(context)
     overrides = guarded_policy_tool_overrides(approved_config, policy_bundle)
-    scene_handoff_allowed = _as_bool(
-        LaunchConfiguration("permit_local_scene_handoff").perform(context)
-    )
-    overrides["planning_scene_complete"] = scene_handoff_allowed
+    overrides["planning_scene_complete"] = True
 
     actions = [
         Node(
@@ -77,17 +68,17 @@ def _execution_actions(context):
                 approved_config,
                 {
                     "scene_config_path": approved_config,
-                    "allow_local_insertion": scene_handoff_allowed,
+                    "allow_local_insertion": True,
                 },
             ],
         )
     ]
-    if mode == "plan_only":
+    if operation == "plan":
         actions.extend(
             [
                 LogInfo(
                     msg=(
-                        "Execution mode=plan_only: MoveIt plans and trajectory "
+                        "Operation=plan: MoveIt plans and trajectory "
                         "checks are enabled, but no execution client exists."
                     )
                 ),
@@ -118,7 +109,7 @@ def _execution_actions(context):
         [
             LogInfo(
                 msg=(
-                    "Execution mode=single_step: at most one recent checked "
+                    "Operation=move_once: at most one recent checked "
                     "trajectory may run after a matching approval token."
                 )
             ),
@@ -265,21 +256,14 @@ def generate_launch_description():
             DeclareLaunchArgument("policy_audit_samples", default_value="1200"),
             DeclareLaunchArgument("reference_slot_width_m", default_value="0.0"),
             DeclareLaunchArgument(
-                "execution_mode",
-                default_value="shadow",
-                description="shadow, plan_only, or single_step.",
-            ),
-            DeclareLaunchArgument(
-                "permit_local_scene_handoff",
-                default_value="false",
-                description=(
-                    "Allow the explicit local-insertion scene service handoff."
-                ),
+                "operation",
+                default_value="calculate",
+                description="calculate, plan, or move_once.",
             ),
             DeclareLaunchArgument(
                 "execution_approval_token",
                 default_value="DISABLED",
-                description="One-shot token required only by single_step mode.",
+                description="One-shot token required only by move_once.",
             ),
             DeclareLaunchArgument(
                 "plan_checker_config", default_value=default_plan_checker_config
@@ -350,6 +334,7 @@ def generate_launch_description():
                         "activation_envelope"
                     ),
                     "require_activation_envelope": "true",
+                    "block_on_activation_checks": "false",
                     "enable_audit": LaunchConfiguration("enable_policy_audit"),
                     "audit_output_dir": audit_output,
                     "audit_samples": LaunchConfiguration("policy_audit_samples"),

@@ -130,7 +130,7 @@ ros2 launch bookshelf_guarded_control_ros \
   repository_path:=/home/riot/Chris/bookshelf-unified \
   policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
   activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
-  execution_mode:=shadow \
+  operation:=calculate \
   record_camera:=true \
   record_raw_replay_inputs:=false \
   capture_condition:=book_attached \
@@ -139,16 +139,15 @@ ros2 launch bookshelf_guarded_control_ros \
 
 This launch reuses the live hardware topics. It owns the sole RGB-D slot
 detector, frozen-slot diagnostics, held-book gate, logger, policy adapter,
-shadow inference, and policy audit. In the default `shadow` mode it starts no
+policy calculation and policy audit. In the default `calculate` operation it starts no
 planning-scene manager, planner, or executor. Policy output remains diagnostic
 and cannot move the robot.
 
 For a planning rehearsal, use the same command with
-`execution_mode:=plan_only permit_local_scene_handoff:=true`. This adds the
+`operation:=plan`. This adds the
 planning-scene manager and checked MoveIt planner but no execution client.
 
-`single_step` is the only motion-capable mode. It additionally requires
-`permit_local_scene_handoff:=true` and a non-default
+`move_once` is the only motion-capable operation. It requires a non-default
 `execution_approval_token`. The guarded executor accepts at most one recent
 checked trajectory per process, only after the matching token is published on
 `/bookshelf_guarded/approve_once`. It has no gripper interface.

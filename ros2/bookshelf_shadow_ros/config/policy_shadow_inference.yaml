@@ -10,6 +10,7 @@ policy_shadow_inference:
     # the normalized observation is inside a reviewed simulator envelope.
     activation_envelope_path: ""
     require_activation_envelope: true
+    block_on_activation_checks: true
     activation_stable_samples: 10
     maximum_abs_normalized_observation: 5.0
     activation_minimum_rear_to_mouth_m: -0.26

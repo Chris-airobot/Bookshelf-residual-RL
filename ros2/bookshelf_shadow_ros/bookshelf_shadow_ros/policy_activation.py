@@ -53,6 +53,15 @@ class PolicyActivationDecision:
     evaluation: PolicyActivationEvaluation
 
 
+def activation_allows_policy_calculation(
+    checks_passed: bool,
+    block_on_activation_checks: bool,
+) -> bool:
+    """Return whether diagnostic activation checks may block calculation."""
+
+    return bool(checks_passed) or not bool(block_on_activation_checks)
+
+
 def load_activation_envelope(path) -> ActivationEnvelope:
     path = Path(path).expanduser().resolve()
     document = json.loads(path.read_text(encoding="utf-8"))

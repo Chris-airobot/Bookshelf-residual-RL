@@ -11,6 +11,7 @@ from std_msgs.msg import Bool, Float32MultiArray, String
 from .policy_activation import (
     PolicyActivationLimits,
     PolicyActivationTracker,
+    activation_allows_policy_calculation,
     activation_decision_dict,
     evaluate_policy_activation,
     load_activation_envelope,
@@ -31,7 +32,7 @@ from .policy_shadow_math import (
 
 
 class PolicyShadowInferenceNode(Node):
-    """Fail-closed, observation-gated policy inference for integration testing."""
+    """Calculate bounded policy commands from fresh, valid observations."""
 
     def __init__(self):
         super().__init__("policy_shadow_inference")
@@ -144,6 +145,7 @@ class PolicyShadowInferenceNode(Node):
         self.declare_parameter("pair_max_skew_s", 0.10)
         self.declare_parameter("activation_envelope_path", "")
         self.declare_parameter("require_activation_envelope", False)
+        self.declare_parameter("block_on_activation_checks", True)
         self.declare_parameter("activation_stable_samples", 10)
         self.declare_parameter("maximum_abs_normalized_observation", 5.0)
         self.declare_parameter("activation_minimum_rear_to_mouth_m", -0.26)
@@ -357,8 +359,19 @@ class PolicyShadowInferenceNode(Node):
             )
             activation = self.activation_tracker.update(activation_evaluation)
             activation_debug = activation_decision_dict(activation)
+            checks_passed = bool(activation.ready)
+            blocking_enabled = bool(
+                self.get_parameter("block_on_activation_checks").value
+            )
+            calculation_allowed = activation_allows_policy_calculation(
+                checks_passed,
+                blocking_enabled,
+            )
             activation_debug.update(
                 {
+                    "checks_passed": checks_passed,
+                    "blocking_enabled": blocking_enabled,
+                    "ready": calculation_allowed,
                     "shadow_only": True,
                     "hardware_commanded": False,
                     "envelope_source": (
@@ -369,7 +382,7 @@ class PolicyShadowInferenceNode(Node):
                 }
             )
             self._publish_activation(activation_debug)
-            if not activation.ready:
+            if not calculation_allowed:
                 reason = (
                     "; ".join(activation.evaluation.reasons)
                     if activation.evaluation.reasons
@@ -431,7 +444,7 @@ class PolicyShadowInferenceNode(Node):
             "bundle_sha256": self.bundle_sha256,
             "vecnormalize_applied": True,
             "deterministic": True,
-            "policy_activation_ready": True,
+            "policy_activation_ready": bool(activation_debug["ready"]),
             "policy_activation": activation_debug,
             "observation_12d": self.latest_observation.round(7).tolist(),
             "normalized_observation": normalized.round(7).tolist(),
@@ -459,7 +472,7 @@ class PolicyShadowInferenceNode(Node):
         self.debug_publisher.publish(String(data=json.dumps(debug, sort_keys=True)))
         self._log_status_once(
             "valid",
-            "Valid shadow inference: VecNormalize -> PPO actor -> nominal/residual diagnostics.",
+            "Valid policy calculation: VecNormalize -> PPO actor -> bounded delta.",
         )
 
     def _publish_activation(self, debug):
