@@ -115,7 +115,7 @@ def validate_shadow_rehearsal_assets(
 
 
 def guarded_policy_tool_overrides(approved_config, policy_bundle) -> dict:
-    """Extract execution provenance and T_link_tcp_policy_tool from one approval."""
+    """Extract approved EEF, TCP and policy-tool transforms for control."""
 
     config_path = _required_file(approved_config, "approved configuration")
     policy_path = _required_file(policy_bundle, "policy bundle")
@@ -160,6 +160,10 @@ def guarded_policy_tool_overrides(approved_config, policy_bundle) -> dict:
     )
 
     return {
+        "eef_tcp_translation_xyz": transform_eef_tcp[:3, 3].tolist(),
+        "eef_tcp_quaternion_xyzw": matrix_to_quaternion_xyzw(
+            transform_eef_tcp[:3, :3]
+        ).tolist(),
         "tcp_policy_tool_translation_xyz": transform_tcp_policy_tool[:3, 3].tolist(),
         "tcp_policy_tool_quaternion_xyzw": matrix_to_quaternion_xyzw(
             transform_tcp_policy_tool[:3, :3]

@@ -2,32 +2,32 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NODE = (
-    ROOT
-    / "bookshelf_guarded_control_ros"
-    / "direct_policy_servo_node.py"
-)
+NODE = ROOT / "bookshelf_guarded_control_ros" / "direct_policy_servo_node.py"
 
 
-def test_direct_servo_uses_xarm_service_without_moveit_or_gripper():
+def test_policy_controller_uses_moveit_servo_without_direct_xarm_services():
     source = NODE.read_text(encoding="utf-8")
 
     required = (
-        "MoveCartesian",
-        '"/xarm/set_servo_cartesian_aa"',
+        "TwistStamped",
+        '"/servo_server/start_servo"',
+        '"/servo_server/delta_twist_cmds"',
         "compute_policy_tool_target",
+        "eef_target_from_tcp_target",
+        "bounded_error_twist",
         "target_safety_error",
         "provenance_error",
-        "control_rate_hz",
-        "policy_command_duration_s",
-        "request.relative = False",
-        "request.is_tool_coord = False",
+        "_publish_zero_twist",
     )
     for token in required:
         assert token in source
 
     forbidden = (
-        "moveit_msgs",
+        "MoveCartesian",
+        "SetInt16",
+        "/xarm/set_mode",
+        "/xarm/set_state",
+        "/xarm/set_servo_cartesian_aa",
         "GetMotionPlan",
         "ExecuteTrajectory",
         "FollowJointTrajectory",

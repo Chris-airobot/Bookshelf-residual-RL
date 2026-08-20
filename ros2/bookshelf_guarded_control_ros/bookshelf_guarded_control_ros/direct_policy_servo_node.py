@@ -1,25 +1,24 @@
 #!/usr/bin/env python3
-"""Apply fresh policy deltas through the xArm Cartesian servo service."""
+"""Apply fresh policy deltas through the existing MoveIt Servo server."""
 
 from __future__ import annotations
 
-from collections import deque
 import json
 import math
 
-from geometry_msgs.msg import Pose, PoseStamped
+from geometry_msgs.msg import Pose, PoseStamped, TwistStamped
 import numpy as np
 import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.time import Time
 from std_msgs.msg import Bool, Float32MultiArray, String
+from std_srvs.srv import Trigger
 import tf2_ros
-from xarm_msgs.srv import MoveCartesian, SetInt16
 
 from .direct_policy_servo_math import (
-    interpolate_transform,
-    transform_to_xarm_axis_angle_pose,
+    bounded_error_twist,
+    eef_target_from_tcp_target,
 )
 from .policy_tool_control_math import (
     TargetSafetyLimits,
@@ -61,24 +60,22 @@ def _transform_to_pose(transform: np.ndarray) -> Pose:
 
 
 class DirectPolicyServo(Node):
-    """Convert policy-tool deltas into smooth absolute xArm TCP commands."""
+    """Convert policy-tool deltas into bounded link_eef velocity commands."""
 
     def __init__(self):
         super().__init__("direct_policy_servo")
         self._declare_parameters()
         self.base_frame = str(self.get_parameter("base_frame").value)
+        self.eef_frame = str(self.get_parameter("eef_frame").value)
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
-        self.servo_client = self.create_client(
-            MoveCartesian, str(self.get_parameter("servo_service").value)
+        self.start_servo_client = self.create_client(
+            Trigger, str(self.get_parameter("start_servo_service").value)
         )
-        self.mode_client = self.create_client(
-            SetInt16, str(self.get_parameter("set_mode_service").value)
-        )
-        self.state_client = self.create_client(
-            SetInt16, str(self.get_parameter("set_state_service").value)
+        self.twist_publisher = self.create_publisher(
+            TwistStamped, str(self.get_parameter("twist_command_topic").value), 10
         )
 
         self.latest_observation_valid = False
@@ -95,18 +92,14 @@ class DirectPolicyServo(Node):
         self.latest_policy_debug = None
         self.latest_policy_debug_ns = None
 
-        self.mode_state = (
-            "mode_needed"
-            if bool(self.get_parameter("configure_servo_mode").value)
-            else "ready"
-        )
-        self.mode_request_pending = False
-        self.servo_request_pending = False
+        self.servo_state = "start_needed"
+        self.start_request_pending = False
         self.last_prepared_generation = 0
-        self.command_queue = deque()
+        self.active_target = None
+        self.active_target_eef = None
         self.hardware_commanded = False
         self.command_count = 0
-        self.last_response_ret = None
+        self.zero_command_count = 0
         self.last_status_key = None
 
         self.command_valid_publisher = self.create_publisher(
@@ -159,25 +152,36 @@ class DirectPolicyServo(Node):
         rate = max(float(self.get_parameter("control_rate_hz").value), 1.0)
         self.timer = self.create_timer(1.0 / rate, self._timer_callback)
         self.get_logger().warning(
-            "DIRECT POLICY SERVO is motion-capable. It uses xArm Cartesian "
-            "servo commands and has no MoveIt or gripper interface."
+            "POLICY MOVEIT SERVO is motion-capable. It publishes bounded "
+            "twists to the existing xArm trajectory controller and has no "
+            "gripper interface."
         )
 
     def _declare_parameters(self):
         self.declare_parameter("base_frame", "link_base")
+        self.declare_parameter("eef_frame", "link_eef")
         self.declare_parameter("tcp_frame", "link_tcp")
-        self.declare_parameter("servo_service", "/xarm/set_servo_cartesian_aa")
-        self.declare_parameter("set_mode_service", "/xarm/set_mode")
-        self.declare_parameter("set_state_service", "/xarm/set_state")
-        self.declare_parameter("configure_servo_mode", True)
-        self.declare_parameter("servo_mode", 1)
-        self.declare_parameter("ready_state", 0)
-        self.declare_parameter("control_rate_hz", 100.0)
-        self.declare_parameter("policy_command_duration_s", 0.05)
+        self.declare_parameter(
+            "start_servo_service", "/servo_server/start_servo"
+        )
+        self.declare_parameter(
+            "twist_command_topic", "/servo_server/delta_twist_cmds"
+        )
+        self.declare_parameter("control_rate_hz", 30.0)
+        self.declare_parameter("policy_command_duration_s", 0.20)
+        self.declare_parameter("maximum_linear_speed_m_s", 0.025)
+        self.declare_parameter("maximum_angular_speed_rad_s", 0.10)
+        self.declare_parameter("translation_tolerance_m", 0.0005)
+        self.declare_parameter("rotation_tolerance_rad", math.radians(0.25))
         self.declare_parameter("message_max_age_s", 0.50)
         self.declare_parameter("tf_max_age_s", 0.50)
         self.declare_parameter("tf_lookup_timeout_s", 0.02)
         self.declare_parameter("command_scale", 1.0)
+
+        self.declare_parameter("eef_tcp_translation_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter(
+            "eef_tcp_quaternion_xyzw", [0.0, 0.0, 0.0, 1.0]
+        )
 
         self.declare_parameter("tcp_policy_tool_translation_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter(
@@ -322,18 +326,18 @@ class DirectPolicyServo(Node):
         active.discard(self.get_name().lstrip("/"))
         return sorted(blocked.intersection(active))
 
-    def _lookup_base_tcp(self):
+    def _lookup_base_eef(self):
         try:
             message = self.tf_buffer.lookup_transform(
                 self.base_frame,
-                self.tcp_frame,
+                self.eef_frame,
                 Time(),
                 timeout=Duration(
                     seconds=float(self.get_parameter("tf_lookup_timeout_s").value)
                 ),
             )
         except Exception as error:
-            return None, f"TF {self.base_frame} <- {self.tcp_frame} unavailable: {error}"
+            return None, f"TF {self.base_frame} <- {self.eef_frame} unavailable: {error}"
         maximum_age = float(self.get_parameter("tf_max_age_s").value)
         stamp_ns = int(message.header.stamp.sec) * 1_000_000_000 + int(
             message.header.stamp.nanosec
@@ -341,8 +345,14 @@ class DirectPolicyServo(Node):
         if maximum_age > 0.0 and stamp_ns > 0:
             age = (self._now_ns() - stamp_ns) * 1.0e-9
             if age > maximum_age:
-                return None, f"TF {self.base_frame} <- {self.tcp_frame} is stale"
+                return None, f"TF {self.base_frame} <- {self.eef_frame} is stale"
         return _transform_message_to_matrix(message), None
+
+    def _eef_tcp_transform(self) -> np.ndarray:
+        return make_transform(
+            self.get_parameter("eef_tcp_translation_xyz").value,
+            self.get_parameter("eef_tcp_quaternion_xyzw").value,
+        )
 
     def _tool_transform(self) -> np.ndarray:
         return make_transform(
@@ -370,151 +380,146 @@ class DirectPolicyServo(Node):
             ),
         )
 
-    def _configure_mode(self) -> str | None:
-        if self.mode_state == "ready":
+    def _start_servo(self) -> str | None:
+        if self.servo_state == "ready":
             return None
-        if self.mode_request_pending:
-            return f"xArm servo configuration is pending ({self.mode_state})"
-        if self.mode_state == "mode_needed":
-            if not self.mode_client.service_is_ready():
-                return "xArm set_mode service is unavailable"
-            request = SetInt16.Request()
-            request.data = int(self.get_parameter("servo_mode").value)
-            self.mode_request_pending = True
-            future = self.mode_client.call_async(request)
-            future.add_done_callback(self._mode_response_callback)
-            return "xArm servo mode request sent"
-        if self.mode_state == "state_needed":
-            if not self.state_client.service_is_ready():
-                return "xArm set_state service is unavailable"
-            request = SetInt16.Request()
-            request.data = int(self.get_parameter("ready_state").value)
-            self.mode_request_pending = True
-            future = self.state_client.call_async(request)
-            future.add_done_callback(self._state_response_callback)
-            return "xArm ready-state request sent"
-        return f"xArm servo configuration failed: {self.mode_state}"
+        if self.start_request_pending:
+            return "MoveIt Servo start request is pending"
+        if self.servo_state != "start_needed":
+            return f"MoveIt Servo failed to start: {self.servo_state}"
+        if not self.start_servo_client.service_is_ready():
+            return "MoveIt Servo start service is unavailable"
+        self.start_request_pending = True
+        future = self.start_servo_client.call_async(Trigger.Request())
+        future.add_done_callback(self._start_servo_response)
+        return "MoveIt Servo start request sent"
 
-    def _mode_response_callback(self, future):
-        self.mode_request_pending = False
+    def _start_servo_response(self, future):
+        self.start_request_pending = False
         try:
             response = future.result()
         except Exception as error:
-            self.mode_state = f"set_mode exception: {error}"
+            self.servo_state = f"start exception: {error}"
             return
-        if response is None or int(response.ret) != 0:
-            ret = None if response is None else int(response.ret)
-            self.mode_state = f"set_mode returned {ret}"
+        if response is None or not bool(response.success):
+            message = "no response" if response is None else response.message
+            self.servo_state = f"start rejected: {message}"
             return
-        self.mode_state = "state_needed"
-
-    def _state_response_callback(self, future):
-        self.mode_request_pending = False
-        try:
-            response = future.result()
-        except Exception as error:
-            self.mode_state = f"set_state exception: {error}"
-            return
-        if response is None or int(response.ret) != 0:
-            ret = None if response is None else int(response.ret)
-            self.mode_state = f"set_state returned {ret}"
-            return
-        self.mode_state = "ready"
+        self.servo_state = "ready"
 
     def _timer_callback(self):
         error = self._input_error()
         if error:
-            self.command_queue.clear()
+            self._clear_target_and_halt()
             self._publish_status(False, error)
-            return
-        if not self.servo_client.service_is_ready():
-            self.command_queue.clear()
-            self._publish_status(False, "xArm Cartesian servo service is unavailable")
             return
 
-        transform_base_tcp, error = self._lookup_base_tcp()
+        transform_base_eef, error = self._lookup_base_eef()
         if error:
-            self.command_queue.clear()
+            self._clear_target_and_halt()
             self._publish_status(False, error)
             return
-        try:
-            target = compute_policy_tool_target(
-                _pose_to_transform(self.latest_slot_pose.pose),
-                transform_base_tcp,
-                self._tool_transform(),
-                self.latest_delta,
-                command_scale=float(self.get_parameter("command_scale").value),
+        transform_eef_tcp = self._eef_tcp_transform()
+        transform_base_tcp = transform_base_eef @ transform_eef_tcp
+        target = self.active_target
+        if self.latest_delta_generation != self.last_prepared_generation:
+            try:
+                target = compute_policy_tool_target(
+                    _pose_to_transform(self.latest_slot_pose.pose),
+                    transform_base_tcp,
+                    self._tool_transform(),
+                    self.latest_delta,
+                    command_scale=float(
+                        self.get_parameter("command_scale").value
+                    ),
+                )
+            except (TypeError, ValueError, np.linalg.LinAlgError) as error:
+                self._clear_target_and_halt()
+                self._publish_status(False, f"target calculation failed: {error}")
+                return
+            error = target_safety_error(
+                target, self.latest_delta, self._safety_limits()
             )
-        except (TypeError, ValueError, np.linalg.LinAlgError) as error:
-            self.command_queue.clear()
-            self._publish_status(False, f"target calculation failed: {error}")
-            return
-        error = target_safety_error(target, self.latest_delta, self._safety_limits())
-        if error:
-            self.command_queue.clear()
-            self._publish_status(False, error, target=target)
-            return
+            if error:
+                self._clear_target_and_halt()
+                self._publish_status(False, error, target=target)
+                return
 
-        self._publish_target(target.transform_base_tcp_target)
-        mode_reason = self._configure_mode()
-        if mode_reason:
-            self.command_queue.clear()
-            self._publish_status(False, mode_reason, target=target)
+        start_reason = self._start_servo()
+        if start_reason:
+            self._clear_target_and_halt()
+            self._publish_status(False, start_reason, target=target)
             return
 
         if self.latest_delta_generation != self.last_prepared_generation:
-            self._prepare_interpolation(transform_base_tcp, target.transform_base_tcp_target)
+            self.active_target = target
+            self.active_target_eef = eef_target_from_tcp_target(
+                target.transform_base_tcp_target,
+                transform_eef_tcp,
+            )
             self.last_prepared_generation = self.latest_delta_generation
-        if self.servo_request_pending or not self.command_queue:
+        if self.active_target_eef is None:
+            self._publish_zero_twist()
             self._publish_status(True, None, target=target)
             return
 
-        command_transform = self.command_queue.popleft()
-        request = MoveCartesian.Request()
-        request.pose = transform_to_xarm_axis_angle_pose(command_transform)
-        request.speed = 0.0
-        request.acc = 0.0
-        request.mvtime = 0.0
-        request.wait = False
-        request.timeout = -1.0
-        request.radius = -1.0
-        request.is_tool_coord = False
-        request.relative = False
-        request.motion_type = 0
-        self.servo_request_pending = True
-        future = self.servo_client.call_async(request)
-        future.add_done_callback(self._servo_response_callback)
-        self._publish_status(True, None, target=target)
+        self._publish_target(self.active_target.transform_base_tcp_target)
 
-    def _prepare_interpolation(self, start, target):
-        rate = max(float(self.get_parameter("control_rate_hz").value), 1.0)
-        duration = max(
-            float(self.get_parameter("policy_command_duration_s").value), 0.0
-        )
-        point_count = max(int(math.ceil(rate * duration)), 1)
-        self.command_queue = deque(
-            interpolate_transform(start, target, index / point_count)
-            for index in range(1, point_count + 1)
-        )
-
-    def _servo_response_callback(self, future):
-        self.servo_request_pending = False
         try:
-            response = future.result()
-        except Exception as error:
-            self.command_queue.clear()
-            self.last_response_ret = None
-            self._publish_status(False, f"xArm servo service exception: {error}")
-            return
-        self.last_response_ret = None if response is None else int(response.ret)
-        if response is None or self.last_response_ret != 0:
-            self.command_queue.clear()
-            self._publish_status(
-                False, f"xArm servo command returned {self.last_response_ret}"
+            twist = bounded_error_twist(
+                transform_base_eef,
+                self.active_target_eef,
+                duration_s=float(
+                    self.get_parameter("policy_command_duration_s").value
+                ),
+                maximum_linear_speed_m_s=float(
+                    self.get_parameter("maximum_linear_speed_m_s").value
+                ),
+                maximum_angular_speed_rad_s=float(
+                    self.get_parameter("maximum_angular_speed_rad_s").value
+                ),
+                translation_tolerance_m=float(
+                    self.get_parameter("translation_tolerance_m").value
+                ),
+                rotation_tolerance_rad=float(
+                    self.get_parameter("rotation_tolerance_rad").value
+                ),
             )
+        except (TypeError, ValueError, np.linalg.LinAlgError) as error:
+            self._clear_target_and_halt()
+            self._publish_status(False, f"twist calculation failed: {error}")
             return
-        self.hardware_commanded = True
-        self.command_count += 1
+
+        if float(np.linalg.norm(twist)) == 0.0:
+            self.active_target_eef = None
+            self._publish_zero_twist()
+        else:
+            self._publish_twist(twist)
+            self.hardware_commanded = True
+            self.command_count += 1
+        self._publish_status(True, None, target=self.active_target)
+
+    def _publish_twist(self, values):
+        message = TwistStamped()
+        message.header.frame_id = self.base_frame
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.twist.linear.x = float(values[0])
+        message.twist.linear.y = float(values[1])
+        message.twist.linear.z = float(values[2])
+        message.twist.angular.x = float(values[3])
+        message.twist.angular.y = float(values[4])
+        message.twist.angular.z = float(values[5])
+        self.twist_publisher.publish(message)
+
+    def _publish_zero_twist(self):
+        self._publish_twist(np.zeros(6, dtype=np.float64))
+        self.zero_command_count += 1
+
+    def _clear_target_and_halt(self):
+        self.active_target = None
+        self.active_target_eef = None
+        if self.servo_state == "ready":
+            self._publish_zero_twist()
 
     def _publish_target(self, transform):
         message = PoseStamped()
@@ -529,16 +534,18 @@ class DirectPolicyServo(Node):
             "valid": bool(valid),
             "reason": None if reason is None else str(reason),
             "base_frame": self.base_frame,
+            "eef_frame": self.eef_frame,
             "tcp_frame": self.tcp_frame,
-            "mode_state": self.mode_state,
+            "servo_state": self.servo_state,
             "command_scale": float(self.get_parameter("command_scale").value),
-            "queued_points": len(self.command_queue),
-            "command_pending": self.servo_request_pending,
+            "target_active": self.active_target_eef is not None,
+            "start_request_pending": self.start_request_pending,
             "command_count": self.command_count,
-            "last_response_ret": self.last_response_ret,
+            "zero_command_count": self.zero_command_count,
             "hardware_commanded": self.hardware_commanded,
             "gripper_command_interface": False,
-            "moveit_interface": False,
+            "moveit_planning_interface": False,
+            "moveit_servo_interface": True,
         }
         if target is not None:
             report.update(
@@ -556,14 +563,14 @@ class DirectPolicyServo(Node):
                 }
             )
         self.status_publisher.publish(String(data=json.dumps(report, sort_keys=True)))
-        key = (bool(valid), report["reason"], self.mode_state)
+        key = (bool(valid), report["reason"], self.servo_state)
         if key == self.last_status_key:
             return
         self.last_status_key = key
         if valid:
-            self.get_logger().info("Direct policy servo inputs are valid.")
+            self.get_logger().info("Policy MoveIt Servo inputs are valid.")
         else:
-            self.get_logger().warning(f"Direct policy servo blocked: {reason}")
+            self.get_logger().warning(f"Policy MoveIt Servo blocked: {reason}")
 
 
 def main(args=None):
@@ -581,4 +588,3 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
-

@@ -3,7 +3,7 @@
 <package format="3">
   <name>bookshelf_guarded_control_ros</name>
   <version>0.1.0</version>
-  <description>Global planning and direct local Cartesian bookshelf control.</description>
+  <description>Global planning and local MoveIt Servo bookshelf control.</description>
   <maintainer email="tianyuli19981009@gmail.com">chris</maintainer>
   <license>Apache-2.0</license>
 
@@ -15,7 +15,6 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>tf2_ros</depend>
-  <depend>xarm_msgs</depend>
 
   <exec_depend>bookshelf_shadow_ros</exec_depend>
   <exec_depend>bookshelf_policy_ros</exec_depend>

@@ -18,8 +18,17 @@
   <depend>visualization_msgs</depend>
   <depend>std_msgs</depend>
 
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>bookshelf_shadow_ros</exec_depend>
-  <exec_depend>xarm_api</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>moveit_servo</exec_depend>
+  <exec_depend>rclcpp_components</exec_depend>
+  <exec_depend>uf_ros_lib</exec_depend>
+  <exec_depend>xarm_controller</exec_depend>
+  <exec_depend>xarm_moveit_config</exec_depend>
+  <exec_depend>xarm_moveit_servo</exec_depend>
+  <exec_depend>xarm_planner</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -1,4 +1,4 @@
-"""Pure conversion helpers for direct xArm Cartesian servo commands."""
+"""Pure conversion helpers for bounded MoveIt Servo commands."""
 
 from __future__ import annotations
 
@@ -7,48 +7,79 @@ import math
 import numpy as np
 
 from .policy_tool_control_math import (
-    make_transform,
+    invert_transform,
     matrix_to_quaternion_xyzw,
     validated_transform,
 )
 
 
-def interpolate_transform(start, target, fraction: float) -> np.ndarray:
-    """Interpolate translation and orientation along the shortest quaternion arc."""
+def eef_target_from_tcp_target(target_base_tcp, transform_eef_tcp) -> np.ndarray:
+    """Convert a calibrated TCP target into the link_eef target Servo controls."""
 
-    start = validated_transform(start)
+    target_base_tcp = validated_transform(target_base_tcp)
+    transform_eef_tcp = validated_transform(transform_eef_tcp)
+    return target_base_tcp @ invert_transform(transform_eef_tcp)
+
+
+def bounded_error_twist(
+    current,
+    target,
+    *,
+    duration_s: float,
+    maximum_linear_speed_m_s: float,
+    maximum_angular_speed_rad_s: float,
+    translation_tolerance_m: float,
+    rotation_tolerance_rad: float,
+) -> np.ndarray:
+    """Return a base-frame velocity command that approaches a fixed target."""
+
+    current = validated_transform(current)
     target = validated_transform(target)
-    fraction = float(fraction)
-    if not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0:
-        raise ValueError("fraction must be finite and in [0, 1].")
-    if fraction == 0.0:
-        return np.array(start, copy=True)
-    if fraction == 1.0:
-        return np.array(target, copy=True)
+    duration_s = float(duration_s)
+    if not math.isfinite(duration_s) or duration_s <= 0.0:
+        raise ValueError("duration_s must be finite and positive")
+    translation_tolerance_m = float(translation_tolerance_m)
+    rotation_tolerance_rad = float(rotation_tolerance_rad)
+    if not math.isfinite(translation_tolerance_m) or translation_tolerance_m < 0.0:
+        raise ValueError("translation_tolerance_m must be finite and non-negative")
+    if not math.isfinite(rotation_tolerance_rad) or rotation_tolerance_rad < 0.0:
+        raise ValueError("rotation_tolerance_rad must be finite and non-negative")
 
-    start_quaternion = matrix_to_quaternion_xyzw(start[:3, :3])
-    target_quaternion = matrix_to_quaternion_xyzw(target[:3, :3])
-    if float(np.dot(start_quaternion, target_quaternion)) < 0.0:
-        target_quaternion = -target_quaternion
-
-    dot = float(np.clip(np.dot(start_quaternion, target_quaternion), -1.0, 1.0))
-    if dot > 0.9995:
-        quaternion = start_quaternion + fraction * (
-            target_quaternion - start_quaternion
-        )
-        quaternion /= np.linalg.norm(quaternion)
-    else:
-        angle = math.acos(dot)
-        sine_angle = math.sin(angle)
-        quaternion = (
-            math.sin((1.0 - fraction) * angle) / sine_angle * start_quaternion
-            + math.sin(fraction * angle) / sine_angle * target_quaternion
-        )
-
-    translation = (
-        start[:3, 3] + fraction * (target[:3, 3] - start[:3, 3])
+    translation_error = target[:3, 3] - current[:3, 3]
+    rotation_error = matrix_to_axis_angle_vector(
+        target[:3, :3] @ current[:3, :3].T
     )
-    return make_transform(translation, quaternion)
+    if float(np.linalg.norm(translation_error)) <= translation_tolerance_m:
+        translation_error = np.zeros(3, dtype=np.float64)
+    if float(np.linalg.norm(rotation_error)) <= rotation_tolerance_rad:
+        rotation_error = np.zeros(3, dtype=np.float64)
+    if not np.any(translation_error) and not np.any(rotation_error):
+        return np.zeros(6, dtype=np.float64)
+
+    linear = _bounded_vector(
+        translation_error / duration_s,
+        maximum_linear_speed_m_s,
+        "maximum_linear_speed_m_s",
+    )
+    angular = _bounded_vector(
+        rotation_error / duration_s,
+        maximum_angular_speed_rad_s,
+        "maximum_angular_speed_rad_s",
+    )
+    return np.concatenate((linear, angular))
+
+
+def _bounded_vector(vector, maximum_norm: float, label: str) -> np.ndarray:
+    vector = np.asarray(vector, dtype=np.float64)
+    maximum_norm = float(maximum_norm)
+    if vector.shape != (3,) or not np.all(np.isfinite(vector)):
+        raise ValueError("velocity vector must contain three finite values")
+    if not math.isfinite(maximum_norm) or maximum_norm <= 0.0:
+        raise ValueError(f"{label} must be finite and positive")
+    norm = float(np.linalg.norm(vector))
+    if norm <= maximum_norm:
+        return vector
+    return vector * (maximum_norm / norm)
 
 
 def matrix_to_axis_angle_vector(matrix) -> np.ndarray:
@@ -62,18 +93,3 @@ def matrix_to_axis_angle_vector(matrix) -> np.ndarray:
         return np.zeros(3, dtype=np.float64)
     angle = 2.0 * math.atan2(vector_norm, float(quaternion[3]))
     return quaternion[:3] * (angle / vector_norm)
-
-
-def transform_to_xarm_axis_angle_pose(transform) -> list[float]:
-    """Convert a base-frame TCP transform to xArm mm plus axis-angle format."""
-
-    transform = validated_transform(transform)
-    rotation_vector = matrix_to_axis_angle_vector(transform[:3, :3])
-    return [
-        float(transform[0, 3] * 1000.0),
-        float(transform[1, 3] * 1000.0),
-        float(transform[2, 3] * 1000.0),
-        float(rotation_vector[0]),
-        float(rotation_vector[1]),
-        float(rotation_vector[2]),
-    ]

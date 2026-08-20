@@ -142,8 +142,9 @@ policy calculation and policy audit. In the default `calculate` operation it sta
 planning-scene manager, planner, or executor. Policy output remains diagnostic
 and cannot move the robot.
 
-The only other operation is `control`. It starts the direct xArm Cartesian
-servo bridge. It does not create a MoveIt or gripper client.
+The only other operation is `control`. It starts the policy-to-MoveIt-Servo
+bridge. The Servo server and trajectory controller remain in the hardware
+launch; the policy launch does not create a driver, planner, or gripper client.
 
 ### Riot Terminal 3
 
@@ -214,7 +215,7 @@ Required conditions:
 If any condition fails, return to the global planner. Do not start local
 control.
 
-## 5. Start Direct Local Policy Control
+## 5. Start Local Policy Servo Control
 
 Stop the Terminal 2 `calculate` launch. Do not send another MoveIt goal after
 this point. Restart the same Terminal 2 command with:
@@ -223,11 +224,12 @@ this point. Restart the same Terminal 2 command with:
 operation:=control
 ```
 
-This starts `direct_policy_servo`. It changes the xArm to servo mode only after
-fresh observation, inference, calibration provenance, slot pose, and TCP TF are
-available. Every policy step is bounded, converted through the approved virtual
-policy-tool transform, interpolated at 100 Hz, and sent as an absolute xArm TCP
-target. It never commands the gripper.
+This starts `direct_policy_servo`. It starts the existing MoveIt Servo server
+only after fresh observation, inference, calibration provenance, slot pose, and
+EEF TF are available. Every policy step is bounded, converted through the
+approved virtual policy-tool and TCP transforms, and sent as a capped base-frame
+velocity command for `link_eef`. It never changes xArm mode or commands the
+gripper.
 
 Monitor the local controller in a third terminal:
 
@@ -235,10 +237,11 @@ Monitor the local controller in a third terminal:
 ros2 topic echo /bookshelf_control/command_valid
 ros2 topic echo /bookshelf_control/status --field data
 ros2 topic echo /bookshelf_control/target_tcp
+ros2 topic echo /servo_server/status
 ```
 
-`hardware_commanded` in the status changes to true only after the xArm servo
-service accepts a Cartesian target. Stop immediately at unexpected motion.
+`hardware_commanded` in the status changes to true only after a nonzero twist
+is published. Stop immediately at unexpected motion or a Servo halt status.
 
 ## 8. Shutdown Order
 
@@ -292,7 +295,8 @@ Stop the experiment without execution if any of these occurs:
 - slot or book calibration is inconsistent with the physical scene;
 - observation or inference validity is false or unstable;
 - target TCP is not a small local correction;
-- `/xarm/set_servo_cartesian_aa` is unavailable or returns a nonzero code;
+- `/servo_server/start_servo` or `/servo_server/delta_twist_cmds` is unavailable;
+- MoveIt Servo reports a collision, singularity, or joint-limit halt;
 - automatic logging is not active;
 - the operator cannot immediately stop the robot.
 

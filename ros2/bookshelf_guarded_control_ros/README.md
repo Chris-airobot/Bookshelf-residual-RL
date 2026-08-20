@@ -1,8 +1,8 @@
 # Bookshelf Guarded Control ROS
 
 This package contains two separate control paths. MoveIt is used for the global
-approach to the pre-insertion pose. The physical policy launch uses direct xArm
-Cartesian servo commands for the contact-rich local insertion. It does not
+approach to the pre-insertion pose. The physical policy launch uses MoveIt Servo
+for continuous Cartesian corrections during local insertion. It does not
 contain a policy network; it consumes the nominal-plus-residual delta produced
 by `bookshelf_shadow_ros`.
 
@@ -10,23 +10,25 @@ by `bookshelf_shadow_ros`.
 /bookshelf_shadow/final_delta
   + live validity and provenance
   + T_base_slot
-  + T_base_link_tcp
+  + T_base_link_eef
+  + calibrated T_link_eef_link_tcp
   + T_link_tcp_virtual_policy_tool
         |
         v
 target virtual policy-tool pose in slot coordinates
         |
         v
-target link_tcp pose in link_base
+target link_eef pose in link_base
         |
         v
-xArm Cartesian servo interpolation (local insertion only)
+bounded TwistStamped commands to MoveIt Servo (local insertion only)
 ```
 
 `direct_policy_servo` checks fresh observations, inference, calibration
 provenance, per-step displacement, workspace bounds, and competing local
-controllers. It then interpolates each accepted TCP target at 100 Hz and calls
-`/xarm/set_servo_cartesian_aa`. It has no MoveIt or gripper interface.
+controllers. It converts each accepted TCP target to `link_eef`, publishes
+bounded base-frame twists, and publishes zero velocity when an input becomes
+invalid or stale. It has no planning or gripper interface.
 
 ## Two intentionally separate processes
 
@@ -141,8 +143,10 @@ The policy launch explicitly disables nested hardware and marker-detector
 bringup. It starts the slot diagnostic, held-book gate, logging, observation
 adapter, policy calculation, and audit exactly once. `calculate` creates no
 robot-command client. `control` starts only `direct_policy_servo`; each local
-policy step goes directly to the xArm Cartesian servo service without MoveIt.
-Do not send MoveIt goals while `operation:=control` is running.
+policy step is sent to the Servo server already owned by the hardware launch.
+The Servo server reuses the active `xarm7_traj_controller`; it does not change
+xArm mode or create another robot connection. Do not send a separate MoveIt
+trajectory goal while `operation:=control` is running.
 Stop both terminals before restarting either stack.
 
 ## Build and test

@@ -48,8 +48,26 @@ def test_robot_setup_forwards_headless_rviz_option():
     assert "'show_rviz'" in source
     assert "default_value='false'" in source
     assert "'show_rviz':   show_rviz" in source
-    assert "xarm7_driver.launch.py" in source
-    assert "xarm_api_driver," in source
+    assert "xarm7_moveit_servo_server.launch.py" in source
+    assert "xarm7_driver.launch.py" not in source
+    assert "xarm_api_driver" not in source
+    assert "_robot_planner.launch.py" not in source
+
+
+def test_servo_server_reuses_existing_hardware_stack():
+    source = (
+        Path(__file__).parents[1]
+        / "launch"
+        / "xarm7_moveit_servo_server.launch.py"
+    ).read_text(encoding="utf-8")
+    assert 'plugin="moveit_servo::ServoNode"' in source
+    assert 'name="servo_server"' in source
+    assert 'servo["ee_frame_name"] = "link_eef"' in source
+    assert 'servo["planning_frame"] = "link_base"' in source
+    assert "xarm7_driver.launch.py" not in source
+    assert "ros2_control_node" not in source
+    assert "xarm_planner_node" not in source
+    assert "joy_to_servo_node" not in source
 
 
 def test_physical_hardware_bringup_owns_hardware_but_no_policy():

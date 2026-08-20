@@ -1,4 +1,4 @@
-"""Deploy policy calculation or direct local Cartesian control."""
+"""Deploy policy calculation or bounded MoveIt Servo control."""
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -61,9 +61,9 @@ def _control_actions(context):
     return [
         LogInfo(
             msg=(
-                "Operation=control: policy deltas are sent directly to the "
-                "xArm Cartesian servo service. MoveIt and the gripper are not "
-                "used by this local-control process."
+                "Operation=control: policy deltas are converted into bounded "
+                "twists for the MoveIt Servo server in the existing hardware "
+                "stack. No planner, robot driver, or gripper is started here."
             )
         ),
         Node(

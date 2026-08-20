@@ -21,7 +21,7 @@ setup(
     maintainer="chris",
     maintainer_email="tianyuli19981009@gmail.com",
     description=(
-        "Virtual-policy-tool planning and direct local Cartesian control "
+        "Virtual-policy-tool planning and bounded MoveIt Servo control "
         "for the bookshelf task."
     ),
     license="Apache-2.0",

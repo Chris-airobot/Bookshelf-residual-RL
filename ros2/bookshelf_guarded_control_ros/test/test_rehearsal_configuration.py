@@ -173,6 +173,12 @@ def test_guarded_overrides_derive_tcp_policy_tool_from_approved_frames(tmp_path)
 
     result = guarded_policy_tool_overrides(config, policy)
 
+    assert result["eef_tcp_translation_xyz"] == pytest.approx(
+        [0.0, 0.0, 0.172]
+    )
+    assert result["eef_tcp_quaternion_xyzw"] == pytest.approx(
+        [0.0, 0.0, 0.0, 1.0]
+    )
     assert result["tcp_policy_tool_translation_xyz"] == pytest.approx(
         [0.0, 0.0, -0.022]
     )
