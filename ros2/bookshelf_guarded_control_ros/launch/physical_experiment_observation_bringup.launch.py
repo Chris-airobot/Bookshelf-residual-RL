@@ -235,6 +235,7 @@ def generate_launch_description():
                 parameters=[
                     {
                         "scene_config_path": LaunchConfiguration("scene_config"),
+                        "detected_book_frame": "target_book_center",
                         "required_stable_samples": ParameterValue(
                             LaunchConfiguration(
                                 "book_pose_required_stable_samples"

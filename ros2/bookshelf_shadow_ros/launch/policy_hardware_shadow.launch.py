@@ -1,4 +1,4 @@
-"""Launch markerless perception, observation adaptation, and read-only PPO inference."""
+"""Launch observation adaptation and read-only PPO inference."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
@@ -70,12 +70,21 @@ def generate_launch_description():
         default_value="0.0",
         description="Optional manually measured physical slot width in metres.",
     )
+    detector_argument = DeclareLaunchArgument(
+        "start_live_detector",
+        default_value="true",
+        description=(
+            "Start the RGB-D slot detector. Disable when another composed "
+            "launch already owns the detector topics."
+        ),
+    )
 
     detector = Node(
         package="bookshelf_shadow_ros",
         executable="rgbd_slot_detector",
         name="rgbd_slot_detector",
         output="screen",
+        condition=IfCondition(LaunchConfiguration("start_live_detector")),
         parameters=[
             {
                 "image_topic": "/camera/color/image_raw",
@@ -145,10 +154,12 @@ def generate_launch_description():
             audit_output_argument,
             audit_samples_argument,
             reference_width_argument,
+            detector_argument,
             LogInfo(
                 msg=(
-                    "Starting FULL SHADOW pipeline: RGB-D detector -> markerless 12D adapter "
-                    "-> VecNormalize -> PPO actor diagnostics -> subscriber-only audit. "
+                    "Starting FULL SHADOW pipeline: optional RGB-D detector -> 12D "
+                    "adapter -> VecNormalize -> PPO actor diagnostics -> "
+                    "subscriber-only audit. "
                     "No robot-command node is launched."
                 )
             ),

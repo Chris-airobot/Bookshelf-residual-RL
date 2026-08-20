@@ -1,16 +1,15 @@
 # Bookshelf Real-Robot Experiment Runbook
 
-Last stationary preflight: 2026-08-08
+Last offline stationary calibration and shadow replay: 2026-08-19
 
 This runbook is for the xArm7 bookshelf insertion experiment on the Riot PC.
 It separates global motion, local residual-policy activation, plan-only checking,
 and explicitly approved single-step execution.
 
-For the current scan-first physical sequence, use
-`REAL_ROBOT_EXPERIMENT_COMMANDS_2026-08-09.md`. It captures the unobstructed
-slot, requires RViz approval, and creates one trial-specific slot configuration
-before the book is attached. The package-default August 4 slot must not be used
-as the current physical reference.
+The current approved configuration is candidate `53e7fe80d56d`. It binds the
+frozen View A slot, continuous marker-based held-book pose, policy-tool frame,
+and coarse physical scene. Do not use the package-default August 4 slot or an
+older trial configuration.
 
 The stationary preflight verified that:
 
@@ -74,7 +73,7 @@ cd /home/riot/Chris/bookshelf-unified
 
 git branch --show-current
 git rev-parse HEAD
-git rev-parse origin/combined/bookshelf-20260808
+git rev-parse origin/main
 
 sha256sum \
   /home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
@@ -84,104 +83,71 @@ sha256sum \
 The two Git hashes must match. The known modified `data/bc/*.pt` files are a
 Git LFS checkout issue and must not be staged or used as the residual policy.
 
-## 2. Start Hardware And Camera
+## 2. Unified Read-Only Shadow Rehearsal
 
 ### Riot Terminal 1
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
-ros2 launch bookshelf_policy_ros \
-  marker_vision_bringup.launch.py \
+APPROVED_DIR=$(cat /tmp/bookshelf_latest_approved_calibration.txt)
+APPROVED_CONFIG="$APPROVED_DIR/trial_static_slot.yaml"
+TRIAL_NAME=shadow_rehearsal_$(date +%Y%m%d_%H%M%S)
+
+test -f "$APPROVED_CONFIG" \
+  || { echo "STOP: approved configuration is missing"; exit 1; }
+
+ros2 launch bookshelf_guarded_control_ros \
+  physical_experiment_shadow_rehearsal.launch.py \
+  trial_name:="$TRIAL_NAME" \
+  approved_config:="$APPROVED_CONFIG" \
+  repository_path:=/home/riot/Chris/bookshelf-unified \
+  policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
+  activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
+  record_camera:=true \
+  record_raw_replay_inputs:=false \
+  capture_condition:=book_attached \
+  capture_duration_s:=0.0 \
   show_rviz:=false
 ```
 
-This terminal provides robot state, TF, MoveIt, and camera topics. Starting the
-bringup must not command movement.
-
-## 3. Start Automatic Experiment Logging
-
-Start logging before global motion so the full trial is recorded.
+Use `show_rviz:=true` only from the Riot graphical desktop. Keep it false over
+SSH. This one launch owns the robot/camera bringup, the sole RGB-D slot
+detector, frozen-slot check, live marker book detector, held-book gate,
+automatic logger, policy adapter, shadow inference, and policy audit. It starts
+no planning request or execution interface.
 
 ### Riot Terminal 2
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
-
-mkdir -p /home/riot/BookshelfFiles/experiment_logs
-
-TRIAL_NAME=physical_trial_001
-
-ros2 launch bookshelf_shadow_ros \
-  experiment_logging.launch.py \
-  trial_name:="$TRIAL_NAME" \
-  output_root:=/home/riot/BookshelfFiles/experiment_logs \
-  repository_path:=/home/riot/Chris/bookshelf-unified \
-  policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
-  activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
-  record_camera:=true \
-  minimum_free_space_gb:=5.0
-```
-
-Use a new trial name for every attempt. This launch is subscriber-only and
-cannot move the robot.
-
-## 4. Capture And Freeze The Current Slot
-
-Follow sections 4 through 7 of
-`REAL_ROBOT_EXPERIMENT_COMMANDS_2026-08-09.md`. The resulting file is:
-
-```text
-/home/riot/BookshelfFiles/experiment_logs/environment_checks/<TRIAL_NAME>/trial_static_slot.yaml
-```
-
-It must come from a valid read-only capture and explicit RViz approval. Use
-that same file as `check_config`, `target_config`, and `adapter_config`.
-
-## 5. Start The Shadow Observation And Policy Pipeline
-
-### Riot Terminal 3
-
-```bash
-cd /home/riot/Chris/bookshelf-unified
-
-source /opt/ros/humble/setup.bash
-source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
-
-ros2 launch bookshelf_shadow_ros \
-  policy_calibrated_static_shadow.launch.py \
-  adapter_config:=/home/riot/BookshelfFiles/experiment_logs/environment_checks/physical_trial_001/trial_static_slot.yaml \
-  policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
-  activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
-  enable_audit:=false
-```
-
-At the far pose, `policy_activation_ready` must remain false. This is expected.
-
-## 6. Confirm That No Executor Is Running
-
-### Riot Terminal 4
-
-```bash
-source /opt/ros/humble/setup.bash
-source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 ros2 node list | grep -E \
   "guarded_policy_tool_executor|policy_to_robot|cartesian_action_executor|action_executor" \
   && echo "STOP: an execution node is already running" \
   || echo "PASS: no execution node"
 
-ros2 node list | sort | uniq -c | sort -nr
+test "$(ros2 node list | grep -c '^/rgbd_slot_detector$')" -eq 1 \
+  && echo "PASS: exactly one slot detector" \
+  || echo "STOP: slot detector ownership is invalid"
+
+ros2 topic echo --once /bookshelf_environment/static_slot_check_passed
+ros2 topic echo --once /bookshelf_scene/held_book_pose_check_passed
+ros2 topic echo --once /bookshelf_policy/observation_valid
+ros2 topic echo --once /bookshelf_shadow/inference_valid
+ros2 topic echo --once /bookshelf_shadow/policy_activation_ready
 ```
 
-Stop and cleanly restart the system if a command-capable node is duplicated.
+The frozen-slot, held-book, and observation checks must become true with the
+approved physical setup. `policy_activation_ready` and `inference_valid` may
+both remain false while the robot is outside the local insertion region; that
+is the expected fail-closed state. Stop if any command-capable node exists or
+if the detector count is not exactly one.
 
-## 7. Move Globally To The Pre-Insertion Pose
+## 3. Move Globally To The Pre-Insertion Pose
 
 Use the validated traditional-planner workflow to move the robot to the
 physical pre-insertion pose. Do not use PPO output for this movement.
@@ -192,9 +158,9 @@ still correct.
 
 After global motion finishes, leave the robot stationary.
 
-## 8. Check Local-Policy Activation
+## 4. Check Local-Policy Activation
 
-### Riot Terminal 4
+### Riot Terminal 2
 
 ```bash
 ros2 topic echo /bookshelf_shadow/policy_activation_ready
@@ -221,20 +187,20 @@ Required conditions:
 If any condition fails, return to the global planner. Do not launch the local
 executor.
 
-## 9. Run Plan-Only Checking
+## 5. Run Plan-Only Checking
 
-### Riot Terminal 5
+### Riot Terminal 3
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 ros2 launch bookshelf_guarded_control_ros \
   policy_tool_plan_only.launch.py
 ```
 
-### Riot Terminal 4
+### Riot Terminal 2
 
 ```bash
 ros2 topic echo --once /bookshelf_guarded/plan_valid
@@ -262,7 +228,7 @@ Do not proceed unless all of the following are true:
 
 Stop the plan-only launch before starting the guarded single-step executor.
 
-## 10. One-Time Executor Configuration Review
+## 6. One-Time Executor Configuration Review
 
 The physical executor configuration must be reviewed before experiment day.
 Do not use the default file as implicit permission to move.
@@ -299,7 +265,7 @@ For the first physical test it must enforce:
 The exact approval fields must be taken from the source inspection above. Do
 not guess their names or values beside the robot.
 
-## 11. Guarded Single-Step Execution
+## 7. Guarded Single-Step Execution
 
 Do not run this section until the executor configuration review is complete,
 the operator is ready, activation is true, and the plan-only target has been
@@ -311,7 +277,7 @@ second integrated logger to avoid duplicate bags:
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
 EXECUTOR_CONFIG=/home/riot/BookshelfFiles/experiment_configs/guarded_policy_tool_executor_physical.yaml
 
@@ -333,20 +299,18 @@ ros2 launch bookshelf_guarded_control_ros \
 The operator must watch the robot throughout this step. Stop immediately after
 the single action or at the first unexpected motion.
 
-## 12. Shutdown Order
+## 8. Shutdown Order
 
 Stop processes using `Ctrl+C` in this order:
 
-1. guarded single-step executor;
+1. guarded single-step executor, if one was explicitly started;
 2. plan-only checker, if still running;
-3. shadow policy pipeline;
-4. automatic experiment logger;
-5. hardware and camera bringup.
+3. unified shadow rehearsal.
 
-Stopping the logger after the policy processes allows it to capture their final
-states and finalize the compressed bag.
+Stopping the unified rehearsal last allows its integrated logger to capture the
+final policy states and finalize the compressed bag.
 
-## 13. Verify The Trial Record
+## 9. Verify The Trial Record
 
 ```bash
 source /opt/ros/humble/setup.bash

@@ -17,6 +17,7 @@ def test_observation_bringup_combines_required_nonexecuting_launches():
         '"static_slot_environment_check.launch.py"',
         '"enable_calibrated_book_detection"',
         'executable="held_book_pose_check"',
+        '"detected_book_frame": "target_book_center"',
         '"book_pose_required_stable_samples"',
         '"enable_legacy_three_book_detection": "false"',
         '"start_live_detector": "true"',

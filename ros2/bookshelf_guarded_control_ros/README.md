@@ -86,6 +86,30 @@ measurements, inspect the resulting objects in RViz, and only then change
 `hardware_measurements_confirmed`. Enabling `allow_local_insertion` is a second
 independent review decision.
 
+## Unified read-only shadow rehearsal
+
+Use the promoted stationary configuration as the single source for the frozen
+slot, live marker book, held-book collision reference, and policy-tool frame:
+
+```bash
+APPROVED_CONFIG=/path/to/reviewed_trial/trial_static_slot.yaml
+
+ros2 launch bookshelf_guarded_control_ros \
+  physical_experiment_shadow_rehearsal.launch.py \
+  trial_name:=shadow_rehearsal_001 \
+  approved_config:="$APPROVED_CONFIG" \
+  policy_bundle:=/path/to/bookshelf_shadow_actor.npz \
+  activation_envelope:=/path/to/activation_envelope.json \
+  show_rviz:=false
+```
+
+The launch validates the approved configuration, provenance, policy bundle,
+and 12-channel activation envelope before including any runtime components.
+The observation bringup owns the only RGB-D slot detector; shadow inference
+reuses its topics. The composition has no plan request, executor, controller,
+gripper command, or trajectory-command interface. Policy activation may remain
+false until the robot reaches the local insertion region.
+
 ## Build and test
 
 Run these on the target machine. The package depends on the installed
