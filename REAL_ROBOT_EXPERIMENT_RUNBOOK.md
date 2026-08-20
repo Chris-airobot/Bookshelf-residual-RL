@@ -83,7 +83,11 @@ sha256sum \
 The two Git hashes must match. The known modified `data/bc/*.pt` files are a
 Git LFS checkout issue and must not be staged or used as the residual policy.
 
-## 2. Unified Read-Only Shadow Rehearsal
+## 2. Start Hardware, Then Deploy The Shadow Policy
+
+Start from a clean ROS graph. Do not leave an older xArm, MoveIt, camera, or
+marker-vision launch running. The hardware and policy stacks have separate
+ownership and must each be launched exactly once.
 
 ### Riot Terminal 1
 
@@ -92,34 +96,64 @@ source /opt/ros/humble/setup.bash
 source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
 source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
 
-APPROVED_DIR=$(cat /tmp/bookshelf_latest_approved_calibration.txt)
-APPROVED_CONFIG="$APPROVED_DIR/trial_static_slot.yaml"
-TRIAL_NAME=shadow_rehearsal_$(date +%Y%m%d_%H%M%S)
+ros2 launch bookshelf_policy_ros \
+  physical_hardware_bringup.launch.py \
+  robot_ip:=192.168.1.209 \
+  show_rviz:=false
+```
+
+This is the only launch that may own the xArm, MoveIt, RealSense, hand-eye TF,
+and calibrated marker-book detector. It creates hardware-capable MoveIt
+interfaces but sends no motion, gripper, or policy goal. Use `show_rviz:=true`
+only from the Riot graphical desktop; keep it false over SSH.
+
+Wait for `/joint_states`, RGB, aligned depth, `link_base -> link_tcp`, and
+`link_tcp -> target_book_center` before starting Terminal 2.
+
+### Riot Terminal 2
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
+source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
+
+APPROVED_CONFIG=/home/riot/BookshelfFiles/experiment_configs/stationary_approved_53e7fe80d56d_20260819_142355/trial_static_slot.yaml
+TRIAL_NAME=policy_shadow_$(date +%Y%m%d_%H%M%S)
 
 test -f "$APPROVED_CONFIG" \
   || { echo "STOP: approved configuration is missing"; exit 1; }
 
 ros2 launch bookshelf_guarded_control_ros \
-  physical_experiment_shadow_rehearsal.launch.py \
+  physical_policy_deployment.launch.py \
   trial_name:="$TRIAL_NAME" \
   approved_config:="$APPROVED_CONFIG" \
   repository_path:=/home/riot/Chris/bookshelf-unified \
   policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
   activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
+  execution_mode:=shadow \
   record_camera:=true \
   record_raw_replay_inputs:=false \
   capture_condition:=book_attached \
-  capture_duration_s:=0.0 \
-  show_rviz:=false
+  capture_duration_s:=0.0
 ```
 
-Use `show_rviz:=true` only from the Riot graphical desktop. Keep it false over
-SSH. This one launch owns the robot/camera bringup, the sole RGB-D slot
-detector, frozen-slot check, live marker book detector, held-book gate,
-automatic logger, policy adapter, shadow inference, and policy audit. It starts
-no planning request or execution interface.
+This launch reuses the live hardware topics. It owns the sole RGB-D slot
+detector, frozen-slot diagnostics, held-book gate, logger, policy adapter,
+shadow inference, and policy audit. In the default `shadow` mode it starts no
+planning-scene manager, planner, or executor. Policy output remains diagnostic
+and cannot move the robot.
 
-### Riot Terminal 2
+For a planning rehearsal, use the same command with
+`execution_mode:=plan_only permit_local_scene_handoff:=true`. This adds the
+planning-scene manager and checked MoveIt planner but no execution client.
+
+`single_step` is the only motion-capable mode. It additionally requires
+`permit_local_scene_handoff:=true` and a non-default
+`execution_approval_token`. The guarded executor accepts at most one recent
+checked trajectory per process, only after the matching token is published on
+`/bookshelf_guarded/approve_once`. It has no gripper interface.
+
+### Riot Terminal 3
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -141,11 +175,12 @@ ros2 topic echo --once /bookshelf_shadow/inference_valid
 ros2 topic echo --once /bookshelf_shadow/policy_activation_ready
 ```
 
-The frozen-slot, held-book, and observation checks must become true with the
-approved physical setup. `policy_activation_ready` and `inference_valid` may
+The held-book and observation checks must become true with the approved
+physical setup. The live frozen-slot comparison may remain false when the held
+book occludes the slot. `policy_activation_ready` and `inference_valid` may
 both remain false while the robot is outside the local insertion region; that
-is the expected fail-closed state. Stop if any command-capable node exists or
-if the detector count is not exactly one.
+is the expected fail-closed state. Stop if any bookshelf execution node exists
+or if the detector count is not exactly one.
 
 ## 3. Move Globally To The Pre-Insertion Pose
 

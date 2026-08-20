@@ -13,6 +13,8 @@ def test_observation_bringup_combines_required_nonexecuting_launches():
         '"trial_slot_config"',
         '"scene_config"',
         '"marker_vision_bringup.launch.py"',
+        '"start_hardware_bringup"',
+        'condition=IfCondition(',
         '"experiment_logging.launch.py"',
         '"static_slot_environment_check.launch.py"',
         '"enable_calibrated_book_detection"',

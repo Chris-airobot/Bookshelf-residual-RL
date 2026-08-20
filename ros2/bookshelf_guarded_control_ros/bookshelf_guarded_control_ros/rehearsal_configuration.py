@@ -8,6 +8,12 @@ from pathlib import Path
 
 import yaml
 
+from .policy_tool_control_math import (
+    invert_transform,
+    make_transform,
+    matrix_to_quaternion_xyzw,
+)
+
 
 APPROVAL_TOKEN = "VISUALLY_APPROVED_STATIC_SLOT"
 
@@ -105,6 +111,66 @@ def validate_shadow_rehearsal_assets(
         "allow_local_insertion": False,
         "execution_authorized": False,
         "hardware_commanded": False,
+    }
+
+
+def guarded_policy_tool_overrides(approved_config, policy_bundle) -> dict:
+    """Extract execution provenance and T_link_tcp_policy_tool from one approval."""
+
+    config_path = _required_file(approved_config, "approved configuration")
+    policy_path = _required_file(policy_bundle, "policy bundle")
+    document = _load_yaml(config_path)
+    target = _parameters(document, "calibrated_preinsert_target")
+    adapter = _parameters(document, "policy_observation_adapter")
+    scene = _parameters(document, "bookshelf_scene_manager")
+
+    if target.get("ee_frame") != "link_eef":
+        raise ValueError("approved target EE frame must be link_eef")
+    if target.get("tcp_frame") != "link_tcp" or scene.get("tcp_frame") != "link_tcp":
+        raise ValueError("approved target and scene TCP frame must be link_tcp")
+
+    tool_status = str(adapter.get("policy_tool_transform_status", ""))
+    if tool_status != str(target.get("policy_tool_transform_status", "")):
+        raise ValueError("approved policy-tool statuses are inconsistent")
+    if not tool_status.startswith("verified_stationary_bag_policy_tool_"):
+        raise ValueError("approved policy-tool status is not verified")
+
+    slot_status = str(adapter.get("static_slot_transform_status", ""))
+    book_status = str(adapter.get("eef_book_transform_status", ""))
+    if not slot_status.startswith("captured_rgbd_static_human_approved_"):
+        raise ValueError("approved static-slot status is invalid")
+    if not book_status.startswith("measured_stationary_bag_human_approved_"):
+        raise ValueError("approved held-book status is invalid")
+
+    transform_eef_book = make_transform(
+        target.get("eef_book_translation_xyz"),
+        target.get("eef_book_quaternion_xyzw"),
+    )
+    transform_tcp_book = make_transform(
+        scene.get("held_book_center_tcp_xyz"),
+        scene.get("held_book_quaternion_tcp_xyzw"),
+    )
+    transform_eef_policy_tool = make_transform(
+        target.get("eef_policy_tool_translation_xyz"),
+        target.get("eef_policy_tool_quaternion_xyzw"),
+    )
+    transform_eef_tcp = transform_eef_book @ invert_transform(transform_tcp_book)
+    transform_tcp_policy_tool = (
+        invert_transform(transform_eef_tcp) @ transform_eef_policy_tool
+    )
+
+    return {
+        "tcp_policy_tool_translation_xyz": transform_tcp_policy_tool[:3, 3].tolist(),
+        "tcp_policy_tool_quaternion_xyzw": matrix_to_quaternion_xyzw(
+            transform_tcp_policy_tool[:3, :3]
+        ).tolist(),
+        "expected_policy_tool_status": tool_status,
+        "expected_slot_status": slot_status,
+        "expected_book_status": book_status,
+        "expected_bundle_sha256": _sha256_file(policy_path),
+        "allow_unverified_policy_tool": False,
+        "require_scene_status": True,
+        "required_scene_mode": "local_insertion",
     }
 
 

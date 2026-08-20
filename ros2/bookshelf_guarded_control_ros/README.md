@@ -106,9 +106,38 @@ ros2 launch bookshelf_guarded_control_ros \
 The launch validates the approved configuration, provenance, policy bundle,
 and 12-channel activation envelope before including any runtime components.
 The observation bringup owns the only RGB-D slot detector; shadow inference
-reuses its topics. The composition has no plan request, executor, controller,
-gripper command, or trajectory-command interface. Policy activation may remain
+reuses its topics. This compatibility launch also starts the hardware bringup,
+which creates MoveIt/controller interfaces, but it sends no plan, trajectory,
+gripper, or execution request. The two-launch workflow below is preferred
+because it makes hardware ownership explicit. Policy activation may remain
 false until the robot reaches the local insertion region.
+
+## Two-launch physical operation
+
+The preferred operator interface separates hardware ownership from policy
+deployment:
+
+```bash
+# Terminal 1: the only xArm/MoveIt/camera owner.
+ros2 launch bookshelf_policy_ros physical_hardware_bringup.launch.py \
+  robot_ip:=192.168.1.209 show_rviz:=false
+
+# Terminal 2: consumes existing hardware topics; never starts hardware.
+ros2 launch bookshelf_guarded_control_ros physical_policy_deployment.launch.py \
+  trial_name:=policy_shadow_001 \
+  approved_config:=/path/to/trial_static_slot.yaml \
+  policy_bundle:=/path/to/bookshelf_shadow_actor.npz \
+  activation_envelope:=/path/to/activation_envelope.json \
+  execution_mode:=shadow
+```
+
+The policy launch explicitly disables nested hardware and marker-detector
+bringup. It starts the slot diagnostic, held-book gate, logging, observation
+adapter, shadow inference, and audit exactly once. `shadow` starts no planner
+or executor. `plan_only` adds checked MoveIt planning without execution.
+`single_step` adds the existing one-shot guarded executor, but remains closed
+unless local-scene permission and a non-default approval token are both set.
+Stop both terminals before restarting either stack.
 
 ## Build and test
 

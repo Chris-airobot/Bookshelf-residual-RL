@@ -10,6 +10,7 @@ from launch.actions import (
     TimerAction,
 )
 from launch.events import Shutdown
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -158,6 +159,15 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("minimum_free_space_gb", default_value="5.0"),
             DeclareLaunchArgument(
+                "start_hardware_bringup",
+                default_value="true",
+                description=(
+                    "Start xArm, MoveIt, camera, hand-eye TF, and calibrated "
+                    "book detection. Disable when the dedicated hardware "
+                    "launch already owns them."
+                ),
+            ),
+            DeclareLaunchArgument(
                 "enable_calibrated_book_detection",
                 default_value="true",
                 description=(
@@ -177,15 +187,18 @@ def generate_launch_description():
             ),
             LogInfo(
                 msg=(
-                    "Starting PHYSICAL EXPERIMENT OBSERVATION BRINGUP: xArm, "
-                    "camera, TF, MoveIt, automatic logging, RGB-D slot detection, "
-                    "frozen-slot verification, and live held-book pose checking. "
-                    "This launch starts no policy executor, plan request, gripper "
-                    "command, or trajectory command."
+                    "Starting PHYSICAL EXPERIMENT OBSERVATION BRINGUP: automatic "
+                    "logging, RGB-D slot detection, frozen-slot verification, and "
+                    "live held-book pose checking. Hardware bringup is controlled "
+                    "by start_hardware_bringup. This launch starts no policy "
+                    "executor, plan request, gripper command, or trajectory command."
                 )
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(hardware_launch),
+                condition=IfCondition(
+                    LaunchConfiguration("start_hardware_bringup")
+                ),
                 launch_arguments={
                     "enable_robot_control": "true",
                     "enable_calibrated_book_detection": LaunchConfiguration(

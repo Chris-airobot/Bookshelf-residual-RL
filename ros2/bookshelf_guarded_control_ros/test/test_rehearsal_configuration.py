@@ -6,6 +6,7 @@ import yaml
 
 from bookshelf_guarded_control_ros.rehearsal_configuration import (
     APPROVAL_TOKEN,
+    guarded_policy_tool_overrides,
     validate_shadow_rehearsal_assets,
 )
 
@@ -29,9 +30,18 @@ def _write_inputs(tmp_path):
         },
         "calibrated_preinsert_target": {
             "ros__parameters": {
+                "ee_frame": "link_eef",
+                "tcp_frame": "link_tcp",
                 "static_slot_transform_status": (
                     "captured_rgbd_static_human_approved_abc123"
-                )
+                ),
+                "eef_book_translation_xyz": [0.0, 0.0, 0.164],
+                "eef_book_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                "eef_policy_tool_translation_xyz": [0.0, 0.0, 0.15],
+                "eef_policy_tool_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
+                "policy_tool_transform_status": (
+                    "verified_stationary_bag_policy_tool_abc123"
+                ),
             }
         },
         "policy_observation_adapter": {
@@ -48,14 +58,20 @@ def _write_inputs(tmp_path):
                 "policy_tool_transform_status": (
                     "verified_stationary_bag_policy_tool_abc123"
                 ),
+                "eef_book_transform_status": (
+                    "measured_stationary_bag_human_approved_abc123"
+                ),
             }
         },
         "bookshelf_scene_manager": {
             "ros__parameters": {
+                "tcp_frame": "link_tcp",
                 "hardware_measurements_confirmed": True,
                 "allow_local_insertion": False,
                 "held_book_enabled": True,
                 "require_held_book_pose_check": True,
+                "held_book_center_tcp_xyz": [0.0, 0.0, -0.008],
+                "held_book_quaternion_tcp_xyzw": [0.0, 0.0, 0.0, 1.0],
             }
         },
     }
@@ -150,3 +166,36 @@ def test_rehearsal_assets_reject_incomplete_activation_envelope(tmp_path):
 
     with pytest.raises(ValueError, match="12 labels"):
         validate_shadow_rehearsal_assets(config, policy, envelope)
+
+
+def test_guarded_overrides_derive_tcp_policy_tool_from_approved_frames(tmp_path):
+    config, policy, _ = _write_inputs(tmp_path)
+
+    result = guarded_policy_tool_overrides(config, policy)
+
+    assert result["tcp_policy_tool_translation_xyz"] == pytest.approx(
+        [0.0, 0.0, -0.022]
+    )
+    assert result["tcp_policy_tool_quaternion_xyzw"] == pytest.approx(
+        [0.0, 0.0, 0.0, 1.0]
+    )
+    assert result["expected_policy_tool_status"].startswith(
+        "verified_stationary_bag_policy_tool_"
+    )
+    assert result["expected_bundle_sha256"] == _sha256(policy)
+    assert result["allow_unverified_policy_tool"] is False
+    assert result["require_scene_status"] is True
+    assert result["required_scene_mode"] == "local_insertion"
+
+
+def test_guarded_overrides_reject_unverified_policy_tool(tmp_path):
+    config, policy, _ = _write_inputs(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    for node_name in ("calibrated_preinsert_target", "policy_observation_adapter"):
+        document[node_name]["ros__parameters"][
+            "policy_tool_transform_status"
+        ] = "derived_unverified_candidate"
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not verified"):
+        guarded_policy_tool_overrides(config, policy)

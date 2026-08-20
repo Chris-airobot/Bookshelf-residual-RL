@@ -78,6 +78,11 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument(
+            "robot_ip",
+            default_value="192.168.1.209",
+            description="Physical xArm controller IPv4 address.",
+        ),
+        DeclareLaunchArgument(
             "enable_robot_control",
             default_value="true",
             description=(
@@ -111,6 +116,14 @@ def generate_launch_description():
             "calibration_target_samples",
             default_value="250",
         ),
+        DeclareLaunchArgument("camera_name", default_value="camera"),
+        DeclareLaunchArgument("camera_namespace", default_value=""),
+        DeclareLaunchArgument("serial_no", default_value=""),
+        DeclareLaunchArgument("color_profile", default_value="640x480x30"),
+        DeclareLaunchArgument("depth_profile", default_value="640x480x30"),
+        DeclareLaunchArgument("align_depth", default_value="true"),
+        DeclareLaunchArgument("enable_sync", default_value="true"),
+        DeclareLaunchArgument("enable_pointcloud", default_value="true"),
         LogInfo(
             msg=(
                 "Starting marker vision and optional manual xArm/MoveIt bringup. "
@@ -122,11 +135,22 @@ def generate_launch_description():
             PythonLaunchDescriptionSource(str(robot_launch)),
             condition=robot_condition,
             launch_arguments={
+                "robot_ip": LaunchConfiguration("robot_ip"),
                 "show_rviz": LaunchConfiguration("show_rviz"),
             }.items(),
         ),
         IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(str(camera_launch))
+            PythonLaunchDescriptionSource(str(camera_launch)),
+            launch_arguments={
+                "camera_name": LaunchConfiguration("camera_name"),
+                "camera_namespace": LaunchConfiguration("camera_namespace"),
+                "serial_no": LaunchConfiguration("serial_no"),
+                "color_profile": LaunchConfiguration("color_profile"),
+                "depth_profile": LaunchConfiguration("depth_profile"),
+                "align_depth": LaunchConfiguration("align_depth"),
+                "enable_sync": LaunchConfiguration("enable_sync"),
+                "enable_pointcloud": LaunchConfiguration("enable_pointcloud"),
+            }.items(),
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(str(handeye_tf_launch))
