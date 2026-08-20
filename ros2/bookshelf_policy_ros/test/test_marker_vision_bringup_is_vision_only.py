@@ -48,6 +48,8 @@ def test_robot_setup_forwards_headless_rviz_option():
     assert "'show_rviz'" in source
     assert "default_value='false'" in source
     assert "'show_rviz':   show_rviz" in source
+    assert "xarm7_driver.launch.py" in source
+    assert "xarm_api_driver," in source
 
 
 def test_physical_hardware_bringup_owns_hardware_but_no_policy():

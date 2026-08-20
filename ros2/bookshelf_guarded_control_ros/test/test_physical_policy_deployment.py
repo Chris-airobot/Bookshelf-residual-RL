@@ -22,7 +22,7 @@ def test_policy_deployment_reuses_hardware_and_validates_approved_assets():
         assert token in source
 
 
-def test_policy_deployment_has_no_hardware_interface():
+def test_policy_deployment_does_not_start_hardware_owners():
     source = LAUNCH.read_text(encoding="utf-8")
     forbidden = (
         "marker_vision_bringup.launch.py",
@@ -33,6 +33,9 @@ def test_policy_deployment_has_no_hardware_interface():
         "ExecuteTrajectory",
         "FollowJointTrajectory",
         "guarded_preinsert_executor",
+        "guarded_policy_tool_executor",
+        "policy_tool_plan_checker",
+        "bookshelf_scene_manager",
         "policy_to_robot",
         "send_goal",
     )
@@ -47,16 +50,13 @@ def test_policy_deployment_operations_are_simple_and_bounded():
 
     assert '"operation"' in source
     assert 'default_value="calculate"' in source
-    assert 'operation not in ("calculate", "plan", "move_once")' in source
+    assert 'operation not in ("calculate", "control")' in source
     assert 'if operation == "calculate"' in source
-    assert 'if operation == "plan"' in source
-    assert 'executable="policy_tool_plan_checker"' in source
-    assert 'executable="guarded_policy_tool_executor"' in source
-    assert '"permit_local_scene_handoff"' not in source
-    assert '"execution_approval_token"' in source
-    assert 'default_value="DISABLED"' in source
-    assert '"dry_run": False' in source
-    assert '"allow_execution": True' in source
+    assert 'executable="direct_policy_servo"' in source
+    assert 'overrides.pop("require_scene_status", None)' in source
+    assert '"execution_approval_token"' not in source
+    assert 'executable="policy_tool_plan_checker"' not in source
+    assert 'executable="guarded_policy_tool_executor"' not in source
     assert '"block_on_activation_checks": "false"' in source
     assert "guarded_policy_tool_overrides" in source
 

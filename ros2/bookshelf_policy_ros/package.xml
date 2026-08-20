@@ -19,6 +19,7 @@
   <depend>std_msgs</depend>
 
   <exec_depend>bookshelf_shadow_ros</exec_depend>
+  <exec_depend>xarm_api</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

@@ -78,6 +78,7 @@ def generate_launch_description():
             default_value='false',
             description='Start MoveIt RViz. Keep false for SSH/headless bringup.',
         ),
+        xarm_api_driver,
         moveit_realmove,
         robot_planner,
     ])

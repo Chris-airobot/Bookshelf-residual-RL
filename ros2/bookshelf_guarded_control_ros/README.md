@@ -1,9 +1,10 @@
 # Bookshelf Guarded Control ROS
 
-This package is the deployment boundary between the read-only bookshelf shadow
-pipeline and MoveIt. It does not contain a policy network. It consumes the
-already checked nominal-plus-residual delta and makes the real xArm
-`link_tcp` move as required for the equivalent simulator policy-tool frame.
+This package contains two separate control paths. MoveIt is used for the global
+approach to the pre-insertion pose. The physical policy launch uses direct xArm
+Cartesian servo commands for the contact-rich local insertion. It does not
+contain a policy network; it consumes the nominal-plus-residual delta produced
+by `bookshelf_shadow_ros`.
 
 ```text
 /bookshelf_shadow/final_delta
@@ -19,8 +20,13 @@ target virtual policy-tool pose in slot coordinates
 target link_tcp pose in link_base
         |
         v
-MoveIt collision-checked path
+xArm Cartesian servo interpolation (local insertion only)
 ```
+
+`direct_policy_servo` checks fresh observations, inference, calibration
+provenance, per-step displacement, workspace bounds, and competing local
+controllers. It then interpolates each accepted TCP target at 100 Hz and calls
+`/xarm/set_servo_cartesian_aa`. It has no MoveIt or gripper interface.
 
 ## Two intentionally separate processes
 
@@ -133,10 +139,10 @@ ros2 launch bookshelf_guarded_control_ros physical_policy_deployment.launch.py \
 
 The policy launch explicitly disables nested hardware and marker-detector
 bringup. It starts the slot diagnostic, held-book gate, logging, observation
-adapter, policy calculation, and audit exactly once. `calculate` starts no
-planner or executor. `plan` adds checked MoveIt planning without execution.
-`move_once` adds the existing one-shot guarded executor, but remains closed
-unless a non-default approval token is set.
+adapter, policy calculation, and audit exactly once. `calculate` creates no
+robot-command client. `control` starts only `direct_policy_servo`; each local
+policy step goes directly to the xArm Cartesian servo service without MoveIt.
+Do not send MoveIt goals while `operation:=control` is running.
 Stop both terminals before restarting either stack.
 
 ## Build and test

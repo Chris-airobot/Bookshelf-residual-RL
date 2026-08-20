@@ -1,4 +1,4 @@
-"""Deploy the approved physical policy pipeline without starting hardware."""
+"""Deploy policy calculation or direct local Cartesian control."""
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -39,16 +39,16 @@ def _validate_inputs(context):
     ]
 
 
-def _execution_actions(context):
+def _control_actions(context):
     operation = LaunchConfiguration("operation").perform(context).strip().lower()
-    if operation not in ("calculate", "plan", "move_once"):
-        raise RuntimeError("operation must be calculate, plan, or move_once")
+    if operation not in ("calculate", "control"):
+        raise RuntimeError("operation must be calculate or control")
     if operation == "calculate":
         return [
             LogInfo(
                 msg=(
                     "Operation=calculate: policy commands are calculated and "
-                    "logged, but no planner or execution client is created."
+                    "logged, but no robot-command client is created."
                 )
             )
         ]
@@ -56,76 +56,27 @@ def _execution_actions(context):
     approved_config = LaunchConfiguration("approved_config").perform(context)
     policy_bundle = LaunchConfiguration("policy_bundle").perform(context)
     overrides = guarded_policy_tool_overrides(approved_config, policy_bundle)
-    overrides["planning_scene_complete"] = True
-
-    actions = [
+    overrides.pop("require_scene_status", None)
+    overrides.pop("required_scene_mode", None)
+    return [
+        LogInfo(
+            msg=(
+                "Operation=control: policy deltas are sent directly to the "
+                "xArm Cartesian servo service. MoveIt and the gripper are not "
+                "used by this local-control process."
+            )
+        ),
         Node(
             package="bookshelf_guarded_control_ros",
-            executable="bookshelf_scene_manager",
-            name="bookshelf_scene_manager",
+            executable="direct_policy_servo",
+            name="direct_policy_servo",
             output="screen",
             parameters=[
-                approved_config,
-                {
-                    "scene_config_path": approved_config,
-                    "allow_local_insertion": True,
-                },
+                LaunchConfiguration("servo_config"),
+                overrides,
             ],
-        )
+        ),
     ]
-    if operation == "plan":
-        actions.extend(
-            [
-                LogInfo(
-                    msg=(
-                        "Operation=plan: MoveIt plans and trajectory "
-                        "checks are enabled, but no execution client exists."
-                    )
-                ),
-                Node(
-                    package="bookshelf_guarded_control_ros",
-                    executable="policy_tool_plan_checker",
-                    name="policy_tool_plan_checker",
-                    output="screen",
-                    parameters=[
-                        LaunchConfiguration("plan_checker_config"),
-                        overrides,
-                    ],
-                ),
-            ]
-        )
-        return actions
-
-    overrides.update(
-        {
-            "dry_run": False,
-            "allow_execution": True,
-            "approval_token": LaunchConfiguration("execution_approval_token").perform(
-                context
-            ),
-        }
-    )
-    actions.extend(
-        [
-            LogInfo(
-                msg=(
-                    "Operation=move_once: at most one recent checked "
-                    "trajectory may run after a matching approval token."
-                )
-            ),
-            Node(
-                package="bookshelf_guarded_control_ros",
-                executable="guarded_policy_tool_executor",
-                name="guarded_policy_tool_executor",
-                output="screen",
-                parameters=[
-                    LaunchConfiguration("executor_config"),
-                    overrides,
-                ],
-            ),
-        ]
-    )
-    return actions
 
 
 def _bounded_capture(context):
@@ -153,11 +104,8 @@ def _bounded_capture(context):
 
 def generate_launch_description():
     package_share = FindPackageShare("bookshelf_guarded_control_ros")
-    default_plan_checker_config = PathJoinSubstitution(
-        [package_share, "config", "policy_tool_plan_checker.yaml"]
-    )
-    default_executor_config = PathJoinSubstitution(
-        [package_share, "config", "guarded_policy_tool_executor.yaml"]
+    default_servo_config = PathJoinSubstitution(
+        [package_share, "config", "direct_policy_servo.yaml"]
     )
     logging_launch = PathJoinSubstitution(
         [
@@ -258,26 +206,18 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "operation",
                 default_value="calculate",
-                description="calculate, plan, or move_once.",
+                description="calculate or control.",
             ),
             DeclareLaunchArgument(
-                "execution_approval_token",
-                default_value="DISABLED",
-                description="One-shot token required only by move_once.",
-            ),
-            DeclareLaunchArgument(
-                "plan_checker_config", default_value=default_plan_checker_config
-            ),
-            DeclareLaunchArgument(
-                "executor_config", default_value=default_executor_config
+                "servo_config", default_value=default_servo_config
             ),
             OpaqueFunction(function=_validate_inputs),
             LogInfo(
                 msg=(
-                    "Starting POLICY-ONLY DEPLOYMENT. It reuses the "
+                    "Starting POLICY DEPLOYMENT. It reuses the "
                     "existing robot, camera, TF, and target_book_center from "
-                    "physical_hardware_bringup.launch.py. It never starts an xArm "
-                    "driver, MoveIt stack, camera driver, or gripper command."
+                    "physical_hardware_bringup.launch.py. It never starts an "
+                    "xArm driver, MoveIt stack, camera driver, or gripper."
                 )
             ),
             IncludeLaunchDescription(
@@ -344,7 +284,7 @@ def generate_launch_description():
                     "start_live_detector": "false",
                 }.items(),
             ),
-            OpaqueFunction(function=_execution_actions),
+            OpaqueFunction(function=_control_actions),
             OpaqueFunction(function=_bounded_capture),
         ]
     )

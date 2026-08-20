@@ -21,8 +21,8 @@ setup(
     maintainer="chris",
     maintainer_email="tianyuli19981009@gmail.com",
     description=(
-        "Fail-closed virtual-policy-tool planning and explicitly approved "
-        "single-step execution for the bookshelf task."
+        "Virtual-policy-tool planning and direct local Cartesian control "
+        "for the bookshelf task."
     ),
     license="Apache-2.0",
     extras_require={"test": ["pytest"]},
@@ -40,6 +40,8 @@ setup(
             "bookshelf_guarded_control_ros.policy_tool_plan_checker_node:main",
             "guarded_policy_tool_executor = "
             "bookshelf_guarded_control_ros.guarded_policy_tool_executor_node:main",
+            "direct_policy_servo = "
+            "bookshelf_guarded_control_ros.direct_policy_servo_node:main",
         ],
     },
 )

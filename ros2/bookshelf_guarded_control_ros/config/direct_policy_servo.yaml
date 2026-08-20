@@ -1,0 +1,45 @@
+direct_policy_servo:
+  ros__parameters:
+    base_frame: link_base
+    tcp_frame: link_tcp
+    servo_service: /xarm/set_servo_cartesian_aa
+    set_mode_service: /xarm/set_mode
+    set_state_service: /xarm/set_state
+    configure_servo_mode: true
+    servo_mode: 1
+    ready_state: 0
+
+    control_rate_hz: 100.0
+    policy_command_duration_s: 0.05
+    message_max_age_s: 0.50
+    tf_max_age_s: 0.50
+    tf_lookup_timeout_s: 0.02
+    command_scale: 1.0
+
+    maximum_policy_delta:
+      - 0.008
+      - 0.003
+      - 0.007
+      - 0.013962634015954637
+      - 0.010471975511965976
+    maximum_tcp_translation_step_m: 0.010
+    maximum_tcp_rotation_step_rad: 0.026179938779914945
+    workspace_min_xyz: [0.20, -0.60, 0.05]
+    workspace_max_xyz: [1.00, 0.60, 1.00]
+
+    blocked_node_names:
+      - guarded_policy_tool_executor
+      - policy_tool_plan_checker
+      - policy_to_robot_node
+      - cartesian_action_executor_node
+      - action_executor_node
+
+    observation_valid_topic: /bookshelf_policy/observation_valid
+    inference_valid_topic: /bookshelf_shadow/inference_valid
+    final_delta_topic: /bookshelf_shadow/final_delta
+    slot_pose_base_topic: /bookshelf_policy/slot_pose_base
+    adapter_debug_topic: /bookshelf_policy/adapter_debug
+    policy_debug_topic: /bookshelf_shadow/policy_debug
+    command_valid_topic: /bookshelf_control/command_valid
+    status_topic: /bookshelf_control/status
+    target_tcp_topic: /bookshelf_control/target_tcp

@@ -3,8 +3,8 @@
 Last offline stationary calibration and shadow replay: 2026-08-19
 
 This runbook is for the xArm7 bookshelf insertion experiment on the Riot PC.
-It separates global motion, local residual-policy activation, plan-only checking,
-and explicitly approved single-step execution.
+It separates the MoveIt global approach from direct residual-policy Cartesian
+control during local insertion.
 
 The current approved configuration is candidate `53e7fe80d56d`. It binds the
 frozen View A slot, continuous marker-based held-book pose, policy-tool frame,
@@ -15,8 +15,8 @@ The stationary preflight verified that:
 
 - the unified source checkout builds on Riot;
 - the far robot pose is rejected by the local-policy activation gate;
-- the plan-only layer fails closed;
-- no execution node is needed for the shadow and planning checks;
+- policy calculation runs without a robot-command client;
+- local Cartesian targets can be inspected before control;
 - automatic logging records a finalized compressed ROS bag, manifest, event log,
   and ROS graph.
 
@@ -29,9 +29,8 @@ Physical execution itself has not yet been validated.
 2. Clear people and loose objects from the robot workspace.
 3. Use the traditional planner for global motion to the pre-insertion pose.
    The PPO policy is only a local insertion controller.
-4. Do not launch the guarded executor until the activation gate and plan-only
-   checker both pass.
-5. The first physical test is one low-scale Cartesian step only.
+4. Run `operation:=calculate` first and inspect the calculated TCP direction.
+5. Start `operation:=control` only after MoveIt global motion has stopped.
 6. Keep release and all gripper commands disabled for the first motion test.
 7. Stop immediately if the target TCP, planned path, or physical motion is not
    consistent with the expected insertion direction.
@@ -143,14 +142,8 @@ policy calculation and policy audit. In the default `calculate` operation it sta
 planning-scene manager, planner, or executor. Policy output remains diagnostic
 and cannot move the robot.
 
-For a planning rehearsal, use the same command with
-`operation:=plan`. This adds the
-planning-scene manager and checked MoveIt planner but no execution client.
-
-`move_once` is the only motion-capable operation. It requires a non-default
-`execution_approval_token`. The guarded executor accepts at most one recent
-checked trajectory per process, only after the matching token is published on
-`/bookshelf_guarded/approve_once`. It has no gripper interface.
+The only other operation is `control`. It starts the direct xArm Cartesian
+servo bridge. It does not create a MoveIt or gripper client.
 
 ### Riot Terminal 3
 
@@ -218,128 +211,42 @@ Required conditions:
 - `envelope_outliers` is empty;
 - `hardware_commanded` is false.
 
-If any condition fails, return to the global planner. Do not launch the local
-executor.
+If any condition fails, return to the global planner. Do not start local
+control.
 
-## 5. Run Plan-Only Checking
+## 5. Start Direct Local Policy Control
 
-### Riot Terminal 3
-
-```bash
-source /opt/ros/humble/setup.bash
-source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
-
-ros2 launch bookshelf_guarded_control_ros \
-  policy_tool_plan_only.launch.py
-```
-
-### Riot Terminal 2
+Stop the Terminal 2 `calculate` launch. Do not send another MoveIt goal after
+this point. Restart the same Terminal 2 command with:
 
 ```bash
-ros2 topic echo --once /bookshelf_guarded/plan_valid
-
-ros2 topic echo --once \
-  /bookshelf_guarded/plan_report \
-  --field data
-
-ros2 topic echo --once /bookshelf_guarded/target_policy_tool
-ros2 topic echo --once /bookshelf_guarded/target_tcp
-
-timeout 5 ros2 run tf2_ros tf2_echo \
-  link_base link_tcp
+operation:=control
 ```
 
-Do not proceed unless all of the following are true:
+This starts `direct_policy_servo`. It changes the xArm to servo mode only after
+fresh observation, inference, calibration provenance, slot pose, and TCP TF are
+available. Every policy step is bounded, converted through the approved virtual
+policy-tool transform, interpolated at 100 Hz, and sent as an absolute xArm TCP
+target. It never commands the gripper.
 
-- `plan_valid` is true;
-- activation is still ready;
-- collision and reachability checks passed;
-- the target TCP is a small one-step displacement from the current TCP;
-- the direction agrees with the intended insertion correction;
-- no release or gripper command is requested;
-- `hardware_commanded` remains false.
-
-Stop the plan-only launch before starting the guarded single-step executor.
-
-## 6. One-Time Executor Configuration Review
-
-The physical executor configuration must be reviewed before experiment day.
-Do not use the default file as implicit permission to move.
-
-Inspect the exact gates with:
+Monitor the local controller in a third terminal:
 
 ```bash
-cd /home/riot/Chris/bookshelf-unified
-
-rg -n \
-  "approval|token|execution|enable|command_scale|max_|release|gripper|activation" \
-  ros2/bookshelf_guarded_control_ros/config \
-  ros2/bookshelf_guarded_control_ros/bookshelf_guarded_control_ros
+ros2 topic echo /bookshelf_control/command_valid
+ros2 topic echo /bookshelf_control/status --field data
+ros2 topic echo /bookshelf_control/target_tcp
 ```
 
-Create a separately reviewed configuration at:
-
-```text
-/home/riot/BookshelfFiles/experiment_configs/guarded_policy_tool_executor_physical.yaml
-```
-
-For the first physical test it must enforce:
-
-- one step maximum;
-- low command scale, initially 0.1;
-- activation-ready required;
-- fresh observation and TF required;
-- valid plan required;
-- workspace and displacement limits enabled;
-- release disabled;
-- gripper commands disabled;
-- an explicit one-session approval token.
-
-The exact approval fields must be taken from the source inspection above. Do
-not guess their names or values beside the robot.
-
-## 7. Guarded Single-Step Execution
-
-Do not run this section until the executor configuration review is complete,
-the operator is ready, activation is true, and the plan-only target has been
-approved.
-
-Because Terminal 2 is already recording the whole experiment, disable the
-second integrated logger to avoid duplicate bags:
-
-```bash
-source /opt/ros/humble/setup.bash
-source /home/riot/Chris/ros2_ws/install_depth_fix/setup.bash
-source /home/riot/Chris/bookshelf_unified_ws/install/local_setup.bash
-
-EXECUTOR_CONFIG=/home/riot/BookshelfFiles/experiment_configs/guarded_policy_tool_executor_physical.yaml
-
-test -f "$EXECUTOR_CONFIG" \
-  || { echo "STOP: reviewed executor config is missing"; exit 1; }
-
-ros2 launch bookshelf_guarded_control_ros \
-  guarded_policy_tool_single_step.launch.py \
-  executor_config:="$EXECUTOR_CONFIG" \
-  enable_logging:=false \
-  trial_name:=physical_trial_001 \
-  experiment_output_root:=/home/riot/BookshelfFiles/experiment_logs \
-  repository_path:=/home/riot/Chris/bookshelf-unified \
-  policy_bundle:=/home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz \
-  activation_envelope:=/home/riot/BookshelfFiles/policy_activation_envelopes/simulator_local_2026-08-08.json \
-  record_camera:=true
-```
-
-The operator must watch the robot throughout this step. Stop immediately after
-the single action or at the first unexpected motion.
+`hardware_commanded` in the status changes to true only after the xArm servo
+service accepts a Cartesian target. Stop immediately at unexpected motion.
 
 ## 8. Shutdown Order
 
 Stop processes using `Ctrl+C` in this order:
 
-1. guarded single-step executor, if one was explicitly started;
-2. plan-only checker, if still running;
-3. unified shadow rehearsal.
+1. direct policy servo, if running;
+2. policy calculation launch;
+3. physical hardware launch.
 
 Stopping the unified rehearsal last allows its integrated logger to capture the
 final policy states and finalize the compressed bag.
@@ -383,12 +290,9 @@ Stop the experiment without execution if any of these occurs:
 - duplicate command-capable nodes are present;
 - camera, joint-state, or TF topics are stale;
 - slot or book calibration is inconsistent with the physical scene;
-- activation is false or unstable;
-- normalized observations are outside the simulator envelope;
+- observation or inference validity is false or unstable;
 - target TCP is not a small local correction;
-- plan-only checking fails;
-- collision or reachability checking is unavailable;
-- the reviewed executor configuration or approval token is missing;
+- `/xarm/set_servo_cartesian_aa` is unavailable or returns a nonzero code;
 - automatic logging is not active;
 - the operator cannot immediately stop the robot.
 
