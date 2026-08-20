@@ -1,0 +1,81 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.35
+      Cell Size: 0.05
+      Class: rviz_default_plugins/Grid
+      Color: 125; 130; 138
+      Enabled: true
+      Name: Base Grid
+      Plane: XY
+      Plane Cell Count: 30
+      Reference Frame: sim_link_base
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 1
+      Marker Scale: 0.07
+      Name: Simulated TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Slot Book and EEF Path
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_sim/markers
+    - Alpha: 1
+      Class: rviz_default_plugins/Pose
+      Color: 255; 140; 40
+      Enabled: true
+      Name: Current EEF
+      Shape: Axes
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_sim/eef_pose
+    - Alpha: 1
+      Class: rviz_default_plugins/Pose
+      Color: 255; 80; 80
+      Enabled: true
+      Name: Current Policy Target
+      Shape: Axes
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_control/target_tcp
+  Enabled: true
+  Global Options:
+    Background Color: 31; 34; 39
+    Fixed Frame: sim_link_base
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.0
+      Focal Point:
+        X: 0.78
+        Y: 0.08
+        Z: 0.17
+      Name: Policy Servo Software Simulation
+      Pitch: 0.25
+      Target Frame: sim_link_base
+      Yaw: 3.14
+Window Geometry:
+  Height: 900
+  Width: 1400

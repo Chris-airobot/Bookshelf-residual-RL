@@ -177,6 +177,7 @@ class DirectPolicyServo(Node):
         self.declare_parameter("tf_max_age_s", 0.50)
         self.declare_parameter("tf_lookup_timeout_s", 0.02)
         self.declare_parameter("command_scale", 1.0)
+        self.declare_parameter("command_target_is_hardware", True)
 
         self.declare_parameter("eef_tcp_translation_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter(
@@ -495,7 +496,8 @@ class DirectPolicyServo(Node):
             self._publish_zero_twist()
         else:
             self._publish_twist(twist)
-            self.hardware_commanded = True
+            if bool(self.get_parameter("command_target_is_hardware").value):
+                self.hardware_commanded = True
             self.command_count += 1
         self._publish_status(True, None, target=self.active_target)
 
@@ -543,6 +545,9 @@ class DirectPolicyServo(Node):
             "command_count": self.command_count,
             "zero_command_count": self.zero_command_count,
             "hardware_commanded": self.hardware_commanded,
+            "command_target_is_hardware": bool(
+                self.get_parameter("command_target_is_hardware").value
+            ),
             "gripper_command_interface": False,
             "moveit_planning_interface": False,
             "moveit_servo_interface": True,

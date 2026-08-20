@@ -15,6 +15,7 @@ setup(
         (f"share/{package_name}", ["package.xml"]),
         (os.path.join("share", package_name, "launch"), glob("launch/*.py")),
         (os.path.join("share", package_name, "config"), glob("config/*.yaml")),
+        (os.path.join("share", package_name, "rviz"), glob("rviz/*.rviz")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,
@@ -42,6 +43,8 @@ setup(
             "bookshelf_guarded_control_ros.guarded_policy_tool_executor_node:main",
             "direct_policy_servo = "
             "bookshelf_guarded_control_ros.direct_policy_servo_node:main",
+            "policy_servo_simulator = "
+            "bookshelf_guarded_control_ros.policy_servo_simulator_node:main",
         ],
     },
 )
