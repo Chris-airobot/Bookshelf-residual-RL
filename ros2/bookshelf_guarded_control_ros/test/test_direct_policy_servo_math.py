@@ -1,8 +1,11 @@
 import math
 
 import numpy as np
+import pytest
 
 from bookshelf_guarded_control_ros.direct_policy_servo_math import (
+    MAXIMUM_SUPERVISED_TRANSLATION_REASON,
+    SupervisedTranslationBudget,
     bounded_error_twist,
     eef_target_from_tcp_target,
     matrix_to_axis_angle_vector,
@@ -63,3 +66,34 @@ def test_error_twist_is_zero_inside_pose_tolerance():
     )
 
     np.testing.assert_allclose(twist, np.zeros(6))
+
+
+@pytest.mark.parametrize("invalid_bound", [0.0, -0.01, float("nan"), float("inf")])
+def test_supervised_translation_budget_rejects_startup_without_positive_bound(
+    invalid_bound,
+):
+    with pytest.raises(
+        ValueError,
+        match="maximum_total_translation_m must be finite and positive",
+    ):
+        SupervisedTranslationBudget(invalid_bound)
+
+
+def test_supervised_translation_budget_accepts_normal_command_below_bound():
+    budget = SupervisedTranslationBudget(0.02)
+
+    assert budget.accept_target(0.008) is None
+    assert budget.total_m == pytest.approx(0.008)
+    assert not budget.exhausted
+    assert budget.terminal_reason is None
+
+
+def test_supervised_translation_budget_stops_at_bound():
+    budget = SupervisedTranslationBudget(0.02)
+
+    assert budget.accept_target(0.01) is None
+    assert budget.accept_target(0.01) is None
+    assert budget.exhausted
+    assert budget.finish_at_limit() == MAXIMUM_SUPERVISED_TRANSLATION_REASON
+    assert budget.accept_target(0.001) == MAXIMUM_SUPERVISED_TRANSLATION_REASON
+    assert budget.total_m == pytest.approx(0.02)

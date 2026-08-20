@@ -36,6 +36,7 @@ def test_executor_is_one_shot_token_gated_and_has_no_gripper():
         "self.execution_guard.try_consume()",
         "maximum_named_joint_difference",
         "trajectory_sha256",
+        "TRAJECTORY_FINGERPRINT_KIND",
         "expected_scene_config_sha256",
         "expected_target_transform_status",
         "latest_joint_state_ns",
@@ -62,6 +63,11 @@ def test_planner_binds_trajectory_to_report_and_launch_installs_executor():
     launch = LAUNCH.read_text(encoding="utf-8")
     setup = SETUP.read_text(encoding="utf-8")
     assert '"trajectory_sha256"' in planner
+    assert '"trajectory_fingerprint_kind"' in planner
+    assert "canonical_ros_message_sha256" in planner
+    assert "canonical_ros_message_sha256" in NODE.read_text(encoding="utf-8")
+    assert "serialize_message" not in planner
+    assert "serialize_message" not in NODE.read_text(encoding="utf-8")
     assert 'executable="guarded_preinsert_executor"' in launch
     assert "committed" in launch.lower()
     assert '"guarded_preinsert_executor = "' in setup

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
@@ -14,12 +13,13 @@ from rclpy.action import ActionClient
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from rclpy.serialization import serialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, String
 
 from .policy_tool_control_math import (
     OneShotExecutionGuard,
+    TRAJECTORY_FINGERPRINT_KIND,
+    canonical_ros_message_sha256,
     maximum_named_joint_difference,
 )
 
@@ -188,9 +188,13 @@ class GuardedPreinsertExecutorNode(Node):
 
     def _trajectory_callback(self, message: RobotTrajectory):
         self.latest_trajectory = message
-        self.latest_trajectory_sha256 = hashlib.sha256(
-            serialize_message(message)
-        ).hexdigest()
+        try:
+            self.latest_trajectory_sha256 = canonical_ros_message_sha256(message)
+        except (TypeError, ValueError) as error:
+            self.latest_trajectory_sha256 = None
+            self.get_logger().warning(
+                f"Received trajectory cannot be fingerprinted safely: {error}"
+            )
 
     def _joint_state_callback(self, message: JointState):
         self.latest_joint_state = message
@@ -260,6 +264,8 @@ class GuardedPreinsertExecutorNode(Node):
         )
         if report.get("planning_sequence") != required_sequence:
             return "planning sequence does not match the reviewed executor configuration"
+        if report.get("trajectory_fingerprint_kind") != TRAJECTORY_FINGERPRINT_KIND:
+            return "trajectory fingerprint scheme does not match the executor"
         if report.get("trajectory_sha256") != self.latest_trajectory_sha256:
             return "trajectory does not match the reviewed plan report"
 

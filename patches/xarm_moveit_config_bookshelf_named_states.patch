@@ -1,0 +1,29 @@
+diff --git a/xarm_moveit_config/srdf/_xarm7_macro.srdf.xacro b/xarm_moveit_config/srdf/_xarm7_macro.srdf.xacro
+index 2dedae6..1e8b16e 100644
+--- a/xarm_moveit_config/srdf/_xarm7_macro.srdf.xacro
++++ b/xarm_moveit_config/srdf/_xarm7_macro.srdf.xacro
+@@ -58,6 +58,24 @@
+       <joint name="${prefix}joint6" value="-1.5708" />
+       <joint name="${prefix}joint7" value="0" />
+     </group_state>
++    <group_state name="pre-insertion" group="${prefix}xarm7">
++      <joint name="${prefix}joint1" value="1.937315469714" />
++      <joint name="${prefix}joint2" value="1.466076571675" />
++      <joint name="${prefix}joint3" value="4.974188368184" />
++      <joint name="${prefix}joint4" value="0.453785605519" />
++      <joint name="${prefix}joint5" value="3.473205211469" />
++      <joint name="${prefix}joint6" value="0.837758040957" />
++      <joint name="${prefix}joint7" value="4.468042885105" />
++    </group_state>
++    <group_state name="pre-target" group="${prefix}xarm7">
++      <joint name="${prefix}joint1" value="1.2342693425054612" />
++      <joint name="${prefix}joint2" value="1.5322427671441177" />
++      <joint name="${prefix}joint3" value="4.904658882462919" />
++      <joint name="${prefix}joint4" value="1.302429752118059" />
++      <joint name="${prefix}joint5" value="3.302595179623167" />
++      <joint name="${prefix}joint6" value="0.6839448116011184" />
++      <joint name="${prefix}joint7" value="4.4791192150828865" />
++    </group_state>
+ 
+     <!-- gripper -->
+     <xacro:if value="${add_gripper}">

@@ -12,6 +12,60 @@ import numpy as np
 
 
 MOTION_LABELS = ("dx", "dy", "dz", "dyaw", "dpitch")
+TRAJECTORY_FINGERPRINT_KIND = "canonical_ros_fields_v1"
+
+
+def canonical_ros_message_sha256(message) -> str:
+    """Hash ROS message fields without depending on CDR padding bytes.
+
+    ``rclpy.serialization.serialize_message`` may leave alignment padding with
+    process-local byte values.  Those bytes are not ROS message data, so the
+    serialized SHA-256 can change across calls or across a DDS round trip.  A
+    trajectory approval needs to bind the actual fields instead.
+    """
+
+    canonical = _canonical_ros_value(message)
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_ros_value(value):
+    if hasattr(value, "get_fields_and_field_types"):
+        field_types = value.get_fields_and_field_types()
+        return {
+            "ros_type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "field_types": dict(field_types),
+            "fields": {
+                name: _canonical_ros_value(getattr(value, name))
+                for name in field_types
+            },
+        }
+    if isinstance(value, np.ndarray):
+        return [_canonical_ros_value(item) for item in value.tolist()]
+    if isinstance(value, (list, tuple)) or (
+        hasattr(value, "typecode") and hasattr(value, "tolist")
+    ):
+        items = value.tolist() if hasattr(value, "tolist") else value
+        return [_canonical_ros_value(item) for item in items]
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"bytes_hex": bytes(value).hex()}
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError("ROS message contains a non-finite floating-point value")
+        return {"float_hex": number.hex()}
+    if isinstance(value, str) or value is None:
+        return value
+    raise TypeError(f"unsupported ROS message field type: {type(value)!r}")
 
 
 class OneShotExecutionGuard:

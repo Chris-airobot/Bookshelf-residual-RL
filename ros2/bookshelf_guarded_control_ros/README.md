@@ -140,10 +140,12 @@ ros2 launch bookshelf_guarded_control_ros physical_policy_deployment.launch.py \
 ```
 
 The policy launch explicitly disables nested hardware and marker-detector
-bringup. It starts the slot diagnostic, held-book gate, logging, observation
-adapter, policy calculation, and audit exactly once. `calculate` creates no
-robot-command client. `control` starts only `direct_policy_servo`; each local
-policy step is sent to the Servo server already owned by the hardware launch.
+bringup. It starts the slot diagnostic, logging, observation adapter, policy
+calculation, and audit exactly once. The observation adapter continuously uses
+the live marker-derived book pose; policy deployment does not compare it with a
+recorded fixed-grasp reference. `calculate` creates no robot-command client.
+`control` starts only `direct_policy_servo`; each local policy step is sent to
+the Servo server already owned by the hardware launch.
 The Servo server reuses the active `xarm7_traj_controller`; it does not change
 xArm mode or create another robot connection. Do not send a separate MoveIt
 trajectory goal while `operation:=control` is running.

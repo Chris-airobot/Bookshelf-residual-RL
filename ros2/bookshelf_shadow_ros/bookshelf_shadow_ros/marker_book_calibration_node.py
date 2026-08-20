@@ -626,9 +626,12 @@ class MarkerBookCalibrationNode(Node):
         return int(matches[0]) if matches.size else None
 
     def _estimate_pose(self, corners, camera_matrix, distortion):
+        image_points = np.ascontiguousarray(
+            np.asarray(corners, dtype=np.float64).reshape(4, 2)
+        )
         result = cv2.solvePnPGeneric(
             self.object_points,
-            np.asarray(corners, dtype=np.float64),
+            image_points,
             camera_matrix,
             distortion,
             flags=cv2.SOLVEPNP_IPPE_SQUARE,
@@ -642,10 +645,28 @@ class MarkerBookCalibrationNode(Node):
             tvec = np.asarray(tvec, dtype=np.float64).reshape(3, 1)
             if not np.all(np.isfinite(tvec)) or float(tvec[2]) <= 0.0:
                 continue
+            # IPPE provides the two planar-square pose branches, but its raw
+            # analytic candidates can retain several pixels of reprojection
+            # error at close range. Refine each branch before applying the
+            # existing quality threshold; this preserves ambiguity handling
+            # without rejecting a clearly detected marker on solver error.
+            try:
+                rvec, tvec = cv2.solvePnPRefineLM(
+                    self.object_points,
+                    image_points,
+                    camera_matrix,
+                    distortion,
+                    rvec,
+                    tvec,
+                )
+            except cv2.error:
+                continue
+            if not np.all(np.isfinite(tvec)) or float(tvec[2]) <= 0.0:
+                continue
             projected, _ = cv2.projectPoints(
                 self.object_points, rvec, tvec, camera_matrix, distortion
             )
-            residual = projected.reshape(4, 2) - np.asarray(corners).reshape(4, 2)
+            residual = projected.reshape(4, 2) - image_points
             error = float(np.sqrt(np.mean(np.sum(residual * residual, axis=1))))
             if best is None or error < best[0]:
                 rotation, _ = cv2.Rodrigues(rvec)

@@ -13,6 +13,58 @@ from .policy_tool_control_math import (
 )
 
 
+MAXIMUM_SUPERVISED_TRANSLATION_REASON = "maximum supervised translation reached"
+
+
+def validate_maximum_total_translation_m(value) -> float:
+    """Return a finite positive supervised translation limit."""
+
+    maximum = float(value)
+    if not math.isfinite(maximum) or maximum <= 0.0:
+        raise ValueError(
+            "maximum_total_translation_m must be finite and positive"
+        )
+    return maximum
+
+
+class SupervisedTranslationBudget:
+    """Latch once accepted Cartesian target lengths consume a fixed budget."""
+
+    def __init__(self, maximum_total_translation_m):
+        self.maximum_m = validate_maximum_total_translation_m(
+            maximum_total_translation_m
+        )
+        self.total_m = 0.0
+        self.terminal_reason = None
+
+    @property
+    def exhausted(self) -> bool:
+        return self.total_m >= self.maximum_m
+
+    def accept_target(self, translation_m: float) -> str | None:
+        """Charge one target or latch before it would exceed the budget."""
+
+        if self.terminal_reason is not None:
+            return self.terminal_reason
+        translation_m = float(translation_m)
+        if not math.isfinite(translation_m) or translation_m < 0.0:
+            raise ValueError(
+                "commanded target translation must be finite and non-negative"
+            )
+        if self.exhausted or self.total_m + translation_m > self.maximum_m:
+            self.terminal_reason = MAXIMUM_SUPERVISED_TRANSLATION_REASON
+            return self.terminal_reason
+        self.total_m += translation_m
+        return None
+
+    def finish_at_limit(self) -> str | None:
+        """Latch after the final target that exactly consumed the budget."""
+
+        if self.exhausted:
+            self.terminal_reason = MAXIMUM_SUPERVISED_TRANSLATION_REASON
+        return self.terminal_reason
+
+
 def eef_target_from_tcp_target(target_base_tcp, transform_eef_tcp) -> np.ndarray:
     """Convert a calibrated TCP target into the link_eef target Servo controls."""
 

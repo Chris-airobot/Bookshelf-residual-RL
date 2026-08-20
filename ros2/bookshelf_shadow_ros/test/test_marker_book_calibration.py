@@ -1,6 +1,7 @@
 import math
 from pathlib import Path
 
+import cv2
 import numpy as np
 import yaml
 
@@ -14,6 +15,10 @@ from bookshelf_shadow_ros.marker_book_calibration import (
     quaternion_medoid_xyzw,
 )
 from bookshelf_shadow_ros.policy_observation_math import make_transform
+from bookshelf_shadow_ros.marker_book_calibration_node import (
+    MarkerBookCalibrationNode,
+    _marker_object_points,
+)
 
 
 def _sample(index, transform):
@@ -107,3 +112,37 @@ def test_accumulator_rejects_large_pose_outlier():
     assert result["inlier_samples"] == 5
     assert result["inlier_fraction"] == 5.0 / 6.0
     np.testing.assert_allclose(result["translation_xyz_m"], [0.10, -0.02, 0.05], atol=1.0e-9)
+
+
+def test_square_marker_pose_refines_ippe_candidate_before_scoring():
+    object_points = _marker_object_points(0.039)
+    camera_matrix = np.array(
+        [[605.608, 0.0, 316.804], [0.0, 605.623, 247.628], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    distortion = np.zeros(5, dtype=np.float64)
+    expected_rvec = np.array([[0.08], [-0.35], [0.03]], dtype=np.float64)
+    expected_tvec = np.array([[0.015], [-0.008], [0.31]], dtype=np.float64)
+    corners, _ = cv2.projectPoints(
+        object_points,
+        expected_rvec,
+        expected_tvec,
+        camera_matrix,
+        distortion,
+    )
+    corners = corners.reshape(4, 2)
+    corners += np.array(
+        [[-0.55, 0.20], [0.35, -0.45], [0.60, 0.30], [-0.40, -0.15]],
+        dtype=np.float64,
+    )
+
+    node = type("PoseEstimator", (), {"object_points": object_points})()
+    transform, reprojection_error_px = MarkerBookCalibrationNode._estimate_pose(
+        node,
+        corners,
+        camera_matrix,
+        distortion,
+    )
+
+    assert transform[2, 3] > 0.0
+    assert reprojection_error_px < 0.5

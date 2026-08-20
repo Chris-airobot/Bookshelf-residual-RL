@@ -17,6 +17,7 @@ from std_srvs.srv import Trigger
 import tf2_ros
 
 from .direct_policy_servo_math import (
+    SupervisedTranslationBudget,
     bounded_error_twist,
     eef_target_from_tcp_target,
 )
@@ -68,6 +69,9 @@ class DirectPolicyServo(Node):
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.eef_frame = str(self.get_parameter("eef_frame").value)
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
+        self.translation_budget = SupervisedTranslationBudget(
+            self.get_parameter("maximum_total_translation_m").value
+        )
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -178,6 +182,7 @@ class DirectPolicyServo(Node):
         self.declare_parameter("tf_lookup_timeout_s", 0.02)
         self.declare_parameter("command_scale", 1.0)
         self.declare_parameter("command_target_is_hardware", True)
+        self.declare_parameter("maximum_total_translation_m", 0.0)
 
         self.declare_parameter("eef_tcp_translation_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter(
@@ -274,6 +279,8 @@ class DirectPolicyServo(Node):
         return (self._now_ns() - timestamp_ns) * 1.0e-9 <= maximum_age_s
 
     def _input_error(self) -> str | None:
+        if self.translation_budget.terminal_reason is not None:
+            return self.translation_budget.terminal_reason
         if not self.latest_observation_valid:
             return "observation_valid is false"
         if not self._fresh(self.latest_observation_valid_ns):
@@ -423,7 +430,11 @@ class DirectPolicyServo(Node):
         transform_eef_tcp = self._eef_tcp_transform()
         transform_base_tcp = transform_base_eef @ transform_eef_tcp
         target = self.active_target
-        if self.latest_delta_generation != self.last_prepared_generation:
+        prepared_new_target = False
+        if (
+            self.latest_delta_generation != self.last_prepared_generation
+            and not self.translation_budget.exhausted
+        ):
             try:
                 target = compute_policy_tool_target(
                     _pose_to_transform(self.latest_slot_pose.pose),
@@ -445,6 +456,7 @@ class DirectPolicyServo(Node):
                 self._clear_target_and_halt()
                 self._publish_status(False, error, target=target)
                 return
+            prepared_new_target = True
 
         start_reason = self._start_servo()
         if start_reason:
@@ -452,7 +464,19 @@ class DirectPolicyServo(Node):
             self._publish_status(False, start_reason, target=target)
             return
 
-        if self.latest_delta_generation != self.last_prepared_generation:
+        if prepared_new_target:
+            try:
+                terminal_reason = self.translation_budget.accept_target(
+                    target.tcp_translation_step_m
+                )
+            except ValueError as error:
+                self._clear_target_and_halt()
+                self._publish_status(False, str(error), target=target)
+                return
+            if terminal_reason is not None:
+                self._clear_target_and_halt()
+                self._publish_status(False, terminal_reason, target=target)
+                return
             self.active_target = target
             self.active_target_eef = eef_target_from_tcp_target(
                 target.transform_base_tcp_target,
@@ -494,6 +518,10 @@ class DirectPolicyServo(Node):
         if float(np.linalg.norm(twist)) == 0.0:
             self.active_target_eef = None
             self._publish_zero_twist()
+            terminal_reason = self.translation_budget.finish_at_limit()
+            if terminal_reason is not None:
+                self._publish_status(False, terminal_reason, target=self.active_target)
+                return
         else:
             self._publish_twist(twist)
             if bool(self.get_parameter("command_target_is_hardware").value):
@@ -540,6 +568,9 @@ class DirectPolicyServo(Node):
             "tcp_frame": self.tcp_frame,
             "servo_state": self.servo_state,
             "command_scale": float(self.get_parameter("command_scale").value),
+            "maximum_total_translation_m": self.translation_budget.maximum_m,
+            "total_commanded_translation_m": self.translation_budget.total_m,
+            "terminal_reason": self.translation_budget.terminal_reason,
             "target_active": self.active_target_eef is not None,
             "start_request_pending": self.start_request_pending,
             "command_count": self.command_count,

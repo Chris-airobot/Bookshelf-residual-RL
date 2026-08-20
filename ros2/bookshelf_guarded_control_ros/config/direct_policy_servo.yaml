@@ -17,6 +17,9 @@ direct_policy_servo:
     tf_lookup_timeout_s: 0.02
     command_scale: 1.0
 
+    # Fail closed unless an explicit supervised control launch overrides this.
+    maximum_total_translation_m: 0.0
+
     # Filled from the reviewed trial configuration by the deployment launch.
     eef_tcp_translation_xyz: [0.0, 0.0, 0.0]
     eef_tcp_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]

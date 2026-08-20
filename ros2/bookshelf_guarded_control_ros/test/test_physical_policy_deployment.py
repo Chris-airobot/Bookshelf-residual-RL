@@ -12,7 +12,6 @@ def test_policy_deployment_reuses_hardware_and_validates_approved_assets():
         "validate_shadow_rehearsal_assets",
         '"experiment_logging.launch.py"',
         '"static_slot_environment_check.launch.py"',
-        'executable="held_book_pose_check"',
         '"policy_hardware_shadow.launch.py"',
         '"start_live_detector": "false"',
         '"require_activation_envelope": "true"',
@@ -36,13 +35,21 @@ def test_policy_deployment_does_not_start_hardware_owners():
         "guarded_policy_tool_executor",
         "policy_tool_plan_checker",
         "bookshelf_scene_manager",
+        "held_book_pose_check",
         "policy_to_robot",
         "send_goal",
     )
     for token in forbidden:
         assert token not in source
 
-    assert 'executable="held_book_pose_check"' in source
+    assert '"book_pose_required_stable_samples"' not in source
+
+
+def test_policy_deployment_uses_live_marker_book_without_recorded_grasp_gate():
+    source = LAUNCH.read_text(encoding="utf-8")
+    assert 'executable="held_book_pose_check"' not in source
+    assert '"adapter_config": LaunchConfiguration("approved_config")' in source
+    assert '"start_live_detector": "false"' in source
 
 
 def test_policy_deployment_operations_are_simple_and_bounded():
@@ -59,6 +66,10 @@ def test_policy_deployment_operations_are_simple_and_bounded():
     assert 'executable="guarded_policy_tool_executor"' not in source
     assert '"block_on_activation_checks": "false"' in source
     assert "guarded_policy_tool_overrides" in source
+    assert '"maximum_total_translation_m"' in source
+    assert 'default_value="0.0"' in source
+    assert "validate_maximum_total_translation_m" in source
+    assert 'overrides["maximum_total_translation_m"]' in source
 
 
 def test_policy_deployment_has_one_slot_detector_owner():

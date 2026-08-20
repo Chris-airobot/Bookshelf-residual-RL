@@ -13,12 +13,14 @@ from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 from bookshelf_guarded_control_ros.rehearsal_configuration import (
     guarded_policy_tool_overrides,
     validate_shadow_rehearsal_assets,
+)
+from bookshelf_guarded_control_ros.direct_policy_servo_math import (
+    validate_maximum_total_translation_m,
 )
 
 
@@ -53,11 +55,22 @@ def _control_actions(context):
             )
         ]
 
+    try:
+        maximum_total_translation_m = validate_maximum_total_translation_m(
+            LaunchConfiguration("maximum_total_translation_m").perform(context)
+        )
+    except (TypeError, ValueError) as error:
+        raise RuntimeError(
+            "operation=control requires a finite positive "
+            "maximum_total_translation_m"
+        ) from error
+
     approved_config = LaunchConfiguration("approved_config").perform(context)
     policy_bundle = LaunchConfiguration("policy_bundle").perform(context)
     overrides = guarded_policy_tool_overrides(approved_config, policy_bundle)
     overrides.pop("require_scene_status", None)
     overrides.pop("required_scene_mode", None)
+    overrides["maximum_total_translation_m"] = maximum_total_translation_m
     return [
         LogInfo(
             msg=(
@@ -142,14 +155,6 @@ def generate_launch_description():
             "frozen_check",
         ]
     )
-    held_book_check_output = PathJoinSubstitution(
-        [
-            LaunchConfiguration("environment_check_output_root"),
-            LaunchConfiguration("trial_name"),
-            "held_book_pose_check",
-        ]
-    )
-
     return LaunchDescription(
         [
             DeclareLaunchArgument("trial_name"),
@@ -197,9 +202,6 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("capture_duration_s", default_value="0.0"),
             DeclareLaunchArgument("minimum_free_space_gb", default_value="5.0"),
-            DeclareLaunchArgument(
-                "book_pose_required_stable_samples", default_value="30"
-            ),
             DeclareLaunchArgument("enable_policy_audit", default_value="true"),
             DeclareLaunchArgument("policy_audit_samples", default_value="1200"),
             DeclareLaunchArgument("reference_slot_width_m", default_value="0.0"),
@@ -207,6 +209,14 @@ def generate_launch_description():
                 "operation",
                 default_value="calculate",
                 description="calculate or control.",
+            ),
+            DeclareLaunchArgument(
+                "maximum_total_translation_m",
+                default_value="0.0",
+                description=(
+                    "Required finite positive cumulative Cartesian path limit "
+                    "for operation=control; ignored by calculate mode."
+                ),
             ),
             DeclareLaunchArgument(
                 "servo_config", default_value=default_servo_config
@@ -247,23 +257,6 @@ def generate_launch_description():
                     "output_dir": frozen_check_output,
                     "start_live_detector": "true",
                 }.items(),
-            ),
-            Node(
-                package="bookshelf_guarded_control_ros",
-                executable="held_book_pose_check",
-                name="held_book_pose_check",
-                output="screen",
-                parameters=[
-                    {
-                        "scene_config_path": LaunchConfiguration("approved_config"),
-                        "detected_book_frame": "target_book_center",
-                        "required_stable_samples": ParameterValue(
-                            LaunchConfiguration("book_pose_required_stable_samples"),
-                            value_type=int,
-                        ),
-                        "output_dir": held_book_check_output,
-                    }
-                ],
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(shadow_launch),

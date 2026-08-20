@@ -93,6 +93,7 @@ def _simulation_actions(context):
             "start_servo_service": "/bookshelf_sim/servo/start",
             "twist_command_topic": "/bookshelf_sim/servo/delta_twist_cmds",
             "command_target_is_hardware": False,
+            "maximum_total_translation_m": 1.0,
             "tf_max_age_s": 1.0,
         }
     )
