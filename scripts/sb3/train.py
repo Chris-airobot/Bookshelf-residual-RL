@@ -71,6 +71,22 @@ parser.add_argument(
         "training default is 30 mm; this does not change evaluation tools."
     ),
 )
+parser.add_argument(
+    "--policy_release_guard",
+    choices=("none", "observable_geometry"),
+    default="none",
+    help=(
+        "Policy release handling. 'none' preserves the baseline; "
+        "'observable_geometry' ignores release requests until the observed "
+        "book pose is sufficiently inserted and aligned."
+    ),
+)
+parser.add_argument(
+    "--premature_release_penalty",
+    type=float,
+    default=0.5,
+    help="Reward penalty for each release request blocked by the selected guard.",
+)
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument("--mlflow", action="store_true", default=False, help="Enable MLflow logging.")
 parser.add_argument("--mlflow_experiment", type=str, default="bookshelf-sb3", help="MLflow experiment name.")
@@ -332,6 +348,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     ):
         env_cfg.enable_reset_acceptance_gate = not bool(
             args_cli.disable_reset_acceptance_gate
+        )
+    if hasattr(env_cfg, "policy_release_guard_mode"):
+        premature_release_penalty = float(args_cli.premature_release_penalty)
+        if not np.isfinite(premature_release_penalty) or premature_release_penalty < 0.0:
+            raise ValueError(
+                "--premature_release_penalty must be finite and non-negative"
+            )
+        env_cfg.policy_release_guard_mode = str(args_cli.policy_release_guard)
+        env_cfg.premature_release_penalty = premature_release_penalty
+        print(
+            "[POLICY_RELEASE_GUARD] mode="
+            f"{env_cfg.policy_release_guard_mode} "
+            f"premature_release_penalty={premature_release_penalty:.6f}",
+            flush=True,
+        )
+    if bool(args_cli.headless):
+        marker_flags = (
+            "show_robot_base_reference_marker",
+            "show_target_book_marker",
+            "show_target_ee_marker",
+            "show_current_ee_marker",
+            "show_reachable_grasp_target_frame",
+        )
+        disabled_marker_flags = []
+        for marker_flag in marker_flags:
+            if hasattr(env_cfg, marker_flag):
+                setattr(env_cfg, marker_flag, False)
+                disabled_marker_flags.append(marker_flag)
+        print(
+            "[HEADLESS_TRAINING] disabled debug visualization markers: "
+            + ", ".join(disabled_marker_flags),
+            flush=True,
         )
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.fixed_clearance is not None:

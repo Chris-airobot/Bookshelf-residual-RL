@@ -604,3 +604,43 @@ def test_xarm_training_filters_invalid_randomized_grasps_only_before_ppo():
     assert 'log["reset_gate_acceptance_rate"]' in residual
     assert 'log[f"reset_gate_{reason}_total"]' in residual
     assert "self._capture_scenario_initial_pose(env_ids_t)" in residual
+
+
+def test_training_can_compare_baseline_and_observable_geometry_release_guards():
+    config = read(TASK / "bookshelf_residual_env_cfg.py")
+    residual = read(TASK / "bookshelf_residual_env.py")
+    train = read(ROOT / "scripts/sb3/train.py")
+
+    assert 'policy_release_guard_mode = "none"' in config
+    assert "premature_release_penalty = 0.5" in config
+    assert '"--policy_release_guard"' in train
+    assert 'choices=("none", "observable_geometry")' in train
+    assert '"--premature_release_penalty"' in train
+    assert "env_cfg.policy_release_guard_mode = str(args_cli.policy_release_guard)" in train
+    assert "env_cfg.premature_release_penalty = premature_release_penalty" in train
+    assert '"[POLICY_RELEASE_GUARD] mode="' in train
+
+    assert 'self._policy_release_guard_mode == "observable_geometry"' in residual
+    assert "geometry_ready = self._nominal_release_mask(metrics)" in residual
+    assert "policy_release = raw_policy_release & geometry_ready" in residual
+    assert "& (self._mode == _MODE_INSERT)" in residual
+    assert "& ~geometry_ready" in residual
+    assert 'self.extras["log"]["raw_policy_release_fraction"]' in residual
+    assert 'self.extras["log"]["blocked_policy_release_fraction"]' in residual
+    assert 'self.extras["log"]["premature_release_penalty_mean"]' in residual
+
+
+def test_headless_training_disables_debug_visualization_markers():
+    train = read(ROOT / "scripts/sb3/train.py")
+
+    assert "if bool(args_cli.headless):" in train
+    for marker_flag in (
+        "show_robot_base_reference_marker",
+        "show_target_book_marker",
+        "show_target_ee_marker",
+        "show_current_ee_marker",
+        "show_reachable_grasp_target_frame",
+    ):
+        assert f'"{marker_flag}"' in train
+    assert "setattr(env_cfg, marker_flag, False)" in train
+    assert '"[HEADLESS_TRAINING] disabled debug visualization markers: "' in train

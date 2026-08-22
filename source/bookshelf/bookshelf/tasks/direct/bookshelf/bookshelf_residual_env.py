@@ -193,6 +193,25 @@ class BookshelfEnv(BookshelfEnvV5):
             "book_dropped": 0,
             "arm_tracking": 0,
         }
+        self._policy_release_guard_mode = str(
+            getattr(self.cfg, "policy_release_guard_mode", "none")
+        ).strip().lower()
+        if self._policy_release_guard_mode not in ("none", "observable_geometry"):
+            raise ValueError(
+                "policy_release_guard_mode must be 'none' or "
+                "'observable_geometry'"
+            )
+        premature_release_penalty = float(
+            getattr(self.cfg, "premature_release_penalty", 0.0)
+        )
+        if not math.isfinite(premature_release_penalty) or premature_release_penalty < 0.0:
+            raise ValueError("premature_release_penalty must be finite and non-negative")
+        self._raw_policy_release_request = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._blocked_policy_release_request = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         self._validate_reset_acceptance_configuration()
         self._cleanup_legacy_debug_visuals()
 
@@ -804,6 +823,8 @@ class BookshelfEnv(BookshelfEnvV5):
         self._debug_nominal_push_target_z_env[env_ids_t] = 0.0
         self._debug_nominal_push_lowering_complete[env_ids_t] = False
         self._debug_nominal_push_line_initialized[env_ids_t] = False
+        self._raw_policy_release_request[env_ids_t] = False
+        self._blocked_policy_release_request[env_ids_t] = False
         reset_env0 = env_ids is None
         if env_ids is not None:
             reset_env0 = bool(torch.any(torch.as_tensor(env_ids, device=self.device, dtype=torch.long) == 0).item())
@@ -2354,21 +2375,55 @@ class BookshelfEnv(BookshelfEnvV5):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone().clamp(-1.0, 1.0)
         self._mode_start = self._mode.clone()
-        policy_release = self.actions[:, -1] > float(self.cfg.release_trigger_threshold)
-        nominal_release = torch.zeros_like(policy_release)
+        raw_policy_release = self.actions[:, -1] > float(self.cfg.release_trigger_threshold)
+        self._raw_policy_release_request = raw_policy_release
+
+        metrics = None
+        geometry_ready = None
+        if self._policy_release_guard_mode == "observable_geometry":
+            metrics = self._compute_task_metrics()
+            geometry_ready = self._nominal_release_mask(metrics)
+            policy_release = raw_policy_release & geometry_ready
+            self._blocked_policy_release_request = (
+                raw_policy_release
+                & (self._mode == _MODE_INSERT)
+                & ~geometry_ready
+            )
+        else:
+            policy_release = raw_policy_release
+            self._blocked_policy_release_request = torch.zeros_like(raw_policy_release)
+
+        nominal_release = torch.zeros_like(raw_policy_release)
         if (
             self._nominal_release_assist_enabled()
             and
             bool(getattr(self.cfg, "enable_nominal_controller", True))
             and not bool(getattr(self.cfg, "debug_freeze_nominal_controller", False))
         ):
-            m = self._compute_task_metrics()
-            nominal_release = self._nominal_release_mask(m)
+            if metrics is None:
+                metrics = self._compute_task_metrics()
+            if geometry_ready is None:
+                geometry_ready = self._nominal_release_mask(metrics)
+            nominal_release = geometry_ready
 
         self._release_request = policy_release | nominal_release
 
     def _get_rewards(self) -> torch.Tensor:
         rew = super()._get_rewards()
+        premature_weight = float(
+            getattr(self.cfg, "premature_release_penalty", 0.0)
+        )
+        premature_release = self._blocked_policy_release_request.float()
+        premature_penalty = premature_weight * premature_release
+        rew = rew - premature_penalty
+
+        self.extras.setdefault("log", {})
+        self.extras["log"]["raw_policy_release_fraction"] = (
+            self._raw_policy_release_request.float().mean()
+        )
+        self.extras["log"]["blocked_policy_release_fraction"] = premature_release.mean()
+        self.extras["log"]["premature_release_penalty_mean"] = premature_penalty.mean()
+
         weight = float(getattr(self.cfg, "residual_action_l2_weight", 0.0))
         if weight <= 0.0:
             return rew
@@ -2376,7 +2431,6 @@ class BookshelfEnv(BookshelfEnvV5):
         residual_l2 = torch.mean(torch.square(self.actions[:, 0:5]), dim=-1)
         penalty = weight * residual_l2
         rew = rew - penalty
-        self.extras.setdefault("log", {})
         self.extras["log"]["residual_action_l2_mean"] = residual_l2.mean()
         self.extras["log"]["residual_action_l2_penalty_mean"] = penalty.mean()
         return rew

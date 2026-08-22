@@ -167,6 +167,11 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     residual_curriculum_action_scale_final = 1.00
     enable_nominal_release_assist = False
     nominal_release_assist_until_frac = 0.30
+    # Keep "none" as the baseline behavior.  The observable-geometry guard
+    # accepts a policy release only after the measured book pose satisfies the
+    # same insertion/alignment test used by the nominal release helper.
+    policy_release_guard_mode = "none"
+    premature_release_penalty = 0.5
 
     # PPO outputs residual corrections, not full motion commands.  Keep these
     # smaller than v5 full-action scales so the nominal controller remains the
