@@ -279,6 +279,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
+    if hasattr(env_cfg, "enable_reset_acceptance_gate"):
+        env_cfg.enable_reset_acceptance_gate = False
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if hasattr(env_cfg, "debug_print_residual_components"):
         env_cfg.debug_print_residual_components = bool(args_cli.print_residual_components)

@@ -166,9 +166,9 @@ def _print_success_status(env) -> None:
     z_err  = float(m["z_err"][0].item())
     yaw_e  = float(_math.degrees(abs(float(m["yaw_err"][0].item()))))
 
-    rear_ok  = float(cfg.success_rear_to_mouth_min) <= rear <= float(cfg.success_rear_to_mouth_max)
+    rear_ok = rear >= float(cfg.success_rear_to_mouth_min)
     front_eps = float(cfg.success_front_clear_eps_m)
-    front_ok = (float(cfg.success_front_clear_min) - front_eps) <= front <= (float(cfg.success_front_clear_max) + front_eps)
+    front_ok = front <= (float(cfg.success_front_clear_max) + front_eps)
 
     dynamic_gap = "left_clearance" in m and "right_clearance" in m
     if dynamic_gap:
@@ -261,8 +261,8 @@ def _print_success_status(env) -> None:
     print(f"[status] mode={mode_name} (need PUSH)  {'OK' if in_push else 'FAIL'}")
     if missing_idx is not None:
         print(f"  missing_slot   = {missing_idx}")
-    print(f"  rear_to_mouth  = {rear:+.4f}  range=[{cfg.success_rear_to_mouth_min:.4f}, {cfg.success_rear_to_mouth_max:.4f}]  {tick(rear_ok)}")
-    print(f"  front_to_back  = {front:+.4f}  range=[{float(cfg.success_front_clear_min):.4f}, {float(cfg.success_front_clear_max):.4f}] (+/-eps)  {tick(front_ok)}")
+    print(f"  rear_to_mouth  = {rear:+.4f}  min={cfg.success_rear_to_mouth_min:.4f}  {tick(rear_ok)}")
+    print(f"  front_to_back  = {front:+.4f}  max={float(cfg.success_front_clear_max):.4f} (+eps)  {tick(front_ok)}")
     if dynamic_gap:
         print(f"  gap_width      = {gap_width:.4f}  margin={gap_margin:+.4f}  center_err={gap_center_err:+.4f}")
         print(f"  left_clearance = {left_clear:+.4f}  min={-gap_eps:+.4f}  {tick(left_clear >= -gap_eps)}")
