@@ -79,8 +79,6 @@ class BookshelfEnvCfg(BookshelfEnvCfgV4):
     # Optional read-only JSON bank used only for controlled evaluation replay.
     evaluation_scenario_bank = ""
 
-    # V5 allows small over-insertion past the nominal back reference.
-    success_front_clear_min = -0.003
     success_lateral_extent_eps_m = 0.0015
 
     reset_arm_joint_pos_noise = math.radians(3.0)

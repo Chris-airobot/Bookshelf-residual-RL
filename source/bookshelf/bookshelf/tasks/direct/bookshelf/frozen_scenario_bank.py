@@ -161,6 +161,7 @@ def generate_frozen_scenario_bank(
     grasp_y_jitter: float,
     grasp_z_jitter: float,
     grasp_yaw_jitter: float,
+    missing_book_indices: Iterable[int] | None = None,
 ) -> dict[str, Any]:
     """Generate a policy-independent bank from the evaluation distributions."""
     if scenario_count <= 0:
@@ -172,11 +173,27 @@ def generate_frozen_scenario_bank(
     if not 0.0 <= side_book_merge_probability <= 1.0:
         raise ValueError("side_book_merge_probability must be in [0, 1].")
 
+    missing_sequence = None
+    if missing_book_indices is not None:
+        missing_sequence = [int(value) for value in missing_book_indices]
+        if len(missing_sequence) != scenario_count:
+            raise ValueError(
+                "missing_book_indices must contain exactly scenario_count values."
+            )
+        if any(value not in range(row_book_count) for value in missing_sequence):
+            raise ValueError(
+                f"missing_book_indices values must be in [0, {row_book_count - 1}]."
+            )
+
     rng = random.Random(int(seed))
     row_center = 0.5 * (row_book_count - 1)
     scenarios = []
     for scenario_id in range(scenario_count):
-        missing = rng.randrange(row_book_count)
+        missing = (
+            rng.randrange(row_book_count)
+            if missing_sequence is None
+            else missing_sequence[scenario_id]
+        )
         clearance = rng.uniform(slot_clearance_min, slot_clearance_max)
         single_assignments = [-1] * SINGLE_BOOK_SLOT_COUNT
         wide_assignments = [-1] * WIDE_BOOK_SLOT_COUNT
@@ -250,6 +267,7 @@ def generate_frozen_scenario_bank(
         "grasp_y_jitter": float(grasp_y_jitter),
         "grasp_z_jitter": float(grasp_z_jitter),
         "grasp_yaw_jitter": float(grasp_yaw_jitter),
+        "missing_book_indices": missing_sequence,
     }
     return {
         "schema_version": 1,

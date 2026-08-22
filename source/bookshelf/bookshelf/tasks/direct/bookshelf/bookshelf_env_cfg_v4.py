@@ -31,6 +31,8 @@ from isaaclab.utils import configclass
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_HIGH_PD_CFG
 
+BOOK_TRUE_GROUND_LOWEST_Z_THRESH = 0.002
+
 # Shelf base position (m); add SHELF_OFFSET_X to move the whole shelf away from the robot in +X.
 _SHELF_BASE_OPEN = 0.68
 _SHELF_BASE_BACK = 0.81
@@ -114,6 +116,20 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     _hpc_robot_usd = os.environ.get("BOOKSHELF_PANDA_USD_PATH")
     if _hpc_robot_usd:
         robot.spawn.usd_path = _hpc_robot_usd
+
+    # Robot naming contract. Derived tasks can replace the robot without
+    # duplicating the insertion, release, retreat, and push implementation.
+    robot_arm_joint_names_expr = "panda_joint[1-7]"
+    robot_finger_joint_names_expr = "panda_finger_joint.*"
+    # State/diagnostics may include a complete linkage while commands target
+    # only its driving joint. Panda uses the same joints for both by default.
+    robot_gripper_command_joint_names_expr = "panda_finger_joint.*"
+    robot_left_finger_body_name = "panda_leftfinger"
+    robot_right_finger_body_name = "panda_rightfinger"
+    robot_hand_body_name = "panda_hand"
+    robot_ee_body_name = "panda_hand"
+    # Empty means use the midpoint of the two finger bodies.
+    robot_grasp_frame_body_name = ""
 
     book: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/Book",
@@ -202,8 +218,6 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
 
     # --- Terminal success (checked only in PUSH mode) ---
     success_rear_to_mouth_min = -0.012
-    success_rear_to_mouth_max = 0.002
-    success_front_clear_min = 0.0
     success_front_clear_max = 0.055
     success_front_clear_eps_m = 2.0e-4
     success_z_thresh = 0.015
@@ -240,6 +254,10 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     enable_failure_terminations = False
 
     # Ground / shelf support
+    # During INSERT the gripper still owns the book, so only the true world
+    # ground is a drop. After release, the higher shelf-deck threshold catches
+    # a book that has fallen out of the row before it reaches the ground plane.
+    book_true_ground_lowest_z_thresh = BOOK_TRUE_GROUND_LOWEST_Z_THRESH
     book_floor_lowest_z_thresh = 0.042
     shelf_footprint_x_pad_m = 0.04
     shelf_footprint_y_pad_m = 0.05
@@ -248,13 +266,22 @@ class BookshelfEnvCfg(DirectRLEnvCfg):
     # Book reset in grasp frame
     book_grasp_offset_hand = (0.0, 0.0, 0.075)
 
+    # Preserve the established Panda reset convention. Robot embodiments whose
+    # wrist orientation is not exactly aligned with the world-standing book can
+    # opt into ``grasp_relative`` in their derived configuration.
+    book_grasp_orientation_source = "world_standing"
     book_grasp_orientation_in_hand = "franka_axes"
     book_to_hand_quat_franka_axes_wxyz = (0.5, -0.5, -0.5, -0.5)
     book_grasp_rel_quat_wxyz = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
 
     book_grasp_x_jitter = 0.003
     book_grasp_y_jitter = 0.002
+    book_grasp_z_jitter = 0.0
     book_grasp_yaw_jitter = math.radians(2.0)
+    # Optional asymmetric translation bounds in the configured grasp frame.
+    # When both are set they replace the symmetric x/y/z jitter values above.
+    book_grasp_translation_jitter_min = None
+    book_grasp_translation_jitter_max = None
 
     # Extra sim steps after snapping the book into the gripper on reset,
     # allowing contacts to settle so the grasp is stable at episode start.

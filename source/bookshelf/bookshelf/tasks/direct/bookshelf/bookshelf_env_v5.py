@@ -137,8 +137,9 @@ class BookshelfEnv(BookshelfEnvV4):
             torch.full((self.num_envs,), float(self._nominal_ee_yaw_b.item()), device=self.device),
         )
 
+        target_pos_b = self._position_env_to_base(target_pos_env)
         offset_des_b = math_utils.quat_apply(quat_des_b, self._ik_body_offset_pos_b)
-        body_pos_des_b = target_pos_env - offset_des_b
+        body_pos_des_b = target_pos_b - offset_des_b
 
         self._ik_cmd[:, 0:3] = body_pos_des_b
         self._ik_cmd[:, 3:7] = quat_des_b
@@ -161,8 +162,9 @@ class BookshelfEnv(BookshelfEnvV4):
         pitch_des = ee_pitch_b if target_pitch is None else target_pitch
         quat_des_b = math_utils.quat_from_euler_xyz(ee_roll_b, pitch_des, target_yaw)
 
+        target_pos_b = self._position_env_to_base(target_pos_env)
         offset_des_b = math_utils.quat_apply(quat_des_b, self._ik_body_offset_pos_b)
-        body_pos_des_b = target_pos_env - offset_des_b
+        body_pos_des_b = target_pos_b - offset_des_b
 
         self._ik_cmd[:, 0:3] = body_pos_des_b
         self._ik_cmd[:, 3:7] = quat_des_b
@@ -347,6 +349,10 @@ class BookshelfEnv(BookshelfEnvV4):
                 state = obj.data.default_root_state[env_ids_t].clone()
                 slot_start = slot_buffer[env_ids_t, pool_idx]
                 active = slot_start >= 0
+                if bool(
+                    getattr(self.cfg, "debug_omit_bookshelf_obstacles", False)
+                ):
+                    active = torch.zeros_like(active)
 
                 slot_mid = slot_start.to(dtype=dtype) + 0.5 * (span_slots - 1.0)
                 side = torch.sign(slot_mid - missing_idx.to(dtype=dtype))
@@ -509,7 +515,12 @@ class BookshelfEnv(BookshelfEnvV4):
         standing_quat = (float(qw), float(qx), float(qy), float(qz))
 
         kin = RigidBodyPropertiesCfg(kinematic_enabled=True, disable_gravity=True)
-        col = sim_utils.CollisionPropertiesCfg(collision_enabled=True)
+        ground_col = sim_utils.CollisionPropertiesCfg(collision_enabled=True)
+        obstacle_col = sim_utils.CollisionPropertiesCfg(
+            collision_enabled=not bool(
+                getattr(self.cfg, "debug_omit_bookshelf_obstacles", False)
+            )
+        )
         wood = sim_utils.PreviewSurfaceCfg(diffuse_color=(0.55, 0.45, 0.35))
 
         base = "/World/envs/env_0/Bookshelf"
@@ -517,7 +528,7 @@ class BookshelfEnv(BookshelfEnvV4):
         ground_cfg = sim_utils.MeshCuboidCfg(
             size=(3.0, 3.0, 0.02),
             rigid_props=kin,
-            collision_props=col,
+            collision_props=ground_col,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.25, 0.25, 0.25)),
         )
         ground_cfg.func(
@@ -533,7 +544,7 @@ class BookshelfEnv(BookshelfEnvV4):
         shelf_cfg = sim_utils.MeshCuboidCfg(
             size=(depth_x, shelf_width, shelf_thick),
             rigid_props=kin,
-            collision_props=col,
+            collision_props=obstacle_col,
             visual_material=wood,
         )
         shelf_cfg.func(
@@ -556,7 +567,7 @@ class BookshelfEnv(BookshelfEnvV4):
         panel_cfg = sim_utils.MeshCuboidCfg(
             size=(wt, shelf_width, bheight + 0.1),
             rigid_props=kin,
-            collision_props=col,
+            collision_props=obstacle_col,
             visual_material=wood,
         )
         panel_cfg.func(
@@ -569,7 +580,7 @@ class BookshelfEnv(BookshelfEnvV4):
         bookend_cfg = sim_utils.MeshCuboidCfg(
             size=(float(nb[0]), bheight, bthick),
             rigid_props=kin,
-            collision_props=col,
+            collision_props=obstacle_col,
             visual_material=wood,
         )
         for name, y in (("LeftBookend", -bookend_y), ("RightBookend", bookend_y)):
@@ -639,12 +650,11 @@ class BookshelfEnv(BookshelfEnvV4):
         front_eps = float(self.cfg.success_front_clear_eps_m)
 
         lat_ok = lat_extent <= (lat_limit + lat_eps)
-        rear_ok = (rear_to_mouth >= float(self.cfg.success_rear_to_mouth_min)) & (
-            rear_to_mouth <= float(self.cfg.success_rear_to_mouth_max)
-        )
-        front_ok = (front_to_back >= float(self.cfg.success_front_clear_min) - front_eps) & (
-            front_to_back <= float(self.cfg.success_front_clear_max) + front_eps
-        )
+        # Insertion depth is monotonic. Once both depth thresholds have been
+        # crossed, moving farther into the slot must not turn success into a
+        # failure.
+        rear_ok = rear_to_mouth >= float(self.cfg.success_rear_to_mouth_min)
+        front_ok = front_to_back <= float(self.cfg.success_front_clear_max) + front_eps
         z_ok = torch.abs(z_err) < float(self.cfg.success_z_thresh)
         yaw_ok = yaw_e < float(self.cfg.success_yaw_thresh)
 
@@ -680,12 +690,7 @@ class BookshelfEnv(BookshelfEnvV4):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
 
         p = self._book_pos_env()
-        corners_w = self._book_corners_env()
-        lowest_z = corners_w[..., 2].min(dim=-1).values
-        floor_z = float(self.cfg.book_floor_lowest_z_thresh)
-        book_touches_ground = lowest_z < floor_z
-        on_shelf = self._book_supported_on_shelf(p, lowest_z)
-        book_dropped_to_ground = book_touches_ground & ~on_shelf
+        book_dropped_to_ground = self._book_dropped_for_mode(mode_before)
 
         if bool(self.cfg.enable_failure_terminations):
             oob = (torch.abs(p[:, 0]) > self.cfg.max_abs_xy) | (torch.abs(p[:, 1]) > self.cfg.max_abs_xy)
@@ -704,38 +709,48 @@ class BookshelfEnv(BookshelfEnvV4):
         failure_code = torch.where(
             done & ~success & book_dropped_to_ground, torch.full_like(failure_code, _DONE_DROP), failure_code
         )
-        failure_code = torch.where(done & ~success & oob, torch.full_like(failure_code, _DONE_OOB), failure_code)
-        failure_code = torch.where(done & ~success & fell, torch.full_like(failure_code, _DONE_FELL), failure_code)
         failure_code = torch.where(
-            done & ~success & ~(mode_before == _MODE_PUSH), torch.full_like(failure_code, _DONE_NOT_PUSH), failure_code
+            done & ~success & (failure_code == _DONE_NONE) & oob,
+            torch.full_like(failure_code, _DONE_OOB),
+            failure_code,
         )
         failure_code = torch.where(
-            done & ~success & (mode_before == _MODE_PUSH) & ~depth_ok,
+            done & ~success & (failure_code == _DONE_NONE) & fell,
+            torch.full_like(failure_code, _DONE_FELL),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & (failure_code == _DONE_NONE) & ~(mode_before == _MODE_PUSH),
+            torch.full_like(failure_code, _DONE_NOT_PUSH),
+            failure_code,
+        )
+        failure_code = torch.where(
+            done & ~success & (failure_code == _DONE_NONE) & (mode_before == _MODE_PUSH) & ~depth_ok,
             torch.full_like(failure_code, _DONE_DEPTH),
             failure_code,
         )
         failure_code = torch.where(
-            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & ~lat_ok,
+            done & ~success & (failure_code == _DONE_NONE) & (mode_before == _MODE_PUSH) & depth_ok & ~lat_ok,
             torch.full_like(failure_code, _DONE_LATERAL),
             failure_code,
         )
         failure_code = torch.where(
-            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & ~z_ok,
+            done & ~success & (failure_code == _DONE_NONE) & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & ~z_ok,
             torch.full_like(failure_code, _DONE_Z),
             failure_code,
         )
         failure_code = torch.where(
-            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & ~yaw_ok,
+            done & ~success & (failure_code == _DONE_NONE) & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & ~yaw_ok,
             torch.full_like(failure_code, _DONE_YAW),
             failure_code,
         )
         failure_code = torch.where(
-            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & yaw_ok & ~upright,
+            done & ~success & (failure_code == _DONE_NONE) & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & yaw_ok & ~upright,
             torch.full_like(failure_code, _DONE_UPRIGHT),
             failure_code,
         )
         failure_code = torch.where(
-            done & ~success & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & yaw_ok & upright & ~stable_ok,
+            done & ~success & (failure_code == _DONE_NONE) & (mode_before == _MODE_PUSH) & depth_ok & lat_ok & z_ok & yaw_ok & upright & ~stable_ok,
             torch.full_like(failure_code, _DONE_UNSTABLE),
             failure_code,
         )
@@ -750,20 +765,20 @@ class BookshelfEnv(BookshelfEnvV4):
             self.episode_length_buf - self._push_start_step_buf,
             torch.full_like(self.episode_length_buf, -1),
         )
-        self.extras["episode_metric_done"] = done
+        self.extras["episode_metric_done"] = done.clone()
         self.extras["episode_metric_slot_center_y"] = self._slot_center_y_env.clone()
         self.extras["episode_metric_slot_clearance"] = self._slot_lateral_clearance_env.clone()
         self.extras["episode_metric_missing_book_index"] = self._missing_book_index_env.clone()
-        self.extras["episode_metric_success"] = success
-        self.extras["episode_metric_failure_code"] = failure_code
-        self.extras["episode_metric_final_lat_err"] = torch.abs(m["lat_err"])
-        self.extras["episode_metric_final_z_err"] = torch.abs(z_err)
-        self.extras["episode_metric_final_yaw_err_deg"] = torch.rad2deg(yaw_e)
-        self.extras["episode_metric_final_rear_to_mouth"] = rear_to_mouth
-        self.extras["episode_metric_final_front_to_back"] = front_to_back
-        self.extras["episode_metric_release_step"] = self._release_step_buf
-        self.extras["episode_metric_push_steps"] = push_steps
-        self.extras["episode_metric_mode_at_done"] = mode_before
+        self.extras["episode_metric_success"] = success.clone()
+        self.extras["episode_metric_failure_code"] = failure_code.clone()
+        self.extras["episode_metric_final_lat_err"] = torch.abs(m["lat_err"]).clone()
+        self.extras["episode_metric_final_z_err"] = torch.abs(z_err).clone()
+        self.extras["episode_metric_final_yaw_err_deg"] = torch.rad2deg(yaw_e).clone()
+        self.extras["episode_metric_final_rear_to_mouth"] = rear_to_mouth.clone()
+        self.extras["episode_metric_final_front_to_back"] = front_to_back.clone()
+        self.extras["episode_metric_release_step"] = self._release_step_buf.clone()
+        self.extras["episode_metric_push_steps"] = push_steps.clone()
+        self.extras["episode_metric_mode_at_done"] = mode_before.clone()
         self._write_scenario_episode_metrics()
 
         return terminated, time_out

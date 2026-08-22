@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import math
 import numpy as np
 import os
 import sys
@@ -44,6 +45,9 @@ class BookshelfEnv(BookshelfEnvV5):
         self._target_book_marker_path = "/World/envs/env_0/V6TargetBook50"
         self._target_ee_marker_path = "/World/Visuals/V6TargetEEFrame"
         self._current_ee_marker_path = "/World/Visuals/V6CurrentEEFrame"
+        self._robot_base_reference_marker_path = "/World/envs/env_0/RobotBaseReference"
+        self._robot_base_reference_frame_path = "/World/Visuals/RobotBaseReferenceFrame"
+        self._reachable_grasp_target_frame_path = "/World/Visuals/XArmReachableGraspTargetFrame"
         self._debug_rrt_plan = None
         self._debug_rrt_plan_step = 0
         self._debug_rrt_failed = False
@@ -56,14 +60,368 @@ class BookshelfEnv(BookshelfEnvV5):
         self._debug_preinsert_hold_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._debug_position_only_ee_quat_b = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
         self._debug_position_only_ee_quat_b[:, 0] = 1.0
+        self._debug_integrated_target_pos_env = torch.zeros(
+            (self.num_envs, 3), device=self.device, dtype=torch.float32
+        )
+        self._debug_scripted_retreat_start_pos_env = torch.zeros(
+            (self.num_envs, 3), device=self.device, dtype=torch.float32
+        )
+        self._debug_scripted_retreat_initialized = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._debug_nominal_push_tracking_paused = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._debug_nominal_push_alignment_complete = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._debug_nominal_push_line_y_env = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        self._debug_nominal_push_target_z_env = torch.zeros(
+            self.num_envs, dtype=torch.float32, device=self.device
+        )
+        self._debug_nominal_push_lowering_complete = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._debug_nominal_push_line_initialized = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._debug_missing_index_sequence_cursor = 0
+        pose_ik_rotation_weight = getattr(
+            self.cfg, "debug_pose_ik_rotation_weight", None
+        )
+        if pose_ik_rotation_weight is not None:
+            pose_ik_rotation_weight = float(pose_ik_rotation_weight)
+            if (
+                not math.isfinite(pose_ik_rotation_weight)
+                or not 0.0 < pose_ik_rotation_weight <= 1.0
+            ):
+                raise ValueError(
+                    "debug_pose_ik_rotation_weight must be in the interval (0, 1]"
+                )
+        push_target_lead = getattr(
+            self.cfg, "debug_nominal_push_max_target_lead_m", None
+        )
+        if push_target_lead is not None:
+            push_target_lead = float(push_target_lead)
+            if not math.isfinite(push_target_lead) or push_target_lead <= 0.0:
+                raise ValueError(
+                    "debug_nominal_push_max_target_lead_m must be positive and finite"
+                )
+        vertical_target_lead = getattr(
+            self.cfg, "debug_nominal_push_max_vertical_target_lead_m", None
+        )
+        if vertical_target_lead is not None:
+            vertical_target_lead = float(vertical_target_lead)
+            if not math.isfinite(vertical_target_lead) or vertical_target_lead <= 0.0:
+                raise ValueError(
+                    "debug_nominal_push_max_vertical_target_lead_m must be positive and finite"
+                )
+        if bool(getattr(self.cfg, "debug_nominal_push_tracking_pause_enabled", False)):
+            pause_error = float(
+                getattr(self.cfg, "debug_nominal_push_tracking_pause_joint_error_rad", 0.12)
+            )
+            resume_error = float(
+                getattr(self.cfg, "debug_nominal_push_tracking_resume_joint_error_rad", 0.08)
+            )
+            if not 0.0 <= resume_error < pause_error:
+                raise ValueError(
+                    "nominal PUSH tracking thresholds must satisfy "
+                    "0 <= resume_joint_error < pause_joint_error"
+                )
+        if bool(getattr(self.cfg, "debug_nominal_push_spine_tracking_enabled", False)):
+            pause_error = float(
+                getattr(self.cfg, "debug_nominal_push_spine_pause_lateral_error_m", 0.004)
+            )
+            resume_error = float(
+                getattr(self.cfg, "debug_nominal_push_spine_resume_lateral_error_m", 0.002)
+            )
+            if not 0.0 <= resume_error < pause_error:
+                raise ValueError(
+                    "nominal PUSH spine thresholds must satisfy "
+                    "0 <= resume_lateral_error < pause_lateral_error"
+                )
         self._debug_tool_to_book_transform_frozen = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._reachable_grasp_sequence_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._reachable_grasp_sequence_complete = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._robot_target_gripper_ramp_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._robot_target_gripper_ramp_start = torch.zeros(
+            (self.num_envs, len(self._gripper_command_joint_ids)),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        self._robot_target_gripper_held_book_state = self.book.data.root_state_w.clone()
+        self._robot_forward_backward_wait_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._robot_forward_backward_motion_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._robot_forward_backward_initialized = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._robot_forward_backward_origin_pos_env = torch.zeros(
+            (self.num_envs, 3), dtype=torch.float32, device=self.device
+        )
+        self._robot_forward_backward_origin_quat_b = torch.zeros(
+            (self.num_envs, 4), dtype=torch.float32, device=self.device
+        )
+        self._robot_forward_backward_origin_quat_b[:, 0] = 1.0
+        self._robot_nominal_handoff_wait_step = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._robot_nominal_handoff_complete = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
+        self._reset_acceptance_attempt_env = torch.zeros(
+            self.num_envs, dtype=torch.long, device=self.device
+        )
+        self._reset_acceptance_sampled_total = 0
+        self._reset_acceptance_accepted_total = 0
+        self._reset_acceptance_rejected_total = 0
+        self._reset_acceptance_reason_totals = {
+            "non_finite": 0,
+            "translation_drift": 0,
+            "rotation_drift": 0,
+            "book_dropped": 0,
+            "arm_tracking": 0,
+        }
+        self._validate_reset_acceptance_configuration()
         self._cleanup_legacy_debug_visuals()
+
+    def _validate_reset_acceptance_configuration(self) -> None:
+        if not bool(getattr(self.cfg, "enable_reset_acceptance_gate", False)):
+            return
+
+        validation_steps = int(self.cfg.reset_acceptance_validation_steps)
+        max_attempts = int(self.cfg.reset_acceptance_max_attempts)
+        if validation_steps < 1:
+            raise ValueError("reset_acceptance_validation_steps must be positive")
+        if max_attempts < 1:
+            raise ValueError("reset_acceptance_max_attempts must be positive")
+
+        positive_limits = (
+            "reset_acceptance_translation_limit_m",
+            "reset_acceptance_rotation_limit_rad",
+            "reset_acceptance_arm_error_limit_rad",
+        )
+        for name in positive_limits:
+            value = float(getattr(self.cfg, name))
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be positive and finite")
+        ground_height = float(self.cfg.reset_acceptance_ground_height_m)
+        if not math.isfinite(ground_height) or ground_height < 0.0:
+            raise ValueError(
+                "reset_acceptance_ground_height_m must be finite and nonnegative"
+            )
+
+        print(
+            "[RESET_ACCEPTANCE] enabled "
+            f"validation_steps={validation_steps} "
+            f"max_attempts={max_attempts} "
+            "translation_limit_mm="
+            f"{1000.0 * float(self.cfg.reset_acceptance_translation_limit_m):.3f} "
+            "rotation_limit_deg="
+            f"{math.degrees(float(self.cfg.reset_acceptance_rotation_limit_rad)):.3f} "
+            "arm_error_limit_deg="
+            f"{math.degrees(float(self.cfg.reset_acceptance_arm_error_limit_rad)):.3f}",
+            flush=True,
+        )
+
+    def _reset_acceptance_snapshot(
+        self, env_ids_t: torch.Tensor
+    ) -> dict[str, torch.Tensor]:
+        grasp_pos_w, grasp_quat_w = self._grasp_frame_pose_w(env_ids_t)
+        book_pos_w = self.book.data.root_link_pos_w[env_ids_t]
+        book_quat_w = self.book.data.root_link_quat_w[env_ids_t]
+        book_pos_g, book_quat_g = math_utils.subtract_frame_transforms(
+            grasp_pos_w,
+            grasp_quat_w,
+            book_pos_w,
+            book_quat_w,
+        )
+
+        joint_targets = getattr(self.robot.data, "joint_pos_target", None)
+        if joint_targets is None:
+            arm_error = torch.full(
+                (env_ids_t.numel(),), float("nan"), device=self.device
+            )
+        else:
+            arm_error = torch.abs(
+                _wrap_to_pi(
+                    joint_targets[env_ids_t][:, self._arm_joint_ids]
+                    - self.robot.data.joint_pos[env_ids_t][:, self._arm_joint_ids]
+                )
+            ).amax(dim=-1)
+
+        return {
+            "book_position_grasp": book_pos_g,
+            "book_quaternion_grasp": book_quat_g,
+            "book_lowest_z": self._book_corners_env()[env_ids_t, :, 2].amin(dim=1),
+            "arm_error": arm_error,
+        }
+
+    def _validate_randomized_reset(
+        self, env_ids_t: torch.Tensor
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        initial = self._reset_acceptance_snapshot(env_ids_t)
+        initial_pos = initial["book_position_grasp"].clone()
+        initial_quat = initial["book_quaternion_grasp"].clone()
+        max_translation = torch.zeros(
+            env_ids_t.numel(), device=self.device, dtype=torch.float32
+        )
+        max_rotation = torch.zeros_like(max_translation)
+        max_arm_error = initial["arm_error"].clone()
+        min_lowest_z = initial["book_lowest_z"].clone()
+
+        for _ in range(int(self.cfg.reset_acceptance_validation_steps)):
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            self.scene.update(dt=self.physics_dt)
+            current = self._reset_acceptance_snapshot(env_ids_t)
+            translation = torch.linalg.norm(
+                current["book_position_grasp"] - initial_pos, dim=-1
+            )
+            rotation = math_utils.quat_error_magnitude(
+                initial_quat, current["book_quaternion_grasp"]
+            )
+            max_translation = torch.maximum(max_translation, translation)
+            max_rotation = torch.maximum(max_rotation, rotation)
+            max_arm_error = torch.maximum(max_arm_error, current["arm_error"])
+            min_lowest_z = torch.minimum(min_lowest_z, current["book_lowest_z"])
+
+        finite = torch.stack(
+            (max_translation, max_rotation, max_arm_error, min_lowest_z), dim=-1
+        ).isfinite().all(dim=-1)
+        reason_masks = {
+            "non_finite": ~finite,
+            "translation_drift": finite
+            & (
+                max_translation
+                > float(self.cfg.reset_acceptance_translation_limit_m)
+            ),
+            "rotation_drift": finite
+            & (max_rotation > float(self.cfg.reset_acceptance_rotation_limit_rad)),
+            "book_dropped": finite
+            & (min_lowest_z <= float(self.cfg.reset_acceptance_ground_height_m)),
+            "arm_tracking": finite
+            & (max_arm_error > float(self.cfg.reset_acceptance_arm_error_limit_rad)),
+        }
+        invalid = torch.zeros_like(finite)
+        for mask in reason_masks.values():
+            invalid |= mask
+        return invalid, reason_masks
+
+    def _write_reset_acceptance_metrics(self) -> None:
+        sampled = max(1, self._reset_acceptance_sampled_total)
+        log = self.extras.setdefault("log", {})
+        log["reset_gate_acceptance_rate"] = torch.tensor(
+            self._reset_acceptance_accepted_total / sampled,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        log["reset_gate_rejection_rate"] = torch.tensor(
+            self._reset_acceptance_rejected_total / sampled,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        log["reset_gate_sampled_total"] = torch.tensor(
+            float(self._reset_acceptance_sampled_total), device=self.device
+        )
+        for reason, count in self._reset_acceptance_reason_totals.items():
+            log[f"reset_gate_{reason}_total"] = torch.tensor(
+                float(count), device=self.device
+            )
+
+    def _refresh_state_after_reset_acceptance(
+        self, env_ids_t: torch.Tensor
+    ) -> None:
+        tool_pos_env = self._ee_tool_pos_env()[env_ids_t]
+        _, tool_quat_b = self._ee_pose_in_base()
+        tool_quat_b = tool_quat_b[env_ids_t]
+        self._target_pos_env[env_ids_t] = tool_pos_env
+        _, _, tool_yaw = math_utils.euler_xyz_from_quat(tool_quat_b)
+        self._target_yaw[env_ids_t] = tool_yaw
+        self._debug_position_only_ee_quat_b[env_ids_t] = tool_quat_b.detach().clone()
+        self._debug_integrated_target_pos_env[env_ids_t] = tool_pos_env.detach().clone()
+        self._debug_scripted_retreat_start_pos_env[env_ids_t] = (
+            tool_pos_env.detach().clone()
+        )
+
+        corners = self._book_corners_env()[env_ids_t]
+        front_x = corners[..., 0].max(dim=-1).values
+        rear_x = corners[..., 0].min(dim=-1).values
+        self._prev_rear_to_mouth[env_ids_t] = (
+            rear_x - float(self._geom_mouth_x)
+        ).detach()
+        self._prev_front_to_back[env_ids_t] = (
+            float(self.cfg.slot_x_back) - front_x
+        ).detach()
+        self._capture_fixed_tool_to_book_transform(env_ids_t)
+        self._capture_scenario_initial_pose(env_ids_t)
+
+    def _apply_reset_acceptance_gate(self, env_ids_t: torch.Tensor) -> None:
+        if not bool(getattr(self.cfg, "enable_reset_acceptance_gate", False)):
+            return
+
+        invalid, reason_masks = self._validate_randomized_reset(env_ids_t)
+        valid = ~invalid
+        accepted_count = int(valid.sum().item())
+        rejected_count = int(invalid.sum().item())
+        self._reset_acceptance_sampled_total += int(env_ids_t.numel())
+        self._reset_acceptance_accepted_total += accepted_count
+        self._reset_acceptance_rejected_total += rejected_count
+        self._reset_acceptance_attempt_env[env_ids_t[valid]] = 0
+        for reason, mask in reason_masks.items():
+            self._reset_acceptance_reason_totals[reason] += int(mask.sum().item())
+
+        if rejected_count:
+            rejected_ids = env_ids_t[invalid]
+            self._reset_acceptance_attempt_env[rejected_ids] += 1
+            reason_counts = {
+                reason: int(mask.sum().item())
+                for reason, mask in reason_masks.items()
+                if bool(mask.any().item())
+            }
+            print(
+                "[RESET_ACCEPTANCE] rejected "
+                f"envs={rejected_ids.detach().cpu().tolist()} "
+                f"reasons={reason_counts} "
+                "attempts="
+                f"{self._reset_acceptance_attempt_env[rejected_ids].detach().cpu().tolist()}",
+                flush=True,
+            )
+            exhausted = (
+                self._reset_acceptance_attempt_env[rejected_ids]
+                >= int(self.cfg.reset_acceptance_max_attempts)
+            )
+            if bool(exhausted.any().item()):
+                exhausted_ids = rejected_ids[exhausted].detach().cpu().tolist()
+                raise RuntimeError(
+                    "randomized grasp reset failed the acceptance gate after "
+                    f"{int(self.cfg.reset_acceptance_max_attempts)} attempts for "
+                    f"environments {exhausted_ids}; reason totals="
+                    f"{self._reset_acceptance_reason_totals}"
+                )
+            self._reset_idx(rejected_ids)
+
+        self._refresh_state_after_reset_acceptance(env_ids_t)
+        self._write_reset_acceptance_metrics()
 
     def _cleanup_legacy_debug_visuals(self) -> None:
         for prim_path in (
             "/Visuals/V6TargetEEFrame",
             "/Visuals/V6CurrentEEFrame",
             "/World/envs/env_0/V6TargetBook50",
+            "/World/envs/env_0/RobotBaseReference",
+            "/World/Visuals/RobotBaseReferenceFrame",
             "/V6Target",
         ):
             if sim_utils.is_prim_path_valid(prim_path):
@@ -151,6 +509,126 @@ class BookshelfEnv(BookshelfEnvV5):
         current_quat_w = self.robot.data.body_quat_w[0:1, self._ee_body_idx]
         self._current_ee_marker.visualize(current_pos_w, current_quat_w)
 
+    def _create_robot_base_reference_marker(self) -> None:
+        if not bool(getattr(self.cfg, "show_robot_base_reference_marker", False)):
+            return
+
+        marker_path = getattr(
+            self,
+            "_robot_base_reference_marker_path",
+            "/World/envs/env_0/RobotBaseReference",
+        )
+        base_pos_env = torch.tensor(
+            getattr(self.cfg, "robot_base_reference_pos", (0.0, 0.0, 0.0)),
+            device=self.device,
+            dtype=torch.float32,
+        ).view(1, 3)
+        base_pos_w = base_pos_env + self.scene.env_origins[0:1]
+
+        if not sim_utils.is_prim_path_valid(marker_path):
+            footprint_cfg = sim_utils.MeshCylinderCfg(
+                radius=0.09,
+                height=0.004,
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.35, 0.05)),
+            )
+            footprint_pos = base_pos_w[0].detach().cpu().tolist()
+            footprint_pos[2] += 0.002
+            footprint_cfg.func(
+                marker_path,
+                footprint_cfg,
+                translation=tuple(float(value) for value in footprint_pos),
+                orientation=(1.0, 0.0, 0.0, 0.0),
+            )
+
+        if not hasattr(self, "_robot_base_reference_frame"):
+            frame_cfg = FRAME_MARKER_CFG.copy()
+            frame_cfg.prim_path = getattr(
+                self,
+                "_robot_base_reference_frame_path",
+                "/World/Visuals/RobotBaseReferenceFrame",
+            )
+            frame_cfg.markers["frame"].scale = (0.18, 0.18, 0.18)
+            if sim_utils.is_prim_path_valid(frame_cfg.prim_path):
+                sim_utils.delete_prim(frame_cfg.prim_path)
+            self._robot_base_reference_frame = VisualizationMarkers(frame_cfg)
+            self._robot_base_reference_frame.set_visibility(True)
+
+        base_quat_w = torch.zeros((1, 4), device=self.device, dtype=torch.float32)
+        base_quat_w[:, 0] = 1.0
+        self._robot_base_reference_frame.visualize(base_pos_w, base_quat_w)
+
+    def _create_reachable_grasp_target_frame(self) -> None:
+        if not bool(getattr(self.cfg, "show_reachable_grasp_target_frame", False)):
+            return
+
+        if not hasattr(self, "_reachable_grasp_target_frame"):
+            marker_cfg = FRAME_MARKER_CFG.copy()
+            marker_cfg.prim_path = getattr(
+                self,
+                "_reachable_grasp_target_frame_path",
+                "/World/Visuals/XArmReachableGraspTargetFrame",
+            )
+            marker_cfg.markers["frame"].scale = (0.14, 0.14, 0.14)
+            if sim_utils.is_prim_path_valid(marker_cfg.prim_path):
+                sim_utils.delete_prim(marker_cfg.prim_path)
+            self._reachable_grasp_target_frame = VisualizationMarkers(marker_cfg)
+            self._reachable_grasp_target_frame.set_visibility(True)
+
+        source = str(
+            getattr(self.cfg, "reachable_grasp_target_frame_source", "slot_relative")
+        )
+        if source == "sequence_target" and hasattr(
+            self, "_reachable_grasp_sequence_target_pos_w"
+        ):
+            target_pos_w = self._reachable_grasp_sequence_target_pos_w[0:1]
+            target_quat_w = self._reachable_grasp_sequence_target_quat_w[0:1]
+        elif source == "current_tool":
+            ee_body_pos_w = self.robot.data.body_pos_w[0:1, self._ee_body_idx]
+            target_quat_w = self.robot.data.body_quat_w[0:1, self._ee_body_idx]
+            target_pos_w = ee_body_pos_w + math_utils.quat_apply(
+                target_quat_w,
+                self._ik_body_offset_pos_b[0:1],
+            )
+        elif source == "slot_relative":
+            offset = torch.tensor(
+                self.cfg.reset_tool_offset_slot_xyz,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            target_pos_env = torch.tensor(
+                (
+                    float(self.cfg.slot_x_open) + float(offset[0].item()),
+                    float(self.cfg.slot_center_y) + float(offset[1].item()),
+                    float(self.cfg.shelf_top_z)
+                    + float(self.cfg.shelf_thickness)
+                    + 0.5 * float(self.cfg.book_size[1])
+                    + float(offset[2].item()),
+                ),
+                device=self.device,
+                dtype=torch.float32,
+            ).view(1, 3)
+            target_pos_w = target_pos_env + self.scene.env_origins[0:1]
+
+            target_quat_b = torch.tensor(
+                self.cfg.reset_tool_quaternion_slot_wxyz,
+                device=self.device,
+                dtype=torch.float32,
+            ).view(1, 4)
+            target_quat_b = target_quat_b / torch.linalg.norm(
+                target_quat_b, dim=-1, keepdim=True
+            )
+            target_quat_w = math_utils.quat_mul(
+                self.robot.data.root_quat_w[0:1],
+                target_quat_b,
+            )
+        else:
+            raise ValueError(
+                "reachable_grasp_target_frame_source must be "
+                "'sequence_target', 'current_tool', or 'slot_relative', "
+                f"got {source!r}"
+            )
+        self._reachable_grasp_target_frame.visualize(target_pos_w, target_quat_w)
+
     def _refresh_debug_markers(self) -> None:
         if bool(getattr(self.cfg, "show_target_book_marker", True)) and not sim_utils.is_prim_path_valid(
             getattr(self, "_target_book_marker_path", "/World/envs/env_0/V6TargetBook50")
@@ -160,6 +638,10 @@ class BookshelfEnv(BookshelfEnvV5):
             self._create_target_ee_marker()
         if bool(getattr(self.cfg, "show_current_ee_marker", True)):
             self._create_current_ee_marker()
+        if bool(getattr(self.cfg, "show_robot_base_reference_marker", False)):
+            self._create_robot_base_reference_marker()
+        if bool(getattr(self.cfg, "show_reachable_grasp_target_frame", False)):
+            self._create_reachable_grasp_target_frame()
 
     def _residual_curriculum_clearance_range(self) -> tuple[float, float]:
         if not bool(getattr(self.cfg, "enable_residual_clearance_curriculum", False)):
@@ -219,24 +701,89 @@ class BookshelfEnv(BookshelfEnvV5):
         self.cfg.book_grasp_y_jitter = float(y_jitter)
         self.cfg.book_grasp_z_jitter = float(z_jitter)
         self.cfg.book_grasp_yaw_jitter = float(yaw_jitter)
+        bounded_stage_names = (
+            "residual_curriculum_grasp_translation_bounds_1",
+            "residual_curriculum_grasp_translation_bounds_2",
+            "residual_curriculum_grasp_translation_bounds_3",
+            "residual_curriculum_grasp_translation_bounds_final",
+        )
+        bounded_stage = getattr(self.cfg, bounded_stage_names[stage], None)
+        if bounded_stage is not None:
+            lower, upper = bounded_stage
+            self.cfg.book_grasp_translation_jitter_min = tuple(float(value) for value in lower)
+            self.cfg.book_grasp_translation_jitter_max = tuple(float(value) for value in upper)
 
     def _nominal_release_assist_enabled(self) -> bool:
         if not bool(getattr(self.cfg, "enable_nominal_release_assist", False)):
             return False
         return self._residual_curriculum_progress() < float(getattr(self.cfg, "nominal_release_assist_until_frac", 0.30))
 
+    def _align_gripper_to_sampled_slot(self, env_ids_t: torch.Tensor) -> None:
+        """Keep the direct grasp demo at the configured xArm joint pose."""
+        if bool(getattr(self.cfg, "debug_robot_target_pose_only", False)):
+            return
+        if bool(getattr(self.cfg, "debug_reachable_grasp_sequence", False)):
+            return
+        super()._align_gripper_to_sampled_slot(env_ids_t)
+
     def _reset_idx(self, env_ids: Sequence[int] | None):
+        missing_index_sequence = getattr(
+            self.cfg, "debug_forced_missing_book_index_sequence", None
+        )
+        if missing_index_sequence:
+            sequence = tuple(int(index) for index in missing_index_sequence)
+            row_count = int(getattr(self.cfg, "row_book_count", 10))
+            if not sequence or any(
+                index < 0 or index >= row_count for index in sequence
+            ):
+                raise ValueError(
+                    "debug_forced_missing_book_index_sequence must contain "
+                    f"indices in [0, {row_count - 1}]"
+                )
+            cursor = int(
+                getattr(self, "_debug_missing_index_sequence_cursor", 0)
+            )
+            selected_index = sequence[cursor % len(sequence)]
+            self.cfg.forced_missing_book_index = selected_index
+            self._debug_missing_index_sequence_cursor = cursor + 1
+            print(
+                "[XARM_SLOT_SEQUENCE] "
+                f"episode={cursor + 1} missing_index={selected_index}",
+                flush=True,
+            )
         cmin, cmax = self._residual_curriculum_clearance_range()
         self.cfg.slot_lateral_clearance_min = cmin
         self.cfg.slot_lateral_clearance_max = cmax
         self._apply_residual_reset_curriculum()
         super()._reset_idx(env_ids)
         env_ids_t = self._env_ids if env_ids is None else torch.as_tensor(env_ids, device=self.device, dtype=torch.long)
-        if bool(getattr(self.cfg, "debug_start_from_default_grasp_pose", False)):
-            self._reset_to_default_grasp_start(env_ids_t)
+        self._apply_debug_row_layout_y_offset(env_ids_t)
+        # Grasp-only preflights must remove neighboring geometry before the
+        # xArm pose/grasp settling sequence advances physics.
         if bool(getattr(self.cfg, "debug_omit_bookshelf_obstacles", False)):
             self._omit_bookshelf_obstacles(env_ids_t)
-        self._capture_fixed_tool_to_book_transform(env_ids_t)
+        if bool(getattr(self.cfg, "reset_to_slot_relative_tool_pose", False)):
+            self._reset_to_slot_relative_tool_pose(env_ids_t)
+        if bool(getattr(self.cfg, "debug_start_from_default_grasp_pose", False)):
+            self._reset_to_default_grasp_start(env_ids_t)
+        if bool(getattr(self.cfg, "debug_robot_target_pose_only", False)):
+            self._prepare_robot_target_pose_only(env_ids_t)
+            if bool(
+                getattr(self.cfg, "debug_spawn_book_with_collision_clearance", False)
+            ):
+                self._spawn_book_with_collision_clearance(env_ids_t)
+            elif bool(getattr(self.cfg, "debug_spawn_book_panda_style", False)):
+                self._spawn_book_panda_style(env_ids_t)
+                if bool(
+                    getattr(self.cfg, "debug_robot_nominal_controller_demo", False)
+                ):
+                    self._prepare_robot_nominal_preinsert_pose(env_ids_t)
+        elif bool(getattr(self.cfg, "debug_reachable_grasp_sequence", False)):
+            self._prepare_reachable_grasp_sequence(env_ids_t)
+        else:
+            if bool(getattr(self.cfg, "debug_snap_book_to_grasp_on_reset", False)):
+                self._snap_book_to_measured_grasp(env_ids_t)
+            self._capture_fixed_tool_to_book_transform(env_ids_t)
         self._clear_debug_rrt_plan()
         self._clear_debug_curobo_plan()
         self._debug_preinsert_hold_buf[env_ids_t] = 0
@@ -244,6 +791,19 @@ class BookshelfEnv(BookshelfEnvV5):
             self._spawn_at_planned_tool_pose(env_ids_t)
         _, ee_quat_b = self._ee_pose_in_base()
         self._debug_position_only_ee_quat_b[env_ids_t] = ee_quat_b[env_ids_t].detach().clone()
+        self._debug_integrated_target_pos_env[env_ids_t] = (
+            self._ee_tool_pos_env()[env_ids_t].detach().clone()
+        )
+        self._debug_scripted_retreat_start_pos_env[env_ids_t] = (
+            self._debug_integrated_target_pos_env[env_ids_t]
+        )
+        self._debug_scripted_retreat_initialized[env_ids_t] = False
+        self._debug_nominal_push_tracking_paused[env_ids_t] = False
+        self._debug_nominal_push_alignment_complete[env_ids_t] = False
+        self._debug_nominal_push_line_y_env[env_ids_t] = 0.0
+        self._debug_nominal_push_target_z_env[env_ids_t] = 0.0
+        self._debug_nominal_push_lowering_complete[env_ids_t] = False
+        self._debug_nominal_push_line_initialized[env_ids_t] = False
         reset_env0 = env_ids is None
         if env_ids is not None:
             reset_env0 = bool(torch.any(torch.as_tensor(env_ids, device=self.device, dtype=torch.long) == 0).item())
@@ -251,8 +811,826 @@ class BookshelfEnv(BookshelfEnvV5):
             self._create_target_book_marker()
             self._create_target_ee_marker()
             self._create_current_ee_marker()
+            self._create_robot_base_reference_marker()
             if bool(getattr(self.cfg, "debug_print_sampled_grasp_joints", False)):
                 self._print_env0_joint_values("[Bookshelf v6] sampled grasp joints")
+        self._apply_reset_acceptance_gate(env_ids_t)
+
+    def _apply_debug_row_layout_y_offset(self, env_ids_t: torch.Tensor) -> None:
+        """Shift a diagnostic row without changing its ten-position schema."""
+
+        offset_m = float(getattr(self.cfg, "debug_row_layout_y_offset_m", 0.0))
+        if abs(offset_m) < 1.0e-12:
+            return
+
+        self._slot_center_y_env[env_ids_t] += offset_m
+        for name in self._row_book_names():
+            if name not in self.scene.rigid_objects:
+                continue
+            obj = self.scene.rigid_objects[name]
+            state = obj.data.root_state_w[env_ids_t].clone()
+            state[:, 1] += offset_m
+            obj.write_root_state_to_sim(state, env_ids=env_ids_t)
+        self.scene.write_data_to_sim()
+
+        if bool(torch.any(env_ids_t == 0).item()):
+            print(
+                "[XARM_BOOKSHELF_DEBUG] shifted the complete side-book row "
+                f"by y={offset_m:+.6f} m; slot_center_y="
+                f"{float(self._slot_center_y_env[0].item()):+.6f} m",
+                flush=True,
+            )
+
+    def _prepare_robot_target_pose_only(self, env_ids_t: torch.Tensor) -> None:
+        """Write and hold the configured xArm pose with all scene contact removed."""
+
+        robot_default = self.robot.data.default_root_state[env_ids_t].clone()
+        robot_default[:, 0:3] += self.scene.env_origins[env_ids_t]
+        joint_pos = self.robot.data.default_joint_pos[env_ids_t].clone()
+        joint_vel = torch.zeros_like(self.robot.data.default_joint_vel[env_ids_t])
+
+        parked_book_state = self.book.data.default_root_state[env_ids_t].clone()
+        parked_book_state[:, 0:3] = self.scene.env_origins[env_ids_t]
+        parked_book_state[:, 2] -= 5.0
+        parked_book_state[:, 7:] = 0.0
+
+        self.robot.write_root_state_to_sim(robot_default, env_ids=env_ids_t)
+        self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
+        self.robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
+        self.book.write_root_state_to_sim(parked_book_state, env_ids=env_ids_t)
+
+        target_arm = joint_pos[:, self._arm_joint_ids].clone()
+        if not hasattr(self, "_robot_target_pose_only_arm"):
+            self._robot_target_pose_only_arm = self._arm_hold_joint_pos.clone()
+        self._robot_target_pose_only_arm[env_ids_t] = target_arm
+        self._arm_hold_joint_pos[env_ids_t] = target_arm
+        self._robot_forward_backward_wait_step[env_ids_t] = 0
+        self._robot_forward_backward_motion_step[env_ids_t] = 0
+        self._robot_forward_backward_initialized[env_ids_t] = False
+        self._robot_nominal_handoff_wait_step[env_ids_t] = 0
+        self._robot_nominal_handoff_complete[env_ids_t] = False
+
+        # The isolated grasp demo still labels the fixed, reviewed tool target as
+        # ``sequence_target``.  Cache that pose explicitly before the dynamic book
+        # is introduced so the marker cannot follow later contact motion.
+        ee_body_pos_w = self.robot.data.body_pos_w[env_ids_t, self._ee_body_idx]
+        ee_body_quat_w = self.robot.data.body_quat_w[env_ids_t, self._ee_body_idx]
+        target_tool_pos_w = ee_body_pos_w + math_utils.quat_apply(
+            ee_body_quat_w,
+            self._ik_body_offset_pos_b[env_ids_t],
+        )
+        if not hasattr(self, "_reachable_grasp_sequence_target_pos_w"):
+            self._reachable_grasp_sequence_target_pos_w = (
+                self.robot.data.root_pos_w.clone()
+            )
+            self._reachable_grasp_sequence_target_quat_w = (
+                self.robot.data.root_quat_w.clone()
+            )
+        self._reachable_grasp_sequence_target_pos_w[env_ids_t] = target_tool_pos_w
+        self._reachable_grasp_sequence_target_quat_w[env_ids_t] = ee_body_quat_w
+
+        self.scene.write_data_to_sim()
+        if bool(torch.any(env_ids_t == 0).item()):
+            target = {
+                self.robot.joint_names[int(joint_id)]: float(target_arm[0, index].item())
+                for index, joint_id in enumerate(self._arm_joint_ids)
+            }
+            print(
+                "[XARM_TARGET_POSE] robot state written directly; no physics "
+                f"contact was used; arm_target_rad={target}",
+                flush=True,
+            )
+
+    def _apply_robot_target_pose_only(self) -> bool:
+        if not bool(getattr(self.cfg, "debug_robot_target_pose_only", False)):
+            return False
+        nominal_demo = bool(
+            getattr(self.cfg, "debug_robot_nominal_controller_demo", False)
+        )
+        if nominal_demo and bool(torch.all(self._robot_nominal_handoff_complete).item()):
+            return False
+
+        self.robot.set_joint_position_target(
+            self._robot_target_pose_only_arm,
+            joint_ids=self._arm_joint_ids,
+        )
+        self._arm_hold_joint_pos[:] = self._robot_target_pose_only_arm
+        grasp_demo_active = bool(
+            getattr(self.cfg, "debug_spawn_book_with_collision_clearance", False)
+        ) or bool(getattr(self.cfg, "debug_spawn_book_panda_style", False))
+        if grasp_demo_active:
+            final_target = torch.full(
+                (self.num_envs, len(self._gripper_command_joint_ids)),
+                float(self.cfg.gripper_closed_joint_pos),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            ramp_steps = max(
+                1,
+                int(getattr(self.cfg, "debug_robot_target_gripper_ramp_steps", 1)),
+            )
+            settle_steps = max(
+                0,
+                int(getattr(self.cfg, "debug_robot_target_gripper_settle_steps", 0)),
+            )
+            hold_steps = ramp_steps + settle_steps
+            progress = torch.clamp(
+                (self._robot_target_gripper_ramp_step.to(torch.float32) + 1.0)
+                / float(ramp_steps),
+                max=1.0,
+            )
+            smooth_progress = progress * progress * (3.0 - 2.0 * progress)
+            gripper_target = self._robot_target_gripper_ramp_start + (
+                final_target - self._robot_target_gripper_ramp_start
+            ) * smooth_progress.unsqueeze(-1)
+            self.robot.set_joint_position_target(
+                gripper_target,
+                joint_ids=self._gripper_command_joint_ids,
+            )
+
+            hold_mask = self._robot_target_gripper_ramp_step < hold_steps
+            if torch.any(hold_mask):
+                held_ids = self._env_ids[hold_mask]
+                held_book_state = self._robot_target_gripper_held_book_state[
+                    held_ids
+                ].clone()
+                held_book_state[:, 7:] = 0.0
+                self.book.write_root_state_to_sim(
+                    held_book_state,
+                    env_ids=held_ids,
+                )
+
+            release_mask = self._robot_target_gripper_ramp_step == hold_steps
+            if bool(release_mask[0].item()):
+                print(
+                    "[XARM_GRASP_DEMO] placement support released; the book is "
+                    "now fully dynamic",
+                    flush=True,
+                )
+            self._robot_target_gripper_ramp_step = torch.clamp(
+                self._robot_target_gripper_ramp_step + 1,
+                max=hold_steps + 1,
+            )
+            self._apply_robot_forward_backward_motion(hold_steps)
+            self._apply_robot_nominal_controller_handoff(hold_steps)
+        if nominal_demo and bool(torch.all(self._robot_nominal_handoff_complete).item()):
+            return False
+        return True
+
+    def _apply_robot_nominal_controller_handoff(self, hold_steps: int) -> None:
+        """Hand a settled physical grasp to the existing nominal controller."""
+
+        if not bool(
+            getattr(self.cfg, "debug_robot_nominal_controller_demo", False)
+        ):
+            return
+
+        support_released = self._robot_target_gripper_ramp_step > int(hold_steps)
+        self._robot_nominal_handoff_wait_step = torch.where(
+            support_released & ~self._robot_nominal_handoff_complete,
+            self._robot_nominal_handoff_wait_step + 1,
+            self._robot_nominal_handoff_wait_step,
+        )
+        wait_steps = max(
+            0,
+            int(getattr(self.cfg, "debug_robot_nominal_handoff_wait_steps", 60)),
+        )
+        handoff = (
+            support_released
+            & ~self._robot_nominal_handoff_complete
+            & (self._robot_nominal_handoff_wait_step >= wait_steps)
+        )
+        if not torch.any(handoff):
+            return
+
+        handoff_ids = self._env_ids[handoff]
+        if bool(getattr(self.cfg, "debug_hold_book_fixed_to_tool", False)):
+            # The ideal case starts from the exact centered book target. Do not
+            # preserve a small IK/contact offset as the new rigid grasp.
+            self._place_ideal_book_at_nominal_target(handoff_ids)
+        else:
+            # The normal reset path may already have frozen a transform before
+            # the debug grasp was established. Measure the settled dynamic
+            # grasp anew.
+            self._debug_tool_to_book_transform_frozen[handoff_ids] = False
+            self._capture_fixed_tool_to_book_transform(handoff_ids)
+
+        corners = self._book_corners_env()[handoff_ids]
+        front_x = corners[..., 0].max(dim=-1).values
+        rear_x = corners[..., 0].min(dim=-1).values
+        mouth_x = float(self._geom_mouth_x)
+        self._prev_rear_to_mouth[handoff_ids] = (rear_x - mouth_x).detach()
+        self._prev_front_to_back[handoff_ids] = (
+            float(self.cfg.slot_x_back) - front_x
+        ).detach()
+        self._success_steps_buf[handoff_ids] = 0
+        self._mode[handoff_ids] = _MODE_INSERT
+        self._mode_start[handoff_ids] = _MODE_INSERT
+        self._script_step_buf[handoff_ids] = 0
+        self._release_request[handoff_ids] = False
+        self._release_step_buf[handoff_ids] = -1
+        self._push_start_step_buf[handoff_ids] = -1
+        self._robot_nominal_handoff_complete[handoff_ids] = True
+        self._debug_integrated_target_pos_env[handoff_ids] = (
+            self._ee_tool_pos_env()[handoff_ids].detach().clone()
+        )
+        self._debug_nominal_push_alignment_complete[handoff_ids] = False
+
+        if bool(handoff[0].item()):
+            metrics = self._compute_task_metrics()
+            print(
+                "[XARM_NOMINAL_HANDOFF] dynamic grasp measured; nominal "
+                "controller enabled with zero residual; "
+                f"rear_to_mouth={float(metrics['rear_to_mouth'][0].item()):+.6f} "
+                f"lat_err={float(metrics['lat_err'][0].item()):+.6f} "
+                f"z_err={float(metrics['z_err'][0].item()):+.6f} "
+                f"yaw_err_deg={math.degrees(float(metrics['yaw_err'][0].item())):+.3f}",
+                flush=True,
+            )
+
+    def _place_ideal_book_at_nominal_target(
+        self, env_ids_t: torch.Tensor
+    ) -> torch.Tensor:
+        """Center the ideal rigid grasp exactly at the slot-mouth target."""
+
+        desired_book_pos, desired_book_quat = self._target_book_pose_tensors(
+            inside_fraction=0.0
+        )
+        book_state = self.book.data.root_state_w[env_ids_t].clone()
+        book_state[:, 0:3] = (
+            desired_book_pos[env_ids_t] + self.scene.env_origins[env_ids_t]
+        )
+        book_state[:, 3:7] = desired_book_quat[env_ids_t]
+        book_state[:, 7:] = 0.0
+        self.book.write_root_state_to_sim(book_state, env_ids=env_ids_t)
+
+        if not hasattr(self, "_book_offset_tool"):
+            self._book_offset_tool = torch.zeros(
+                (self.num_envs, 3), device=self.device, dtype=torch.float32
+            )
+            self._book_rel_quat_tool = torch.zeros(
+                (self.num_envs, 4), device=self.device, dtype=torch.float32
+            )
+            self._book_rel_quat_tool[:, 0] = 1.0
+
+        ee_body_pos_env = (
+            self.robot.data.body_pos_w[:, self._ee_body_idx]
+            - self.scene.env_origins
+        )
+        ee_body_quat_w = self.robot.data.body_quat_w[:, self._ee_body_idx]
+        tool_pos_env = ee_body_pos_env + math_utils.quat_apply(
+            ee_body_quat_w, self._ik_body_offset_pos_b
+        )
+        self._book_offset_tool[env_ids_t] = math_utils.quat_apply_inverse(
+            ee_body_quat_w[env_ids_t],
+            desired_book_pos[env_ids_t] - tool_pos_env[env_ids_t],
+        )
+        self._book_rel_quat_tool[env_ids_t] = math_utils.quat_mul(
+            math_utils.quat_inv(ee_body_quat_w[env_ids_t]),
+            desired_book_quat[env_ids_t],
+        )
+        self._debug_tool_to_book_transform_frozen[env_ids_t] = True
+        return book_state
+
+    def _prepare_robot_nominal_preinsert_pose(
+        self, env_ids_t: torch.Tensor
+    ) -> None:
+        """Place the xArm grasp using the original book-relative target math."""
+
+        # Capture the just-created grasp, then reuse the original nominal task's
+        # desired-book -> tool-pose conversion at the slot mouth.
+        self._debug_tool_to_book_transform_frozen[env_ids_t] = False
+        self._capture_fixed_tool_to_book_transform(env_ids_t)
+        self._spawn_at_planned_tool_pose(env_ids_t)
+        ideal_book_state = None
+        if bool(getattr(self.cfg, "debug_hold_book_fixed_to_tool", False)):
+            ideal_book_state = self._place_ideal_book_at_nominal_target(env_ids_t)
+
+        arm_target = self.robot.data.joint_pos[env_ids_t][
+            :, self._arm_joint_ids
+        ].clone()
+        self._robot_target_pose_only_arm[env_ids_t] = arm_target
+        self._arm_hold_joint_pos[env_ids_t] = arm_target
+        if ideal_book_state is None:
+            ideal_book_state = self.book.data.root_state_w[env_ids_t].clone()
+        self._robot_target_gripper_held_book_state[env_ids_t] = ideal_book_state
+        self._robot_target_gripper_ramp_start[env_ids_t] = (
+            self.robot.data.joint_pos[env_ids_t][
+                :, self._gripper_command_joint_ids
+            ].clone()
+        )
+
+        ee_body_pos_w = self.robot.data.body_pos_w[env_ids_t, self._ee_body_idx]
+        ee_body_quat_w = self.robot.data.body_quat_w[env_ids_t, self._ee_body_idx]
+        target_tool_pos_w = ee_body_pos_w + math_utils.quat_apply(
+            ee_body_quat_w,
+            self._ik_body_offset_pos_b[env_ids_t],
+        )
+        self._reachable_grasp_sequence_target_pos_w[env_ids_t] = target_tool_pos_w
+        self._reachable_grasp_sequence_target_quat_w[env_ids_t] = ee_body_quat_w
+
+        desired_book_pos, _ = self._target_book_pose_tensors(inside_fraction=0.0)
+        actual_book_pos = self._book_pos_env()[env_ids_t]
+        position_error = torch.linalg.norm(
+            actual_book_pos - desired_book_pos[env_ids_t], dim=-1
+        )
+        if bool(torch.any(env_ids_t == 0).item()):
+            env0_index = int(
+                torch.nonzero(env_ids_t == 0, as_tuple=False)[0, 0].item()
+            )
+            print(
+                "[XARM_NOMINAL_PREINSERT] original book-relative target "
+                "applied to xArm; "
+                f"book_position_error_m={float(position_error[env0_index].item()):.6f} "
+                f"tool_env_m={target_tool_pos_w[env0_index].detach().cpu().tolist()}",
+                flush=True,
+            )
+
+    def _apply_robot_forward_backward_motion(self, hold_steps: int) -> None:
+        """Move a settled dynamic grasp smoothly along +X and back."""
+
+        if not bool(
+            getattr(self.cfg, "debug_robot_forward_backward_demo", False)
+        ):
+            return
+
+        support_released = self._robot_target_gripper_ramp_step > int(hold_steps)
+        self._robot_forward_backward_wait_step = torch.where(
+            support_released,
+            self._robot_forward_backward_wait_step + 1,
+            torch.zeros_like(self._robot_forward_backward_wait_step),
+        )
+        wait_steps = max(
+            0,
+            int(getattr(self.cfg, "debug_robot_forward_backward_wait_steps", 60)),
+        )
+        ready = support_released & (
+            self._robot_forward_backward_wait_step >= wait_steps
+        )
+        initialize = ready & ~self._robot_forward_backward_initialized
+        if torch.any(initialize):
+            initialize_ids = self._env_ids[initialize]
+            tool_pos_env = self._ee_tool_pos_env().detach()
+            _, tool_quat_b = self._ee_pose_in_base()
+            self._robot_forward_backward_origin_pos_env[initialize_ids] = (
+                tool_pos_env[initialize_ids]
+            )
+            self._robot_forward_backward_origin_quat_b[initialize_ids] = (
+                tool_quat_b[initialize_ids].detach()
+            )
+            self._robot_forward_backward_motion_step[initialize_ids] = 0
+            self._robot_forward_backward_initialized[initialize_ids] = True
+            if bool(initialize[0].item()):
+                print(
+                    "[XARM_FORWARD_BACKWARD] dynamic grasp settled; starting "
+                    "smooth +X motion from the measured tool pose",
+                    flush=True,
+                )
+
+        moving = ready & self._robot_forward_backward_initialized
+        if not torch.any(moving):
+            return
+
+        distance_m = float(
+            getattr(self.cfg, "debug_robot_forward_backward_distance_m", 0.05)
+        )
+        half_period_steps = max(
+            1,
+            int(
+                getattr(
+                    self.cfg,
+                    "debug_robot_forward_backward_half_period_steps",
+                    180,
+                )
+            ),
+        )
+        cycle_steps = 2 * half_period_steps
+        cycle_step = torch.remainder(
+            self._robot_forward_backward_motion_step, cycle_steps
+        )
+        phase = cycle_step.to(torch.float32) * (math.pi / half_period_steps)
+        displacement = 0.5 * distance_m * (1.0 - torch.cos(phase))
+
+        target_pos_env = self._ee_tool_pos_env().detach().clone()
+        _, target_quat_b = self._ee_pose_in_base()
+        target_quat_b = target_quat_b.detach().clone()
+        moving_target_pos = self._robot_forward_backward_origin_pos_env[
+            moving
+        ].clone()
+        moving_target_pos[:, 0] += displacement[moving]
+        target_pos_env[moving] = moving_target_pos
+        target_quat_b[moving] = self._robot_forward_backward_origin_quat_b[moving]
+
+        joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
+            target_pos_env,
+            target_quat_b,
+        )
+        moving_ids = self._env_ids[moving]
+        arm_des = joint_pos_des[moving_ids]
+        limits = self.robot.data.soft_joint_pos_limits[moving_ids][
+            :, self._arm_joint_ids
+        ]
+        arm_des = torch.maximum(
+            torch.minimum(arm_des, limits[..., 1]), limits[..., 0]
+        )
+        self.robot.set_joint_position_target(
+            arm_des,
+            joint_ids=self._arm_joint_ids,
+            env_ids=moving_ids,
+        )
+        self._arm_hold_joint_pos[moving_ids] = arm_des
+
+        self._reachable_grasp_sequence_target_pos_w[moving_ids] = (
+            target_pos_env[moving_ids] + self.scene.env_origins[moving_ids]
+        )
+        self._reachable_grasp_sequence_target_quat_w[moving_ids] = (
+            math_utils.quat_mul(
+                self.robot.data.root_quat_w[moving_ids],
+                target_quat_b[moving_ids],
+            )
+        )
+
+        if bool(moving[0].item()):
+            env0_step = int(self._robot_forward_backward_motion_step[0].item())
+            report_interval = max(1, half_period_steps // 2)
+            if env0_step % report_interval == 0:
+                leg = "forward" if int(cycle_step[0].item()) < half_period_steps else "return"
+                print(
+                    "[XARM_FORWARD_BACKWARD] "
+                    f"leg={leg} displacement_m={float(displacement[0].item()):.6f} "
+                    f"target_tool_env_m={target_pos_env[0].detach().cpu().tolist()}",
+                    flush=True,
+                )
+
+        self._robot_forward_backward_motion_step[moving] += 1
+
+    def _spawn_book_panda_style(self, env_ids_t: torch.Tensor) -> None:
+        """Reproduce the Panda reset: snap, support briefly, then release."""
+
+        book_state = self._snap_book_to_measured_grasp(env_ids_t)
+        self._robot_target_gripper_ramp_start[env_ids_t] = (
+            self.robot.data.joint_pos[env_ids_t][:, self._gripper_command_joint_ids]
+        )
+        self._robot_target_gripper_held_book_state[env_ids_t] = book_state
+        self._robot_target_gripper_ramp_step[env_ids_t] = 0
+        self.scene.write_data_to_sim()
+
+        if bool(torch.any(env_ids_t == 0).item()):
+            print(
+                "[XARM_PANDA_RESET] book snapped to measured finger midpoint; "
+                f"book_grasp_offset_hand={tuple(self.cfg.book_grasp_offset_hand)}; "
+                "velocity reset to zero",
+                flush=True,
+            )
+
+    def _spawn_book_with_collision_clearance(self, env_ids_t: torch.Tensor) -> None:
+        """Place the book for the temporary support-close-release sequence."""
+
+        n = int(env_ids_t.numel())
+        dtype = torch.float32
+        grasp_pos_w, grasp_quat_w = self._grasp_frame_pose_w(env_ids_t)
+        book_quat_grasp = self._book_grasp_relative_quat(n, dtype)
+        book_rotation_grasp = math_utils.matrix_from_quat(book_quat_grasp)
+        book_half_size = 0.5 * torch.tensor(
+            self.cfg.book_size,
+            device=self.device,
+            dtype=dtype,
+        )
+        book_half_extent_grasp = torch.matmul(
+            torch.abs(book_rotation_grasp),
+            book_half_size.view(1, 3, 1).expand(n, 3, 1),
+        ).squeeze(-1)
+
+        left_pos_w = self.robot.data.body_pos_w[env_ids_t, self._left_finger_body_idx]
+        right_pos_w = self.robot.data.body_pos_w[env_ids_t, self._right_finger_body_idx]
+        finger_origin_distance = torch.linalg.norm(left_pos_w - right_pos_w, dim=-1)
+        inner_surface_offset = float(self.cfg.debug_finger_inner_surface_offset_m)
+        finger_opening = finger_origin_distance - 2.0 * inner_surface_offset
+        book_thickness = 2.0 * book_half_extent_grasp[:, 1]
+        total_finger_clearance = finger_opening - book_thickness
+        minimum_total_clearance = 2.0 * float(self.cfg.debug_book_min_finger_clearance_m)
+        numerical_tolerance_m = 1.0e-5
+        if torch.any(
+            total_finger_clearance
+            < minimum_total_clearance - numerical_tolerance_m
+        ):
+            smallest = float(total_finger_clearance.min().item())
+            raise RuntimeError(
+                "book would overlap the xArm finger collision surfaces: "
+                f"smallest total clearance is {smallest:.6f} m"
+            )
+
+        palm_clearance = float(self.cfg.debug_book_palm_clearance_m)
+        book_offset_grasp = torch.zeros((n, 3), device=self.device, dtype=dtype)
+        book_offset_grasp[:, 2] = book_half_extent_grasp[:, 2] + palm_clearance
+        book_pos_w = grasp_pos_w + math_utils.quat_apply(
+            grasp_quat_w,
+            book_offset_grasp,
+        )
+        book_quat_w = math_utils.quat_mul(grasp_quat_w, book_quat_grasp)
+
+        book_state = self.book.data.default_root_state[env_ids_t].clone()
+        book_state[:, 0:3] = book_pos_w
+        book_state[:, 3:7] = book_quat_w
+        book_state[:, 7:] = 0.0
+        self.book.write_root_state_to_sim(book_state, env_ids=env_ids_t)
+        self._robot_target_gripper_ramp_start[env_ids_t] = (
+            self.robot.data.joint_pos[env_ids_t][:, self._gripper_command_joint_ids]
+        )
+        self._robot_target_gripper_held_book_state[env_ids_t] = book_state
+        self._robot_target_gripper_ramp_step[env_ids_t] = 0
+        self.scene.write_data_to_sim()
+
+        if bool(torch.any(env_ids_t == 0).item()):
+            env0_index = int(
+                torch.nonzero(env_ids_t == 0, as_tuple=False)[0, 0].item()
+            )
+            print(
+                "[XARM_BOOK_CLEARANCE] book placed without changing "
+                "the arm or gripper; "
+                f"finger_opening_m={float(finger_opening[env0_index].item()):.6f} "
+                f"book_thickness_m={float(book_thickness[env0_index].item()):.6f} "
+                f"clearance_per_side_m={0.5 * float(total_finger_clearance[env0_index].item()):.6f} "
+                f"book_half_depth_m={float(book_half_extent_grasp[env0_index, 2].item()):.6f} "
+                f"palm_clearance_m={palm_clearance:.6f}",
+                flush=True,
+            )
+
+    def _prepare_reachable_grasp_sequence(self, env_ids_t: torch.Tensor) -> None:
+        """Spawn a dynamic book inside a settled, near-contact gripper."""
+
+        target_arm = self.robot.data.joint_pos[env_ids_t][:, self._arm_joint_ids].clone()
+        preclose_value = getattr(self.cfg, "debug_reachable_grasp_preclose_joint_pos", None)
+        if preclose_value is None:
+            preclose_value = float(self.cfg.gripper_open_joint_pos)
+        preclose_value = float(preclose_value)
+
+        # Settle the gripper linkage before the book exists at the grasp point.
+        # This lets the USD mimic joints find a physically consistent pose.
+        parked_book_state = self.book.data.root_state_w[env_ids_t].clone()
+        parked_book_state[:, 0:3] = self.scene.env_origins[env_ids_t]
+        parked_book_state[:, 2] -= 5.0
+        parked_book_state[:, 7:] = 0.0
+        self.book.write_root_state_to_sim(parked_book_state, env_ids=env_ids_t)
+
+        preclose_command = torch.full(
+            (env_ids_t.numel(), len(self._gripper_command_joint_ids)),
+            preclose_value,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        preclose_steps = max(
+            1, int(getattr(self.cfg, "debug_reachable_grasp_preclose_settle_steps", 30))
+        )
+        for _ in range(preclose_steps):
+            self.robot.set_joint_position_target(
+                target_arm, joint_ids=self._arm_joint_ids, env_ids=env_ids_t
+            )
+            self.robot.set_joint_position_target(
+                preclose_command,
+                joint_ids=self._gripper_command_joint_ids,
+                env_ids=env_ids_t,
+            )
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            self.scene.update(dt=self.physics_dt)
+
+        ee_body_pos_w = self.robot.data.body_pos_w[env_ids_t, self._ee_body_idx]
+        ee_body_quat_w = self.robot.data.body_quat_w[env_ids_t, self._ee_body_idx]
+        target_tool_pos_w = ee_body_pos_w + math_utils.quat_apply(
+            ee_body_quat_w,
+            self._ik_body_offset_pos_b[env_ids_t],
+        )
+
+        # Spawn with zero velocity at the exact measured grasp frame. The book
+        # is dynamic immediately; no later step rewrites its root state.
+        self._snap_book_to_measured_grasp(env_ids_t)
+
+        if not hasattr(self, "_reachable_grasp_sequence_target_arm"):
+            self._reachable_grasp_sequence_target_arm = self._arm_hold_joint_pos.clone()
+            self._reachable_grasp_sequence_target_pos_w = self.robot.data.root_pos_w.clone()
+            self._reachable_grasp_sequence_target_quat_w = self.robot.data.root_quat_w.clone()
+        self._reachable_grasp_sequence_target_arm[env_ids_t] = target_arm
+        self._reachable_grasp_sequence_target_pos_w[env_ids_t] = target_tool_pos_w
+        self._reachable_grasp_sequence_target_quat_w[env_ids_t] = ee_body_quat_w
+        self._reachable_grasp_sequence_step[env_ids_t] = 0
+        self._reachable_grasp_sequence_complete[env_ids_t] = False
+
+        self._arm_hold_joint_pos[env_ids_t] = target_arm
+
+        if bool(torch.any(env_ids_t == 0).item()):
+            print(
+                "[XARM_GRASP_SEQUENCE] dynamic book spawned in settled near-contact "
+                "gripper; holding the measured grasp width",
+                flush=True,
+            )
+
+    def _apply_reachable_grasp_sequence(self) -> bool:
+        if not bool(getattr(self.cfg, "debug_reachable_grasp_sequence", False)):
+            return False
+
+        settle_steps = max(1, int(self.cfg.debug_reachable_grasp_settle_steps))
+        step = self._reachable_grasp_sequence_step
+
+        active = ~self._reachable_grasp_sequence_complete
+        finishing_mask = active & (step >= settle_steps)
+
+        arm_target = self._reachable_grasp_sequence_target_arm.clone()
+        self.robot.set_joint_position_target(arm_target, joint_ids=self._arm_joint_ids)
+        self._arm_hold_joint_pos[:] = arm_target
+
+        if len(self._gripper_command_joint_ids) > 0:
+            grasp_width = getattr(self.cfg, "debug_reachable_grasp_preclose_joint_pos", None)
+            if grasp_width is None:
+                grasp_width = float(self.cfg.gripper_open_joint_pos)
+            grasp_width = float(grasp_width)
+            gripper_target = torch.full(
+                (self.num_envs, len(self._gripper_command_joint_ids)),
+                grasp_width,
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.robot.set_joint_position_target(
+                gripper_target, joint_ids=self._gripper_command_joint_ids
+            )
+
+        if torch.any(finishing_mask):
+            finishing_ids = self._env_ids[finishing_mask]
+            contact = []
+            if len(self._gripper_command_joint_ids) > 0:
+                contact = (
+                    self.robot.data.joint_pos[finishing_ids][
+                        :, self._gripper_command_joint_ids
+                    ][0]
+                    .detach()
+                    .cpu()
+                    .tolist()
+                )
+            self._reachable_grasp_sequence_complete[finishing_ids] = True
+            if bool(torch.any(finishing_ids == 0).item()):
+                print(
+                    "[XARM_GRASP_SEQUENCE] constant-width dynamic grasp observation complete; "
+                    f"gripper_position_rad={contact}",
+                    flush=True,
+                )
+
+        self._reachable_grasp_sequence_step[active] += 1
+        return True
+
+    def _reset_to_slot_relative_tool_pose(self, env_ids_t: torch.Tensor) -> None:
+        """Solve the configured slot-relative TCP pose with the active robot model."""
+
+        offset = torch.tensor(
+            self.cfg.reset_tool_offset_slot_xyz,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        quat = torch.tensor(
+            self.cfg.reset_tool_quaternion_slot_wxyz,
+            device=self.device,
+            dtype=torch.float32,
+        )
+        if offset.shape != (3,) or quat.shape != (4,):
+            raise ValueError("slot-relative reset tool pose must contain xyz and wxyz")
+        quat_norm = torch.linalg.norm(quat)
+        if not bool(torch.isfinite(offset).all().item()) or not bool(torch.isfinite(quat_norm).item()):
+            raise ValueError("slot-relative reset tool pose must be finite")
+        if float(quat_norm.item()) < 1.0e-6:
+            raise ValueError("slot-relative reset tool quaternion must be nonzero")
+        quat = quat / quat_norm
+
+        target_pos_env = self._ee_tool_pos_env().detach().clone()
+        _, target_quat_b = self._ee_pose_in_base()
+        target_quat_b = target_quat_b.detach().clone()
+        target_z = (
+            float(self.cfg.shelf_top_z)
+            + float(self.cfg.shelf_thickness)
+            + 0.5 * float(self.cfg.book_size[1])
+        )
+        target_pos_env[env_ids_t, 0] = float(self.cfg.slot_x_open) + offset[0]
+        target_pos_env[env_ids_t, 1] = self._slot_center_y()[env_ids_t] + offset[1]
+        target_pos_env[env_ids_t, 2] = target_z + offset[2]
+        target_quat_b[env_ids_t] = quat
+
+        iterations = max(1, int(self.cfg.reset_tool_ik_iters))
+        for _ in range(iterations):
+            joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
+                target_pos_env,
+                target_quat_b,
+            )
+            joint_pos = self.robot.data.joint_pos[env_ids_t].clone()
+            joint_vel = self.robot.data.joint_vel[env_ids_t].clone()
+            arm_des = joint_pos_des[env_ids_t]
+            limits = self.robot.data.soft_joint_pos_limits[env_ids_t][:, self._arm_joint_ids]
+            arm_des = torch.maximum(torch.minimum(arm_des, limits[..., 1]), limits[..., 0])
+            joint_pos[:, self._arm_joint_ids] = arm_des
+            joint_vel[:, self._arm_joint_ids] = 0.0
+            self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
+            self.robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            self.scene.update(dt=self.physics_dt)
+
+        # The slot-relative IK above intentionally establishes the nominal
+        # xArm pose. Apply reset joint noise once afterwards so IK cannot erase
+        # the requested training perturbation, then place the book from the
+        # resulting measured grasp frame.
+        arm_noise = self._scenario_joint_noise_env[env_ids_t]
+        if arm_noise.shape[1] != len(self._arm_joint_ids):
+            raise RuntimeError("sampled arm noise does not match the xArm joint count")
+        self._scenario_applied_joint_noise_env[env_ids_t] = 0.0
+        if bool(torch.any(arm_noise != 0.0).item()):
+            joint_pos = self.robot.data.joint_pos[env_ids_t].clone()
+            joint_vel = self.robot.data.joint_vel[env_ids_t].clone()
+            nominal_arm_pos = joint_pos[:, self._arm_joint_ids].clone()
+            arm_des = nominal_arm_pos + arm_noise
+            limits = self.robot.data.soft_joint_pos_limits[env_ids_t][
+                :, self._arm_joint_ids
+            ]
+            arm_des = torch.maximum(
+                torch.minimum(arm_des, limits[..., 1]), limits[..., 0]
+            )
+            self._scenario_applied_joint_noise_env[env_ids_t] = (
+                arm_des - nominal_arm_pos
+            )
+            joint_pos[:, self._arm_joint_ids] = arm_des
+            joint_vel[:, self._arm_joint_ids] = 0.0
+            self.robot.write_joint_state_to_sim(
+                joint_pos, joint_vel, env_ids=env_ids_t
+            )
+            self.robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            self.scene.update(dt=self.physics_dt)
+
+        self._arm_hold_joint_pos[env_ids_t] = self.robot.data.joint_pos[env_ids_t][
+            :, self._arm_joint_ids
+        ].clone()
+        self.robot.set_joint_position_target(
+            self._arm_hold_joint_pos[env_ids_t],
+            joint_ids=self._arm_joint_ids,
+            env_ids=env_ids_t,
+        )
+
+        # The official xArm USD starts at the 34 mm placement gap. Establish
+        # the configured 32 mm holding gap while the book pose is supported,
+        # then let the rigid book become dynamic after the warmup loop.
+        if len(self._gripper_command_joint_ids) > 0:
+            finger_des = torch.full(
+                (env_ids_t.numel(), len(self._gripper_command_joint_ids)),
+                float(self.cfg.gripper_closed_joint_pos),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.robot.set_joint_position_target(
+                finger_des,
+                joint_ids=self._gripper_command_joint_ids,
+                env_ids=env_ids_t,
+            )
+
+        snapped_book_state = self._snap_book_to_measured_grasp(env_ids_t)
+        warmup = max(0, int(getattr(self.cfg, "reset_warmup_steps", 0)))
+        for _ in range(warmup):
+            self.book.write_root_state_to_sim(snapped_book_state, env_ids=env_ids_t)
+            self.scene.write_data_to_sim()
+            self.sim.step(render=False)
+            self.scene.update(dt=self.physics_dt)
+        # End the supported settling phase at the exact requested transform
+        # with zero velocity. The next normal environment step is the first
+        # fully dynamic grasp observation.
+        self.book.write_root_state_to_sim(snapped_book_state, env_ids=env_ids_t)
+        self.scene.write_data_to_sim()
+        self.scene.update(dt=0.0)
+
+        actual_pos = self._ee_tool_pos_env()[env_ids_t]
+        _, actual_quat = self._ee_pose_in_base()
+        actual_quat = actual_quat[env_ids_t]
+        pos_error = torch.linalg.norm(actual_pos - target_pos_env[env_ids_t], dim=-1)
+        rot_error = math_utils.quat_error_magnitude(target_quat_b[env_ids_t], actual_quat)
+        if bool(torch.any(env_ids_t == 0).item()):
+            env0_index = int(torch.nonzero(env_ids_t == 0, as_tuple=False)[0, 0].item())
+            sampled_noise_deg = math.degrees(
+                float(
+                    torch.abs(
+                        self._scenario_applied_joint_noise_env[
+                            env_ids_t[env0_index]
+                        ]
+                    ).max().item()
+                )
+            )
+            print(
+                "[XARM_RANDOMIZED_RESET] "
+                "nominal_target_delta_after_joint_noise_m="
+                f"{float(pos_error[env0_index].item()):.6f} "
+                "nominal_target_rotation_delta_after_joint_noise_deg="
+                f"{math.degrees(float(rot_error[env0_index].item())):.3f} "
+                f"applied_joint_noise_max_deg={sampled_noise_deg:.3f} "
+                f"target_tcp_env_m={target_pos_env[env_ids_t][env0_index].detach().cpu().tolist()}"
+            )
+
+        self._target_pos_env[env_ids_t] = actual_pos
+        _, _, actual_yaw = math_utils.euler_xyz_from_quat(actual_quat)
+        self._target_yaw[env_ids_t] = actual_yaw
 
     def _print_env0_joint_values(self, label: str) -> None:
         joint_pos = self.robot.data.joint_pos[0].detach().cpu()
@@ -299,6 +1677,16 @@ class BookshelfEnv(BookshelfEnvV5):
         self.robot.set_joint_position_target(
             self._arm_hold_joint_pos[env_ids_t], joint_ids=self._arm_joint_ids, env_ids=env_ids_t
         )
+        if len(self._gripper_command_joint_ids) > 0:
+            finger_des = torch.full(
+                (env_ids_t.numel(), len(self._gripper_command_joint_ids)),
+                float(self.cfg.gripper_closed_joint_pos),
+                device=self.device,
+                dtype=torch.float32,
+            )
+            self.robot.set_joint_position_target(
+                finger_des, joint_ids=self._gripper_command_joint_ids, env_ids=env_ids_t
+            )
 
         warmup = int(getattr(self.cfg, "reset_warmup_steps", 0))
         for _ in range(max(0, warmup)):
@@ -332,11 +1720,8 @@ class BookshelfEnv(BookshelfEnvV5):
         self._push_start_step_buf[env_ids_t] = -1
 
     def _omit_bookshelf_obstacles(self, env_ids_t: torch.Tensor) -> None:
-        for env_id in env_ids_t.tolist():
-            shelf_path = f"/World/envs/env_{env_id}/Bookshelf"
-            if sim_utils.is_prim_path_valid(shelf_path):
-                sim_utils.delete_prim(shelf_path)
-
+        # Shelf collisions are disabled before PhysX starts in _setup_scene.
+        # Deleting initialized collision prims here produces detachShape errors.
         hidden_pos = torch.zeros((env_ids_t.numel(), 3), device=self.device, dtype=torch.float32)
         hidden_pos[:, 2] = -5.0
         hidden_pos = hidden_pos + self.scene.env_origins[env_ids_t]
@@ -351,8 +1736,6 @@ class BookshelfEnv(BookshelfEnvV5):
             obj.write_root_state_to_sim(state, env_ids=env_ids_t)
 
         self.scene.write_data_to_sim()
-        self.sim.step(render=False)
-        self.scene.update(dt=self.physics_dt)
 
     def _capture_fixed_tool_to_book_transform(self, env_ids_t: torch.Tensor) -> None:
         if not hasattr(self, "_book_offset_tool"):
@@ -418,9 +1801,11 @@ class BookshelfEnv(BookshelfEnvV5):
                 joint_vel = self.robot.data.joint_vel[env_ids_t].clone()
                 joint_pos[:, self._arm_joint_ids] = self._debug_curobo_plan[-1:].expand(env_ids_t.numel(), -1)
                 joint_vel[:, self._arm_joint_ids] = 0.0
-                if len(self._finger_joint_ids) > 0:
-                    joint_pos[:, self._finger_joint_ids] = float(self.cfg.gripper_closed_joint_pos)
-                    joint_vel[:, self._finger_joint_ids] = 0.0
+                if len(self._gripper_command_joint_ids) > 0:
+                    joint_pos[:, self._gripper_command_joint_ids] = float(
+                        self.cfg.gripper_closed_joint_pos
+                    )
+                    joint_vel[:, self._gripper_command_joint_ids] = 0.0
 
                 self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
                 self.robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
@@ -438,9 +1823,11 @@ class BookshelfEnv(BookshelfEnvV5):
             joint_pos[:, self._arm_joint_ids] = joint_pos_des[env_ids_t]
             joint_vel[:, self._arm_joint_ids] = 0.0
 
-            if len(self._finger_joint_ids) > 0:
-                joint_pos[:, self._finger_joint_ids] = float(self.cfg.gripper_closed_joint_pos)
-                joint_vel[:, self._finger_joint_ids] = 0.0
+            if len(self._gripper_command_joint_ids) > 0:
+                joint_pos[:, self._gripper_command_joint_ids] = float(
+                    self.cfg.gripper_closed_joint_pos
+                )
+                joint_vel[:, self._gripper_command_joint_ids] = 0.0
 
             self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
             self.robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
@@ -506,8 +1893,9 @@ class BookshelfEnv(BookshelfEnvV5):
     ) -> torch.Tensor:
         self._target_pos_env[:] = target_pos_env
 
+        target_pos_b = self._position_env_to_base(target_pos_env)
         offset_des_b = math_utils.quat_apply(target_quat_b, self._ik_body_offset_pos_b)
-        body_pos_des_b = target_pos_env - offset_des_b
+        body_pos_des_b = target_pos_b - offset_des_b
 
         self._ik_cmd[:, 0:3] = body_pos_des_b
         self._ik_cmd[:, 3:7] = target_quat_b
@@ -516,7 +1904,88 @@ class BookshelfEnv(BookshelfEnvV5):
         ee_pos_b, ee_quat_b = self._ee_pose_in_base()
         jacobian = self.robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, self._jacobi_joint_ids]
         joint_pos = self.robot.data.joint_pos[:, self._arm_joint_ids]
+
+        rotation_weight = getattr(self.cfg, "debug_pose_ik_rotation_weight", None)
+        if rotation_weight is not None:
+            # Control the offset TCP directly. The xArm Jacobian belongs to
+            # link7, while the pushing point is 172 mm away; assuming perfect
+            # wrist orientation converts small angular errors into large
+            # lateral TCP errors.
+            tool_offset_b = math_utils.quat_apply(
+                ee_quat_b,
+                self._ik_body_offset_pos_b,
+            )
+            tool_pos_b = ee_pos_b + tool_offset_b
+            position_error = target_pos_b - tool_pos_b
+            _, rotation_error = math_utils.compute_pose_error(
+                ee_pos_b,
+                ee_quat_b,
+                ee_pos_b,
+                target_quat_b,
+                rot_error_type="axis_angle",
+            )
+
+            offset_x, offset_y, offset_z = tool_offset_b.unbind(dim=-1)
+            zeros = torch.zeros_like(offset_x)
+            offset_skew = torch.stack(
+                (
+                    zeros,
+                    -offset_z,
+                    offset_y,
+                    offset_z,
+                    zeros,
+                    -offset_x,
+                    -offset_y,
+                    offset_x,
+                    zeros,
+                ),
+                dim=-1,
+            ).reshape(self.num_envs, 3, 3)
+            tool_position_jacobian = (
+                jacobian[:, 0:3, :]
+                - offset_skew @ jacobian[:, 3:6, :]
+            )
+            rotation_weight = float(rotation_weight)
+            weighted_error = torch.cat(
+                (position_error, rotation_weight * rotation_error), dim=-1
+            )
+            weighted_jacobian = torch.cat(
+                (
+                    tool_position_jacobian,
+                    rotation_weight * jacobian[:, 3:6, :],
+                ),
+                dim=1,
+            )
+            jacobian_t = weighted_jacobian.transpose(1, 2)
+            damping = 0.01
+            damping_matrix = (damping**2) * torch.eye(
+                weighted_jacobian.shape[1],
+                device=self.device,
+                dtype=weighted_jacobian.dtype,
+            )
+            delta_joint_pos = jacobian_t @ torch.linalg.solve(
+                weighted_jacobian @ jacobian_t + damping_matrix,
+                weighted_error.unsqueeze(-1),
+            )
+            return joint_pos + delta_joint_pos.squeeze(-1)
+
         return self._ik.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
+
+    @staticmethod
+    def _apply_base_frame_orientation_delta(
+        current_quat_b: torch.Tensor,
+        delta_yaw: torch.Tensor,
+        delta_pitch: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply small nominal yaw/pitch corrections without Euler decomposition."""
+
+        zeros = torch.zeros_like(delta_yaw)
+        delta_quat_b = math_utils.quat_from_euler_xyz(
+            zeros,
+            delta_pitch,
+            delta_yaw,
+        )
+        return math_utils.quat_mul(delta_quat_b, current_quat_b)
 
     @staticmethod
     def _interpolate_cspace_path(path: np.ndarray, max_cspace_dist: float) -> np.ndarray:
@@ -685,15 +2154,17 @@ class BookshelfEnv(BookshelfEnvV5):
         if self._debug_curobo_plan_step < int(self._debug_curobo_plan.shape[0] - 1):
             self._debug_curobo_plan_step += 1
 
-        if len(self._finger_joint_ids) > 0:
+        if len(self._gripper_command_joint_ids) > 0:
             finger_des = torch.full(
-                (1, len(self._finger_joint_ids)),
+                (1, len(self._gripper_command_joint_ids)),
                 float(self.cfg.gripper_closed_joint_pos),
                 device=self.device,
                 dtype=torch.float32,
             )
             self.robot.set_joint_position_target(
-                finger_des, joint_ids=self._finger_joint_ids, env_ids=torch.tensor([0], device=self.device)
+                finger_des,
+                joint_ids=self._gripper_command_joint_ids,
+                env_ids=torch.tensor([0], device=self.device),
             )
         return True
 
@@ -848,15 +2319,17 @@ class BookshelfEnv(BookshelfEnvV5):
         if self._debug_rrt_plan_step < int(self._debug_rrt_plan.shape[0] - 1):
             self._debug_rrt_plan_step += 1
 
-        if len(self._finger_joint_ids) > 0:
+        if len(self._gripper_command_joint_ids) > 0:
             finger_des = torch.full(
-                (1, len(self._finger_joint_ids)),
+                (1, len(self._gripper_command_joint_ids)),
                 float(self.cfg.gripper_closed_joint_pos),
                 device=self.device,
                 dtype=torch.float32,
             )
             self.robot.set_joint_position_target(
-                finger_des, joint_ids=self._finger_joint_ids, env_ids=torch.tensor([0], device=self.device)
+                finger_des,
+                joint_ids=self._gripper_command_joint_ids,
+                env_ids=torch.tensor([0], device=self.device),
             )
         return True
 
@@ -881,7 +2354,6 @@ class BookshelfEnv(BookshelfEnvV5):
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
         self.actions = actions.clone().clamp(-1.0, 1.0)
         self._mode_start = self._mode.clone()
-
         policy_release = self.actions[:, -1] > float(self.cfg.release_trigger_threshold)
         nominal_release = torch.zeros_like(policy_release)
         if (
@@ -938,7 +2410,90 @@ class BookshelfEnv(BookshelfEnvV5):
             terminated = terminated | hold_done
             self.extras["episode_metric_preinsert_reached"] = preinsert_reached
             self.extras["episode_metric_preinsert_hold_steps"] = self._debug_preinsert_hold_buf
+        if bool(getattr(self.cfg, "debug_disable_episode_resets", False)):
+            terminated = torch.zeros_like(terminated)
+            time_out = torch.zeros_like(time_out)
         return terminated, time_out
+
+    def _update_nominal_push_lowering_phase(self, mode: torch.Tensor) -> None:
+        """Prepare Panda-style push height before the straight xArm push."""
+
+        enabled = bool(
+            getattr(self.cfg, "debug_nominal_push_reuse_insert_forward", False)
+        ) and bool(
+            getattr(self.cfg, "debug_nominal_push_lower_before_forward", False)
+        )
+        push_mask = mode == _MODE_PUSH
+        self._debug_nominal_push_line_initialized[~push_mask] = False
+        self._debug_nominal_push_lowering_complete[~push_mask] = False
+        if not enabled or not torch.any(push_mask):
+            return
+
+        tool_pos = self._ee_tool_pos_env()
+        book_pos = self._book_pos_env()
+        entering_push = push_mask & ~self._debug_nominal_push_line_initialized
+        if torch.any(entering_push):
+            corners = self._book_corners_env()
+            book_bottom_z = corners[..., 2].min(dim=-1).values
+            book_top_z = corners[..., 2].max(dim=-1).values
+            book_height = torch.clamp(book_top_z - book_bottom_z, min=1.0e-4)
+            panda_push_z = book_bottom_z + (
+                float(self.cfg.nominal_push_z_fraction_from_bottom) * book_height
+            )
+            align_to_book_center = bool(
+                getattr(self.cfg, "debug_nominal_push_align_to_book_center", False)
+            )
+            push_line_y = (
+                book_pos[:, 1]
+                if align_to_book_center
+                else tool_pos[:, 1]
+            )
+            self._debug_nominal_push_line_y_env[entering_push] = (
+                push_line_y[entering_push].detach()
+            )
+            self._debug_nominal_push_target_z_env[entering_push] = (
+                panda_push_z[entering_push].detach()
+            )
+            self._debug_nominal_push_lowering_complete[entering_push] = False
+            self._debug_nominal_push_line_initialized[entering_push] = True
+            self._debug_integrated_target_pos_env[entering_push] = (
+                tool_pos[entering_push].detach()
+            )
+            if bool(entering_push[0].item()):
+                print(
+                    "[XARM_PUSH_PHASE] CENTERING_AND_LOWERING; "
+                    "Panda target is book_bottom + "
+                    f"{float(self.cfg.nominal_push_z_fraction_from_bottom):.3f} * book_height; "
+                    f"tool_y={float(tool_pos[0, 1].item()):+.6f} "
+                    f"book_center_y={float(book_pos[0, 1].item()):+.6f} "
+                    f"start_z={float(tool_pos[0, 2].item()):+.6f} "
+                    f"target_z={float(panda_push_z[0].item()):+.6f}",
+                    flush=True,
+                )
+
+        lowering = push_mask & ~self._debug_nominal_push_lowering_complete
+        height_error = self._debug_nominal_push_target_z_env - tool_pos[:, 2]
+        lateral_error = self._debug_nominal_push_line_y_env - tool_pos[:, 1]
+        height_tolerance = float(self.cfg.nominal_push_dz_limit)
+        lateral_tolerance = float(self.cfg.nominal_push_dy_limit)
+        reached_push_line = (
+            lowering
+            & (torch.abs(height_error) <= height_tolerance)
+            & (torch.abs(lateral_error) <= lateral_tolerance)
+        )
+        if torch.any(reached_push_line):
+            self._debug_nominal_push_lowering_complete[reached_push_line] = True
+            # Begin the retained forward target from the measured pose reached
+            # by the xArm, not from a stale INSERT or retreat target.
+            self._debug_integrated_target_pos_env[reached_push_line] = (
+                tool_pos[reached_push_line].detach()
+            )
+            if bool(reached_push_line[0].item()):
+                print(
+                    "[XARM_PUSH_PHASE] PUSHING_STRAIGHT_X; book-center Y and "
+                    "lower height reached; Y/Z/orientation now held",
+                    flush=True,
+                )
 
     def _nominal_cartesian_delta(self, mode: torch.Tensor) -> torch.Tensor:
         nominal = torch.zeros((self.num_envs, 5), device=self.device, dtype=torch.float32)
@@ -1009,7 +2564,35 @@ class BookshelfEnv(BookshelfEnvV5):
         nominal[:, 3] = torch.where(insert_mask, insert_dyaw, nominal[:, 3])
         nominal[:, 4] = torch.where(insert_mask, insert_dpitch, nominal[:, 4])
 
-        if torch.any(push_mask):
+        reuse_insert_forward = bool(
+            getattr(self.cfg, "debug_nominal_push_reuse_insert_forward", False)
+        )
+        if torch.any(push_mask) and reuse_insert_forward:
+            lower_before_forward = bool(
+                getattr(self.cfg, "debug_nominal_push_lower_before_forward", False)
+            )
+            push_forward = push_mask.clone()
+            if lower_before_forward:
+                push_forward = push_mask & self._debug_nominal_push_lowering_complete
+                lowering = push_mask & ~self._debug_nominal_push_lowering_complete
+                # Advance a smooth commanded-height ramp, as the fixed retreat
+                # does. Using measured tool Z here leaves the target only one
+                # millimetre ahead and makes the xArm descend extremely slowly.
+                push_height_error = self._debug_nominal_push_target_z_env - (
+                    self._debug_integrated_target_pos_env[:, 2]
+                )
+                push_lower_dz = torch.clamp(
+                    float(self.cfg.nominal_push_height_gain) * push_height_error,
+                    -float(self.cfg.nominal_push_dz_limit),
+                    float(self.cfg.nominal_push_dz_limit),
+                )
+                nominal[:, 2] = torch.where(lowering, push_lower_dz, nominal[:, 2])
+
+            # Forward motion starts only after lowering. The remaining PUSH
+            # deltas stay zero, holding Y, Z, and orientation at that pose.
+            nominal[:, 0] = torch.where(push_forward, insert_dx, torch.zeros_like(nominal[:, 0]))
+
+        if torch.any(push_mask) and not reuse_insert_forward:
             corners = self._book_corners_env()
             book_bottom_z = corners[..., 2].min(dim=-1).values
             book_top_z = corners[..., 2].max(dim=-1).values
@@ -1036,6 +2619,10 @@ class BookshelfEnv(BookshelfEnvV5):
                 -float(self.cfg.nominal_dpitch_limit),
                 float(self.cfg.nominal_dpitch_limit),
             )
+            if bool(getattr(self.cfg, "debug_nominal_push_hold_y_only", False)):
+                # Keep the push on the release/retreat lateral line while the
+                # existing height controller moves to the lower push point.
+                push_dy = torch.zeros_like(push_dy)
             if bool(getattr(self.cfg, "debug_position_only_target_ee", False)):
                 push_dyaw = torch.zeros_like(push_dyaw)
                 push_dpitch = torch.zeros_like(push_dpitch)
@@ -1051,6 +2638,12 @@ class BookshelfEnv(BookshelfEnvV5):
         mode = self._mode
         self._refresh_debug_markers()
 
+        if self._apply_robot_target_pose_only():
+            return
+
+        if self._apply_reachable_grasp_sequence():
+            return
+
         if bool(getattr(self.cfg, "debug_hold_book_fixed_to_tool", False)):
             # Ideal grasp is only a pre-release debug aid. Stop overwriting the
             # book immediately when release is requested so opening/retreat and
@@ -1064,6 +2657,8 @@ class BookshelfEnv(BookshelfEnvV5):
 
         if self._apply_debug_rrt_plan():
             return
+
+        self._update_nominal_push_lowering_phase(mode)
 
         residual = torch.stack(
             (
@@ -1085,6 +2680,133 @@ class BookshelfEnv(BookshelfEnvV5):
         delta[:, 4] = torch.clamp(
             delta[:, 4], -float(self.cfg.final_dpitch_limit), float(self.cfg.final_dpitch_limit)
         )
+
+        normal_mask = mode != _MODE_SCRIPTED
+        push_mask = normal_mask & (mode == _MODE_PUSH)
+        panda_lower_then_push = bool(
+            getattr(self.cfg, "debug_nominal_push_reuse_insert_forward", False)
+        ) and bool(
+            getattr(self.cfg, "debug_nominal_push_lower_before_forward", False)
+        )
+        if panda_lower_then_push and torch.any(push_mask):
+            lowering_mask = push_mask & ~self._debug_nominal_push_lowering_complete
+            pushing_mask = push_mask & self._debug_nominal_push_lowering_complete
+            delta[push_mask, 1] = 0.0
+            delta[push_mask, 3] = 0.0
+            delta[push_mask, 4] = 0.0
+            delta[lowering_mask, 0] = 0.0
+            delta[pushing_mask, 2] = 0.0
+        ee_tool_pos_env = self._ee_tool_pos_env()
+        book_pos_env = self._book_pos_env()
+        lock_push_y = bool(
+            getattr(self.cfg, "debug_nominal_push_lock_y_to_entry", False)
+        )
+        self._debug_nominal_push_line_initialized[~push_mask] = False
+        if lock_push_y and torch.any(push_mask):
+            entering_push = push_mask & ~self._debug_nominal_push_line_initialized
+            if torch.any(entering_push):
+                self._debug_nominal_push_line_y_env[entering_push] = (
+                    ee_tool_pos_env[entering_push, 1].detach()
+                )
+                if (
+                    bool(getattr(self.cfg, "debug_integrate_position_target_ee", False))
+                    and not bool(
+                        getattr(
+                            self.cfg,
+                            "debug_nominal_push_current_relative_target",
+                            False,
+                        )
+                    )
+                ):
+                    # Start PUSH from the measured post-retreat pose. The
+                    # retained target then builds only within its lead bound.
+                    self._debug_integrated_target_pos_env[entering_push] = (
+                        ee_tool_pos_env[entering_push].detach()
+                    )
+                self._debug_nominal_push_line_initialized[entering_push] = True
+        push_spine_y_error = ee_tool_pos_env[:, 1] - book_pos_env[:, 1]
+        arm_joint_pos = self.robot.data.joint_pos[:, self._arm_joint_ids]
+        push_tracking_error = torch.abs(
+            _wrap_to_pi(self._arm_hold_joint_pos - arm_joint_pos)
+        ).amax(dim=-1)
+        joint_tracking_enabled = bool(
+            getattr(self.cfg, "debug_nominal_push_tracking_pause_enabled", False)
+        )
+        spine_tracking_enabled = bool(
+            getattr(self.cfg, "debug_nominal_push_spine_tracking_enabled", False)
+        )
+        if joint_tracking_enabled:
+            pause_error = float(
+                getattr(self.cfg, "debug_nominal_push_tracking_pause_joint_error_rad", 0.12)
+            )
+            resume_error = float(
+                getattr(self.cfg, "debug_nominal_push_tracking_resume_joint_error_rad", 0.08)
+            )
+
+        alignment_complete = self._debug_nominal_push_alignment_complete.clone()
+        alignment_complete[~push_mask] = False
+        if spine_tracking_enabled:
+            pause_lateral_error = float(
+                getattr(self.cfg, "debug_nominal_push_spine_pause_lateral_error_m", 0.004)
+            )
+            resume_lateral_error = float(
+                getattr(self.cfg, "debug_nominal_push_spine_resume_lateral_error_m", 0.002)
+            )
+            absolute_spine_y_error = torch.abs(push_spine_y_error)
+            alignment_lost = push_mask & alignment_complete & (
+                absolute_spine_y_error >= pause_lateral_error
+            )
+            alignment_complete = torch.where(
+                alignment_lost, torch.zeros_like(alignment_complete), alignment_complete
+            )
+            alignment_ready = push_mask & ~alignment_complete & (
+                absolute_spine_y_error <= resume_lateral_error
+            )
+            if joint_tracking_enabled:
+                alignment_ready &= push_tracking_error <= resume_error
+            alignment_complete = torch.where(
+                alignment_ready, torch.ones_like(alignment_complete), alignment_complete
+            )
+        else:
+            alignment_complete = push_mask.clone()
+        self._debug_nominal_push_alignment_complete[:] = alignment_complete
+
+        if joint_tracking_enabled or spine_tracking_enabled:
+            paused = self._debug_nominal_push_tracking_paused.clone() & push_mask
+            if joint_tracking_enabled:
+                paused = torch.where(
+                    push_mask & (push_tracking_error >= pause_error),
+                    torch.ones_like(paused),
+                    paused,
+                )
+                paused = torch.where(
+                    push_mask
+                    & alignment_complete
+                    & (push_tracking_error <= resume_error),
+                    torch.zeros_like(paused),
+                    paused,
+                )
+            paused |= push_mask & ~alignment_complete
+            self._debug_nominal_push_tracking_paused[:] = paused
+            delta[paused, 0] = 0.0
+            delta[paused, 2] = 0.0
+        else:
+            self._debug_nominal_push_tracking_paused[:] = False
+
+        if spine_tracking_enabled and torch.any(push_mask):
+            # A paused push must still be able to move laterally toward the
+            # released book. Otherwise zeroing X/Z while hold-y is enabled
+            # produces an all-zero delta and the arm can never leave pause.
+            recovery_step = float(
+                getattr(self.cfg, "debug_nominal_push_spine_recovery_step_m", 0.002)
+            )
+            spine_recovery_dy = torch.clamp(
+                -push_spine_y_error,
+                -recovery_step,
+                recovery_step,
+            )
+            delta[push_mask, 1] = spine_recovery_dy[push_mask]
+
         if bool(getattr(self.cfg, "debug_print_residual_components", False)):
             interval = max(1, int(getattr(self.cfg, "debug_print_residual_interval", 30)))
             env_i = int(getattr(self.cfg, "debug_print_residual_env_index", 0))
@@ -1095,10 +2817,42 @@ class BookshelfEnv(BookshelfEnvV5):
                 mode_i = int(mode[env_i].item())
                 raw_release = float(self.actions[env_i, -1].item())
                 release_req = bool(self._release_request[env_i].item())
+                push_phase = "inactive"
+                if mode_i == _MODE_PUSH:
+                    lower_first = bool(
+                        getattr(self.cfg, "debug_nominal_push_reuse_insert_forward", False)
+                    ) and bool(
+                        getattr(self.cfg, "debug_nominal_push_lower_before_forward", False)
+                    )
+                    if lower_first:
+                        push_phase = (
+                            "PUSHING"
+                            if bool(self._debug_nominal_push_lowering_complete[env_i].item())
+                            else "LOWERING"
+                        )
+                    else:
+                        push_phase = (
+                            "PANDA_CURRENT_RELATIVE"
+                            if bool(
+                                getattr(
+                                    self.cfg,
+                                    "debug_nominal_push_current_relative_target",
+                                    False,
+                                )
+                            )
+                            else "PANDA_BOUNDED_RETAINED"
+                        )
                 print(
                     "[residual debug] "
                     f"step={int(self.common_step_counter)} env={env_i} mode={mode_i} "
+                    f"push_phase={push_phase} "
                     f"release_action={raw_release:+.3f} release_req={release_req} "
+                    f"push_track_err={float(push_tracking_error[env_i].item()):.4f}rad "
+                    f"push_spine_y_err={float(push_spine_y_error[env_i].item()):+.4f}m "
+                    f"push_z={float(ee_tool_pos_env[env_i, 2].item()):+.4f}->"
+                    f"{float(self._debug_nominal_push_target_z_env[env_i].item()):+.4f}m "
+                    f"push_aligned={bool(self._debug_nominal_push_alignment_complete[env_i].item())} "
+                    f"push_x_paused={bool(self._debug_nominal_push_tracking_paused[env_i].item())} "
                     f"nom=[dx {float(n[0].item()):+.4f}, dy {float(n[1].item()):+.4f}, "
                     f"dz {float(n[2].item()):+.4f}, dyaw {float(torch.rad2deg(n[3]).item()):+.3f}deg, "
                     f"dpitch {float(torch.rad2deg(n[4]).item()):+.3f}deg] "
@@ -1110,31 +2864,177 @@ class BookshelfEnv(BookshelfEnvV5):
                     f"dpitch {float(torch.rad2deg(d[4]).item()):+.3f}deg]"
                 )
 
-        ee_tool_pos_env = self._ee_tool_pos_env()
         _, ee_quat_b = self._ee_pose_in_base()
         _, ee_pitch_b, ee_yaw_b = math_utils.euler_xyz_from_quat(ee_quat_b)
 
-        target_pos_env = ee_tool_pos_env.clone()
+        integrate_position_target = bool(
+            getattr(self.cfg, "debug_integrate_position_target_ee", False)
+        )
+        target_pos_env = (
+            self._debug_integrated_target_pos_env.clone()
+            if integrate_position_target
+            else ee_tool_pos_env.clone()
+        )
+        scripted_mask = mode == _MODE_SCRIPTED
+        scripted_fixed_retreat = bool(
+            getattr(self.cfg, "debug_scripted_fixed_retreat_path", False)
+        )
+        self._debug_scripted_retreat_initialized[~scripted_mask] = False
+        if scripted_fixed_retreat and torch.any(scripted_mask):
+            retreat_start_mask = scripted_mask & ~self._debug_scripted_retreat_initialized
+            if torch.any(retreat_start_mask):
+                self._debug_scripted_retreat_start_pos_env[retreat_start_mask] = (
+                    ee_tool_pos_env[retreat_start_mask].detach().clone()
+                )
+                self._debug_scripted_retreat_initialized[retreat_start_mask] = True
+
+            open_steps = int(self.cfg.script_open_steps)
+            retreat_steps = max(1, int(self.cfg.script_retreat_steps))
+            configured_total_dx = getattr(
+                self.cfg, "debug_scripted_fixed_retreat_total_dx", None
+            )
+            retreat_total_dx = (
+                float(configured_total_dx)
+                if configured_total_dx is not None
+                else retreat_steps * float(self.cfg.script_retreat_dx)
+            )
+            if not math.isfinite(retreat_total_dx):
+                raise ValueError("fixed retreat total X distance must be finite")
+            retreat_progress = torch.clamp(
+                self._script_step_buf - open_steps + 1,
+                min=0,
+                max=retreat_steps,
+            ).to(dtype=torch.float32) / float(retreat_steps)
+            fixed_retreat_target = self._debug_scripted_retreat_start_pos_env.clone()
+            fixed_retreat_target[:, 0] += (
+                retreat_progress * retreat_total_dx
+            )
+            fixed_retreat_target[:, 2] += (
+                retreat_progress * retreat_steps * float(self.cfg.script_retreat_dz)
+            )
+            target_pos_env[scripted_mask] = fixed_retreat_target[scripted_mask]
+
+        scripted_current_relative = bool(
+            getattr(self.cfg, "debug_scripted_current_relative_target", False)
+        )
+        if (
+            scripted_current_relative
+            and not scripted_fixed_retreat
+            and torch.any(scripted_mask)
+        ):
+            # Preserve the original controller's retreat semantics. Its
+            # script_retreat_dx is an offset from the measured tool pose, not
+            # a delta to accumulate repeatedly onto the INSERT target.
+            target_pos_env[scripted_mask] = ee_tool_pos_env[scripted_mask]
+        push_current_relative = bool(
+            getattr(self.cfg, "debug_nominal_push_current_relative_target", False)
+        )
+        if push_current_relative and torch.any(push_mask):
+            target_pos_env[push_mask] = ee_tool_pos_env[push_mask]
         target_yaw = ee_yaw_b.clone()
         target_pitch = ee_pitch_b.clone()
 
-        normal_mask = mode != _MODE_SCRIPTED
-        push_mask = normal_mask & (mode == _MODE_PUSH)
         if torch.any(normal_mask):
-            target_pos_env[normal_mask] = target_pos_env[normal_mask] + delta[normal_mask, 0:3]
-            target_yaw[normal_mask] = _wrap_to_pi(ee_yaw_b[normal_mask] + delta[normal_mask, 3])
-            target_pitch[normal_mask] = _wrap_to_pi(ee_pitch_b[normal_mask] + delta[normal_mask, 4])
+            target_pos_env[normal_mask] = (
+                target_pos_env[normal_mask] + delta[normal_mask, 0:3]
+            )
+            target_yaw[normal_mask] = _wrap_to_pi(
+                ee_yaw_b[normal_mask] + delta[normal_mask, 3]
+            )
+            target_pitch[normal_mask] = _wrap_to_pi(
+                ee_pitch_b[normal_mask] + delta[normal_mask, 4]
+            )
 
-        scripted_mask = mode == _MODE_SCRIPTED
+        push_target_lead = getattr(
+            self.cfg, "debug_nominal_push_max_target_lead_m", None
+        )
+        if push_target_lead is not None and torch.any(push_mask):
+            # Retain enough Cartesian error to push against contact, but never
+            # let an unreachable IK target accumulate far ahead of the arm.
+            lead_m = float(push_target_lead)
+            target_pos_env[push_mask, 0] = torch.minimum(
+                target_pos_env[push_mask, 0],
+                ee_tool_pos_env[push_mask, 0] + lead_m,
+            )
+            vertical_target_lead = getattr(
+                self.cfg,
+                "debug_nominal_push_max_vertical_target_lead_m",
+                None,
+            )
+            vertical_lead_m = (
+                lead_m
+                if vertical_target_lead is None
+                else float(vertical_target_lead)
+            )
+            target_pos_env[push_mask, 2] = torch.clamp(
+                target_pos_env[push_mask, 2],
+                min=ee_tool_pos_env[push_mask, 2] - vertical_lead_m,
+                max=ee_tool_pos_env[push_mask, 2] + vertical_lead_m,
+            )
+
+        if lock_push_y and torch.any(push_mask):
+            # PUSH is a straight line in the insertion plane. Latch the
+            # measured lateral coordinate once at PUSH entry and actively
+            # command it thereafter; a zero dy alone does not remove a stale
+            # lateral component from an integrated Cartesian target.
+            target_pos_env[push_mask, 1] = self._debug_nominal_push_line_y_env[
+                push_mask
+            ]
+
+            if bool(getattr(self.cfg, "debug_print_residual_components", False)):
+                interval = max(
+                    1, int(getattr(self.cfg, "debug_print_residual_interval", 30))
+                )
+                env_i = int(
+                    getattr(self.cfg, "debug_print_residual_env_index", 0)
+                )
+                if (
+                    0 <= env_i < self.num_envs
+                    and bool(push_mask[env_i].item())
+                    and int(self.common_step_counter) % interval == 0
+                ):
+                    print(
+                        "[XARM_PUSH_TARGET] "
+                        f"tool_xyz={ee_tool_pos_env[env_i].detach().cpu().tolist()} "
+                        f"target_xyz={target_pos_env[env_i].detach().cpu().tolist()} "
+                        "lateral_error_m="
+                        f"{float((ee_tool_pos_env[env_i, 1] - target_pos_env[env_i, 1]).item()):+.6f}",
+                        flush=True,
+                    )
+
+        if spine_tracking_enabled and torch.any(push_mask):
+            # Hold the measured book spine directly for the complete PUSH.
+            # This avoids an incremental Y correction oscillating around it.
+            target_pos_env[push_mask, 1] = book_pos_env[push_mask, 1]
+            paused = self._debug_nominal_push_tracking_paused
+            if torch.any(paused):
+                target_pos_env[paused, 0] = ee_tool_pos_env[paused, 0]
+                target_pos_env[paused, 2] = ee_tool_pos_env[paused, 2]
+
         if torch.any(scripted_mask):
             retreat_mask = scripted_mask & (self._script_step_buf >= int(self.cfg.script_open_steps))
-            if torch.any(retreat_mask):
+            if torch.any(retreat_mask) and not scripted_fixed_retreat:
                 target_pos_env[retreat_mask, 0] += float(self.cfg.script_retreat_dx)
                 target_pos_env[retreat_mask, 2] += float(self.cfg.script_retreat_dz)
+
+        if integrate_position_target:
+            self._debug_integrated_target_pos_env[:] = target_pos_env
 
         if bool(getattr(self.cfg, "debug_position_only_target_ee", False)):
             joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
                 target_pos_env, self._debug_position_only_ee_quat_b
+            )
+        elif bool(getattr(self.cfg, "debug_use_base_frame_quat_deltas", False)):
+            target_quat = ee_quat_b.clone()
+            if torch.any(normal_mask):
+                target_quat[normal_mask] = self._apply_base_frame_orientation_delta(
+                    ee_quat_b[normal_mask],
+                    delta[normal_mask, 3],
+                    delta[normal_mask, 4],
+                )
+            joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
+                target_pos_env,
+                target_quat,
             )
         elif bool(getattr(self.cfg, "debug_use_full_target_ee_quat", False)):
             _, full_target_quat = self._planned_tool_release_pose_quat()
@@ -1166,7 +3066,7 @@ class BookshelfEnv(BookshelfEnvV5):
 
         self.robot.set_joint_position_target(joint_pos_des, joint_ids=self._arm_joint_ids)
 
-        if len(self._finger_joint_ids) > 0:
+        if len(self._gripper_command_joint_ids) > 0:
             hold_width = float(self.cfg.gripper_closed_joint_pos)
             push_closed = float(getattr(self.cfg, "gripper_push_closed_joint_pos", 0.0))
             o = float(self.cfg.gripper_open_joint_pos)
@@ -1184,5 +3084,9 @@ class BookshelfEnv(BookshelfEnvV5):
                     torch.full((self.num_envs,), hold_width, device=self.device, dtype=torch.float32),
                 ),
             )
-            finger_des = finger_cmd.unsqueeze(-1).expand(self.num_envs, len(self._finger_joint_ids))
-            self.robot.set_joint_position_target(finger_des, joint_ids=self._finger_joint_ids)
+            finger_des = finger_cmd.unsqueeze(-1).expand(
+                self.num_envs, len(self._gripper_command_joint_ids)
+            )
+            self.robot.set_joint_position_target(
+                finger_des, joint_ids=self._gripper_command_joint_ids
+            )

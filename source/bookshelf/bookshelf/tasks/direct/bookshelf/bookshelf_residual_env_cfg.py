@@ -14,6 +14,7 @@ import math
 
 from isaaclab.utils import configclass
 
+from .bookshelf_env_cfg_v4 import BOOK_TRUE_GROUND_LOWEST_Z_THRESH
 from .bookshelf_env_cfg_v5 import BookshelfEnvCfg as BookshelfEnvCfgV5
 
 
@@ -40,6 +41,10 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     debug_spawn_with_curobo = False
     debug_spawn_ik_iters = 80
     debug_spawn_inside_fraction = 0.0
+    reset_to_slot_relative_tool_pose = False
+    reset_tool_offset_slot_xyz = (0.0, 0.0, 0.0)
+    reset_tool_quaternion_slot_wxyz = (1.0, 0.0, 0.0, 0.0)
+    reset_tool_ik_iters = 120
     debug_freeze_tool_to_book_transform = True
     debug_omit_bookshelf_obstacles = False
     debug_start_from_default_grasp_pose = False
@@ -56,8 +61,50 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
         "panda_finger_joint2": 0.03999943286180496,
     }
     debug_hold_book_fixed_to_tool = False
+    debug_snap_book_to_grasp_on_reset = False
+    debug_robot_target_pose_only = False
+    debug_spawn_book_with_collision_clearance = False
+    debug_spawn_book_panda_style = False
+    debug_robot_forward_backward_demo = False
+    debug_robot_forward_backward_distance_m = 0.05
+    debug_robot_forward_backward_wait_steps = 60
+    debug_robot_forward_backward_half_period_steps = 180
+    debug_robot_nominal_controller_demo = False
+    debug_robot_nominal_handoff_wait_steps = 60
+    debug_row_layout_y_offset_m = 0.0
+    debug_forced_missing_book_index_sequence = None
+    debug_robot_target_gripper_ramp_steps = 1
+    debug_robot_target_gripper_settle_steps = 0
+    debug_book_palm_clearance_m = 0.005
+    debug_book_min_finger_clearance_m = 0.001
+    debug_finger_inner_surface_offset_m = 0.0
+    debug_reachable_grasp_sequence = False
+    debug_reachable_grasp_preclose_joint_pos = None
+    debug_reachable_grasp_preclose_settle_steps = 30
+    debug_reachable_grasp_settle_steps = 60
     debug_use_full_target_ee_quat = False
+    debug_use_base_frame_quat_deltas = False
     debug_position_only_target_ee = False
+    debug_pose_ik_rotation_weight = None
+    debug_integrate_position_target_ee = False
+    debug_scripted_current_relative_target = False
+    debug_scripted_fixed_retreat_path = False
+    debug_scripted_fixed_retreat_total_dx = None
+    debug_nominal_push_current_relative_target = False
+    debug_nominal_push_reuse_insert_forward = False
+    debug_nominal_push_lower_before_forward = False
+    debug_nominal_push_align_to_book_center = False
+    debug_nominal_push_hold_y_only = False
+    debug_nominal_push_lock_y_to_entry = False
+    debug_nominal_push_max_target_lead_m = None
+    debug_nominal_push_max_vertical_target_lead_m = None
+    debug_nominal_push_tracking_pause_enabled = False
+    debug_nominal_push_tracking_pause_joint_error_rad = 0.12
+    debug_nominal_push_tracking_resume_joint_error_rad = 0.08
+    debug_nominal_push_spine_tracking_enabled = False
+    debug_nominal_push_spine_pause_lateral_error_m = 0.004
+    debug_nominal_push_spine_resume_lateral_error_m = 0.002
+    debug_nominal_push_spine_recovery_step_m = 0.002
     debug_use_lula_rrt_planner = False
     debug_use_curobo_planner = False
     debug_print_residual_components = False
@@ -67,12 +114,26 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     debug_rrt_max_iterations = 50000
     debug_rrt_interpolation_max_dist = 0.01
     debug_done_on_preinsert_reached = False
+    # Inspection only: keep a failed scene intact so grasp diagnostics can be
+    # read after the book falls. Normal training and evaluation still reset.
+    debug_disable_episode_resets = False
+    # Training-only reset filter. Diagnostic and evaluation entrypoints keep
+    # this disabled so their reported pass rates include every sampled grasp.
+    enable_reset_acceptance_gate = False
+    reset_acceptance_validation_steps = 12
+    reset_acceptance_max_attempts = 50
+    reset_acceptance_translation_limit_m = 0.003
+    reset_acceptance_rotation_limit_rad = math.radians(3.0)
+    reset_acceptance_arm_error_limit_rad = math.radians(8.0)
+    reset_acceptance_ground_height_m = BOOK_TRUE_GROUND_LOWEST_Z_THRESH
     debug_preinsert_hold_seconds = 1.0
     debug_preinsert_pos_tol = 0.010
     debug_preinsert_rot_tol = math.radians(10.0)
     show_target_book_marker = False
     show_target_ee_marker = False
     show_current_ee_marker = False
+    show_reachable_grasp_target_frame = False
+    reachable_grasp_target_frame_source = "slot_relative"
     target_ee_marker_axis_length = 0.20
     target_ee_marker_axis_thickness = 0.006
 

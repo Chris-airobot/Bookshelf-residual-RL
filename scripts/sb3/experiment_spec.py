@@ -97,12 +97,11 @@ def build_experiment_spec(
             "success_steps",
             "min_steps_before_success",
             "success_rear_to_mouth_min",
-            "success_rear_to_mouth_max",
-            "success_front_clear_min",
             "success_front_clear_max",
             "success_z_thresh",
             "success_yaw_thresh",
             "enable_failure_terminations",
+            "book_true_ground_lowest_z_thresh",
             "book_floor_lowest_z_thresh",
             "max_abs_xy",
             "fell_height_thresh",
@@ -328,9 +327,14 @@ def build_experiment_spec(
         },
         {
             "name": "drop_failure",
-            "what_it_means": "Book touches floor and is not supported on shelf.",
-            "how_computed": "lowest_corner_z < book_floor_lowest_z_thresh AND not on_shelf",
-            "params": {"book_floor_lowest_z_thresh": getattr(env_cfg, "book_floor_lowest_z_thresh", None)},
+            "what_it_means": "Held book reaches true ground, or a released book falls below the shelf deck.",
+            "how_computed": "not_on_shelf AND lowest_corner_z <= phase-specific drop threshold",
+            "params": {
+                "book_true_ground_lowest_z_thresh": getattr(
+                    env_cfg, "book_true_ground_lowest_z_thresh", None
+                ),
+                "book_floor_lowest_z_thresh": getattr(env_cfg, "book_floor_lowest_z_thresh", None),
+            },
             "unit": "bool",
             "source": "_get_dones",
         },

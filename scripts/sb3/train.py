@@ -56,6 +56,21 @@ parser.add_argument(
     help="Train at one fixed slot clearance and disable residual curricula/release assist.",
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--disable_reset_acceptance_gate",
+    action="store_true",
+    default=False,
+    help="Disable the xArm training-only randomized-grasp acceptance gate.",
+)
+parser.add_argument(
+    "--xarm_training_standoff_mm",
+    type=float,
+    default=30.0,
+    help=(
+        "Additional rearward xArm reset standoff in millimetres. The validated "
+        "training default is 30 mm; this does not change evaluation tools."
+    ),
+)
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument("--mlflow", action="store_true", default=False, help="Enable MLflow logging.")
 parser.add_argument("--mlflow_experiment", type=str, default="bookshelf-sb3", help="MLflow experiment name.")
@@ -292,6 +307,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
+    if args_cli.task == "Bookshelf-XArm7-Residual-Direct-v0":
+        standoff_mm = float(args_cli.xarm_training_standoff_mm)
+        if not np.isfinite(standoff_mm) or standoff_mm < 0.0:
+            raise ValueError(
+                "--xarm_training_standoff_mm must be finite and non-negative"
+            )
+        if not hasattr(env_cfg, "reset_tool_offset_slot_xyz"):
+            raise ValueError("xArm training task has no slot-relative reset pose")
+        standoff_m = 0.001 * standoff_mm
+        reset_offset = list(env_cfg.reset_tool_offset_slot_xyz)
+        reset_offset[0] -= standoff_m
+        env_cfg.reset_tool_offset_slot_xyz = tuple(reset_offset)
+        env_cfg.xarm_training_reset_standoff_m = standoff_m
+        print(
+            "[XARM_TRAINING_RESET] additional_standoff_mm="
+            f"{standoff_mm:.3f} reset_tool_offset_slot_xyz="
+            f"{env_cfg.reset_tool_offset_slot_xyz}",
+            flush=True,
+        )
+    if (
+        args_cli.task == "Bookshelf-XArm7-Residual-Direct-v0"
+        and hasattr(env_cfg, "enable_reset_acceptance_gate")
+    ):
+        env_cfg.enable_reset_acceptance_gate = not bool(
+            args_cli.disable_reset_acceptance_gate
+        )
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
     if args_cli.fixed_clearance is not None:
         if hasattr(env_cfg, "enable_residual_clearance_curriculum"):
