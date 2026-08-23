@@ -11,7 +11,6 @@ def test_policy_deployment_reuses_hardware_and_validates_approved_assets():
         '"approved_config"',
         "validate_shadow_rehearsal_assets",
         '"experiment_logging.launch.py"',
-        '"static_slot_environment_check.launch.py"',
         '"policy_hardware_shadow.launch.py"',
         '"start_live_detector": "false"',
         '"require_activation_envelope": "true"',
@@ -70,9 +69,32 @@ def test_policy_deployment_operations_are_simple_and_bounded():
     assert 'default_value="0.0"' in source
     assert "validate_maximum_total_translation_m" in source
     assert 'overrides["maximum_total_translation_m"]' in source
+    assert '"enforce_translation_budget"' in source
+    assert 'default_value="true"' in source
+    assert '"yield_when_control_disabled"' in source
+    assert 'LaunchConfiguration("yield_when_control_disabled")' in source
 
 
 def test_policy_deployment_has_one_slot_detector_owner():
     source = LAUNCH.read_text(encoding="utf-8")
-    assert source.count('"start_live_detector": "true"') == 1
+    assert '"static_slot_environment_check.launch.py"' not in source
+    assert source.count('"start_live_detector": "true"') == 0
     assert source.count('"start_live_detector": "false"') == 1
+
+
+def test_policy_deployment_uses_one_path_for_real_and_simulated_frames():
+    source = LAUNCH.read_text(encoding="utf-8")
+    for argument in (
+        '"base_frame"',
+        '"eef_frame"',
+        '"tcp_frame"',
+        '"target_book_frame"',
+        '"joint_states_topic"',
+        '"start_servo_service"',
+        '"servo_already_started"',
+        '"twist_command_topic"',
+        '"command_target_is_hardware"',
+    ):
+        assert argument in source
+    assert 'DeclareLaunchArgument("enable_logging"' in source
+    assert 'DeclareLaunchArgument("enable_policy_audit", default_value="false")' in source

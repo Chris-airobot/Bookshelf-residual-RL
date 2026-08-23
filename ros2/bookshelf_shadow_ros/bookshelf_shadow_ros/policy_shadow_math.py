@@ -24,6 +24,24 @@ POLICY_ACTION_LABELS = (
 MOTION_LABELS = ("dx", "dy", "dz", "dyaw", "dpitch")
 
 
+def release_requested_for_mode(
+    release_action: float,
+    mode_observation: float,
+    release_threshold: float,
+) -> bool:
+    """Interpret the learned release action only during INSERT mode."""
+
+    values = np.asarray(
+        [release_action, mode_observation, release_threshold], dtype=np.float64
+    )
+    if not np.all(np.isfinite(values)):
+        raise ValueError("release action, mode, and threshold must be finite")
+    return bool(
+        math.isclose(float(mode_observation), 0.0, abs_tol=1.0e-4)
+        and float(release_action) > float(release_threshold)
+    )
+
+
 @dataclass(frozen=True)
 class ResidualMotionConfig:
     action_scales: tuple[float, ...] = (
@@ -62,6 +80,21 @@ class NominalInsertConfig:
     dyaw_limit: float = math.radians(0.35)
     dpitch_limit: float = math.radians(0.25)
     slow_rear_to_mouth: float = -0.035
+
+
+@dataclass(frozen=True)
+class NominalPushConfig:
+    push_dx: float = 0.0008
+    lateral_gain: float = 0.35
+    height_gain: float = 0.30
+    yaw_gain: float = 0.20
+    pitch_gain: float = 0.08
+    push_z_fraction_from_bottom: float = 0.20
+    book_size: tuple[float, float, float] = (0.156, 0.034, 0.236)
+    dy_limit: float = 0.0005
+    dz_limit: float = 0.0010
+    dyaw_limit: float = math.radians(0.35)
+    dpitch_limit: float = math.radians(0.25)
 
 
 def _vector(value, expected_size: int, name: str) -> np.ndarray:
@@ -167,6 +200,102 @@ def compute_insert_nominal_delta(
         dtype=np.float32,
     )
     return delta
+
+
+def _book_vertical_half_extent(raw: np.ndarray, book_size) -> float:
+    """Recover the oriented book's vertical half-extent from the 12D metrics."""
+
+    depth, thickness, height = _vector(book_size, 3, "book_size")
+    yaw = float(raw[5])
+    up_x = float(raw[10])
+    up_y = float(raw[11])
+    up_horizontal_sq = up_x * up_x + up_y * up_y
+    if up_horizontal_sq > 1.0 + 1.0e-5:
+        raise ValueError("book up-axis components are inconsistent")
+    up_z = math.sqrt(max(1.0 - up_horizontal_sq, 0.0))
+    up = np.array([up_x, up_y, up_z], dtype=np.float64)
+
+    horizontal_depth = np.array([math.cos(yaw), math.sin(yaw)], dtype=np.float64)
+    projection = float(np.dot(horizontal_depth, up[:2]))
+    denominator = math.sqrt(up_z * up_z + projection * projection)
+    if denominator <= 1.0e-8:
+        raise ValueError("book orientation cannot recover a depth axis")
+    depth_axis = np.array(
+        [
+            horizontal_depth[0] * up_z / denominator,
+            horizontal_depth[1] * up_z / denominator,
+            -projection / denominator,
+        ],
+        dtype=np.float64,
+    )
+    thickness_axis = np.cross(up, depth_axis)
+    return 0.5 * float(
+        depth * abs(depth_axis[2])
+        + thickness * abs(thickness_axis[2])
+        + height * abs(up[2])
+    )
+
+
+def compute_push_nominal_delta(
+    raw_metrics,
+    config: NominalPushConfig = NominalPushConfig(),
+) -> np.ndarray:
+    """Reproduce the simulator's nominal PUSH controller from raw 12D metrics."""
+
+    raw = _vector(raw_metrics, POLICY_OBSERVATION_SIZE, "raw_metrics")
+    mode_observation = float(raw[0])
+    if not math.isclose(mode_observation, 1.0, abs_tol=1.0e-4):
+        raise ValueError(
+            "Nominal push diagnostics require PUSH mode "
+            f"(mode observation 1.0), got {mode_observation:.4f}."
+        )
+
+    lat_err = float(raw[3])
+    yaw_err = float(raw[5])
+    tool_to_book_y = float(raw[7])
+    tool_to_book_z = float(raw[8])
+    tilt_x = float(raw[10])
+    vertical_half_extent = _book_vertical_half_extent(raw, config.book_size)
+    desired_tool_z_from_book = (
+        2.0 * config.push_z_fraction_from_bottom - 1.0
+    ) * vertical_half_extent
+
+    return np.array(
+        [
+            config.push_dx,
+            np.clip(
+                config.lateral_gain * (lat_err - tool_to_book_y),
+                -config.dy_limit,
+                config.dy_limit,
+            ),
+            np.clip(
+                config.height_gain * (desired_tool_z_from_book - tool_to_book_z),
+                -config.dz_limit,
+                config.dz_limit,
+            ),
+            np.clip(-config.yaw_gain * yaw_err, -config.dyaw_limit, config.dyaw_limit),
+            np.clip(-config.pitch_gain * tilt_x, -config.dpitch_limit, config.dpitch_limit),
+        ],
+        dtype=np.float32,
+    )
+
+
+def compute_policy_nominal_delta(
+    raw_metrics,
+    insert_config: NominalInsertConfig = NominalInsertConfig(),
+    push_config: NominalPushConfig = NominalPushConfig(),
+) -> np.ndarray:
+    """Dispatch nominal motion using the simulator's INSERT/SCRIPTED/PUSH mode."""
+
+    raw = _vector(raw_metrics, POLICY_OBSERVATION_SIZE, "raw_metrics")
+    mode_observation = float(raw[0])
+    if math.isclose(mode_observation, 0.0, abs_tol=1.0e-4):
+        return compute_insert_nominal_delta(raw, insert_config)
+    if math.isclose(mode_observation, 0.5, abs_tol=1.0e-4):
+        return np.zeros(MOTION_ACTION_SIZE, dtype=np.float32)
+    if math.isclose(mode_observation, 1.0, abs_tol=1.0e-4):
+        return compute_push_nominal_delta(raw, push_config)
+    raise ValueError(f"unsupported policy mode observation {mode_observation:.4f}")
 
 
 def scale_residual_action(

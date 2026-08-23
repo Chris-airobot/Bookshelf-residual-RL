@@ -245,6 +245,10 @@ def test_provenance_rejects_unverified_candidate_and_release():
     assert "release" in provenance_error(
         adapter, policy, allow_unverified_policy_tool=True, **common
     )
+    adapter["mode"] = "push"
+    assert provenance_error(
+        adapter, policy, allow_unverified_policy_tool=True, **common
+    ) is None
 
 
 def test_execution_requires_every_gate_and_consumable_token():

@@ -28,7 +28,7 @@ def validate_maximum_total_translation_m(value) -> float:
 
 
 class SupervisedTranslationBudget:
-    """Latch once accepted Cartesian target lengths consume a fixed budget."""
+    """Latch once measured Cartesian travel reaches a fixed budget."""
 
     def __init__(self, maximum_total_translation_m):
         self.maximum_m = validate_maximum_total_translation_m(
@@ -36,33 +36,39 @@ class SupervisedTranslationBudget:
         )
         self.total_m = 0.0
         self.terminal_reason = None
+        self._last_position = None
 
     @property
     def exhausted(self) -> bool:
         return self.total_m >= self.maximum_m
 
-    def accept_target(self, translation_m: float) -> str | None:
-        """Charge one target or latch before it would exceed the budget."""
+    @property
+    def remaining_m(self) -> float:
+        return max(self.maximum_m - self.total_m, 0.0)
+
+    def observe_position(self, position_xyz) -> str | None:
+        """Accumulate measured path length from consecutive TCP positions."""
 
         if self.terminal_reason is not None:
             return self.terminal_reason
-        translation_m = float(translation_m)
-        if not math.isfinite(translation_m) or translation_m < 0.0:
-            raise ValueError(
-                "commanded target translation must be finite and non-negative"
-            )
-        if self.exhausted or self.total_m + translation_m > self.maximum_m:
-            self.terminal_reason = MAXIMUM_SUPERVISED_TRANSLATION_REASON
-            return self.terminal_reason
-        self.total_m += translation_m
-        return None
 
-    def finish_at_limit(self) -> str | None:
-        """Latch after the final target that exactly consumed the budget."""
+        position = np.asarray(position_xyz, dtype=np.float64)
+        if position.shape != (3,) or not np.all(np.isfinite(position)):
+            raise ValueError("measured TCP position must contain three finite values")
+        if self._last_position is None:
+            self._last_position = position.copy()
+            return None
 
+        self.total_m += float(np.linalg.norm(position - self._last_position))
+        self._last_position = position.copy()
         if self.exhausted:
             self.terminal_reason = MAXIMUM_SUPERVISED_TRANSLATION_REASON
         return self.terminal_reason
+
+    def reset_measurement_baseline(self) -> None:
+        """Start a new measurement segment without clearing accumulated travel."""
+
+        self._last_position = None
 
 
 def eef_target_from_tcp_target(target_base_tcp, transform_eef_tcp) -> np.ndarray:

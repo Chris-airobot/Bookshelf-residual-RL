@@ -11,8 +11,9 @@ import numpy as np
 import rclpy
 from rclpy.duration import Duration
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
-from std_msgs.msg import Bool, Float32MultiArray, String
+from std_msgs.msg import Bool, Float32MultiArray, Int8, String
 from std_srvs.srv import Trigger
 import tf2_ros
 
@@ -30,6 +31,18 @@ from .policy_tool_control_math import (
     target_safety_error,
     transform_to_dict,
 )
+
+
+SERVO_STATUS_NAMES = {
+    -1: "invalid",
+    0: "no warnings",
+    1: "approaching singularity; decelerating",
+    2: "singularity; halted",
+    3: "approaching collision; decelerating",
+    4: "collision; halted",
+    5: "joint bound; halted",
+    6: "leaving singularity; decelerating",
+}
 
 
 def _pose_to_transform(pose) -> np.ndarray:
@@ -69,6 +82,26 @@ class DirectPolicyServo(Node):
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.eef_frame = str(self.get_parameter("eef_frame").value)
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
+        self.enforce_translation_budget = bool(
+            self.get_parameter("enforce_translation_budget").value
+        )
+        command_target_is_hardware = bool(
+            self.get_parameter("command_target_is_hardware").value
+        )
+        servo_already_started = bool(
+            self.get_parameter("servo_already_started").value
+        )
+        if (
+            command_target_is_hardware
+            and not self.enforce_translation_budget
+        ):
+            raise ValueError(
+                "enforce_translation_budget=false is allowed only for fake hardware"
+            )
+        if command_target_is_hardware and servo_already_started:
+            raise ValueError(
+                "servo_already_started=true is allowed only for fake hardware"
+            )
         self.translation_budget = SupervisedTranslationBudget(
             self.get_parameter("maximum_total_translation_m").value
         )
@@ -95,8 +128,20 @@ class DirectPolicyServo(Node):
         self.latest_adapter_debug_ns = None
         self.latest_policy_debug = None
         self.latest_policy_debug_ns = None
+        self.latest_servo_status = None
+        self.require_control_enable = bool(
+            self.get_parameter("require_control_enable").value
+        )
+        self.yield_when_control_disabled = bool(
+            self.get_parameter("yield_when_control_disabled").value
+        )
+        self.control_enabled = not self.require_control_enable
 
-        self.servo_state = "start_needed"
+        self.servo_state = (
+            "ready"
+            if servo_already_started
+            else "start_needed"
+        )
         self.start_request_pending = False
         self.last_prepared_generation = 0
         self.active_target = None
@@ -152,6 +197,23 @@ class DirectPolicyServo(Node):
             self._policy_debug_callback,
             10,
         )
+        self.create_subscription(
+            Int8,
+            str(self.get_parameter("servo_status_topic").value),
+            self._servo_status_callback,
+            10,
+        )
+        enable_qos = QoSProfile(
+            depth=1,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.create_subscription(
+            Bool,
+            str(self.get_parameter("control_enable_topic").value),
+            self._control_enable_callback,
+            enable_qos,
+        )
 
         rate = max(float(self.get_parameter("control_rate_hz").value), 1.0)
         self.timer = self.create_timer(1.0 / rate, self._timer_callback)
@@ -168,6 +230,7 @@ class DirectPolicyServo(Node):
         self.declare_parameter(
             "start_servo_service", "/servo_server/start_servo"
         )
+        self.declare_parameter("servo_already_started", False)
         self.declare_parameter(
             "twist_command_topic", "/servo_server/delta_twist_cmds"
         )
@@ -183,6 +246,12 @@ class DirectPolicyServo(Node):
         self.declare_parameter("command_scale", 1.0)
         self.declare_parameter("command_target_is_hardware", True)
         self.declare_parameter("maximum_total_translation_m", 0.0)
+        self.declare_parameter("enforce_translation_budget", True)
+        self.declare_parameter("require_control_enable", False)
+        self.declare_parameter("yield_when_control_disabled", False)
+        self.declare_parameter(
+            "control_enable_topic", "/bookshelf_control/enable"
+        )
 
         self.declare_parameter("eef_tcp_translation_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter(
@@ -230,6 +299,7 @@ class DirectPolicyServo(Node):
         )
         self.declare_parameter("adapter_debug_topic", "/bookshelf_policy/adapter_debug")
         self.declare_parameter("policy_debug_topic", "/bookshelf_shadow/policy_debug")
+        self.declare_parameter("servo_status_topic", "/servo_server/status")
         self.declare_parameter("command_valid_topic", "/bookshelf_control/command_valid")
         self.declare_parameter("status_topic", "/bookshelf_control/status")
         self.declare_parameter("target_tcp_topic", "/bookshelf_control/target_tcp")
@@ -262,6 +332,24 @@ class DirectPolicyServo(Node):
         self.latest_policy_debug = self._parse_debug(message.data)
         self.latest_policy_debug_ns = self._now_ns()
 
+    def _servo_status_callback(self, message: Int8):
+        self.latest_servo_status = int(message.data)
+
+    def _control_enable_callback(self, message: Bool):
+        if self.require_control_enable:
+            was_enabled = self.control_enabled
+            self.control_enabled = bool(message.data)
+            if was_enabled and not self.control_enabled:
+                self.active_target = None
+                self.active_target_eef = None
+                if self.servo_state == "ready":
+                    self._publish_zero_twist()
+            elif not was_enabled and self.control_enabled:
+                # Retreat is commanded by the episode coordinator while policy
+                # control is disabled. Do not charge that external displacement
+                # to the policy's cumulative translation budget on resume.
+                self.translation_budget.reset_measurement_baseline()
+
     @staticmethod
     def _parse_debug(value: str):
         try:
@@ -279,7 +367,12 @@ class DirectPolicyServo(Node):
         return (self._now_ns() - timestamp_ns) * 1.0e-9 <= maximum_age_s
 
     def _input_error(self) -> str | None:
-        if self.translation_budget.terminal_reason is not None:
+        if not self.control_enabled:
+            return "control enable is false"
+        if (
+            self.enforce_translation_budget
+            and self.translation_budget.terminal_reason is not None
+        ):
             return self.translation_budget.terminal_reason
         if not self.latest_observation_valid:
             return "observation_valid is false"
@@ -418,7 +511,11 @@ class DirectPolicyServo(Node):
     def _timer_callback(self):
         error = self._input_error()
         if error:
-            self._clear_target_and_halt()
+            if error == "control enable is false" and self.yield_when_control_disabled:
+                self.active_target = None
+                self.active_target_eef = None
+            else:
+                self._clear_target_and_halt()
             self._publish_status(False, error)
             return
 
@@ -429,6 +526,21 @@ class DirectPolicyServo(Node):
             return
         transform_eef_tcp = self._eef_tcp_transform()
         transform_base_tcp = transform_base_eef @ transform_eef_tcp
+        terminal_reason = None
+        if self.enforce_translation_budget:
+            try:
+                terminal_reason = self.translation_budget.observe_position(
+                    transform_base_tcp[:3, 3]
+                )
+            except ValueError as error:
+                self._clear_target_and_halt()
+                self._publish_status(False, str(error))
+                return
+        if terminal_reason is not None:
+            self._clear_target_and_halt()
+            self._publish_status(False, terminal_reason)
+            return
+
         target = self.active_target
         prepared_new_target = False
         if (
@@ -465,18 +577,6 @@ class DirectPolicyServo(Node):
             return
 
         if prepared_new_target:
-            try:
-                terminal_reason = self.translation_budget.accept_target(
-                    target.tcp_translation_step_m
-                )
-            except ValueError as error:
-                self._clear_target_and_halt()
-                self._publish_status(False, str(error), target=target)
-                return
-            if terminal_reason is not None:
-                self._clear_target_and_halt()
-                self._publish_status(False, terminal_reason, target=target)
-                return
             self.active_target = target
             self.active_target_eef = eef_target_from_tcp_target(
                 target.transform_base_tcp_target,
@@ -518,11 +618,15 @@ class DirectPolicyServo(Node):
         if float(np.linalg.norm(twist)) == 0.0:
             self.active_target_eef = None
             self._publish_zero_twist()
-            terminal_reason = self.translation_budget.finish_at_limit()
-            if terminal_reason is not None:
-                self._publish_status(False, terminal_reason, target=self.active_target)
-                return
         else:
+            linear_speed = float(np.linalg.norm(twist[:3]))
+            if self.enforce_translation_budget:
+                maximum_next_cycle_speed = (
+                    self.translation_budget.remaining_m
+                    * max(float(self.get_parameter("control_rate_hz").value), 1.0)
+                )
+                if linear_speed > maximum_next_cycle_speed:
+                    twist[:3] *= maximum_next_cycle_speed / linear_speed
             self._publish_twist(twist)
             if bool(self.get_parameter("command_target_is_hardware").value):
                 self.hardware_commanded = True
@@ -568,9 +672,34 @@ class DirectPolicyServo(Node):
             "tcp_frame": self.tcp_frame,
             "servo_state": self.servo_state,
             "command_scale": float(self.get_parameter("command_scale").value),
-            "maximum_total_translation_m": self.translation_budget.maximum_m,
-            "total_commanded_translation_m": self.translation_budget.total_m,
-            "terminal_reason": self.translation_budget.terminal_reason,
+            "translation_budget_enforced": self.enforce_translation_budget,
+            "maximum_total_translation_m": (
+                self.translation_budget.maximum_m
+                if self.enforce_translation_budget
+                else None
+            ),
+            "total_measured_translation_m": (
+                self.translation_budget.total_m
+                if self.enforce_translation_budget
+                else None
+            ),
+            "remaining_supervised_translation_m": (
+                self.translation_budget.remaining_m
+                if self.enforce_translation_budget
+                else None
+            ),
+            "terminal_reason": (
+                self.translation_budget.terminal_reason
+                if self.enforce_translation_budget
+                else None
+            ),
+            "control_enabled": self.control_enabled,
+            "control_enable_required": self.require_control_enable,
+            "yield_when_control_disabled": self.yield_when_control_disabled,
+            "moveit_servo_status_code": self.latest_servo_status,
+            "moveit_servo_status": SERVO_STATUS_NAMES.get(
+                self.latest_servo_status, "not received"
+            ),
             "target_active": self.active_target_eef is not None,
             "start_request_pending": self.start_request_pending,
             "command_count": self.command_count,

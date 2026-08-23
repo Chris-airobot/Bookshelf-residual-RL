@@ -8,8 +8,13 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import atexit
 import json
 import math
+import select
+import sys
+import termios
+import tty
 
 from isaaclab.app import AppLauncher
 
@@ -95,6 +100,43 @@ parser.add_argument(
         "Spawn and hold only the xArm at its configured target joint pose; "
         "remove the book and bookshelf and bypass IK, policy, and grasp logic."
     ),
+)
+parser.add_argument(
+    "--xarm_action_probe",
+    nargs=7,
+    type=float,
+    metavar=("DX", "DY", "DZ", "BASE_Z", "BASE_X", "BASE_Y", "RELEASE"),
+    help=(
+        "Apply one complete normalized xArm policy action vector while the "
+        "nominal controller is frozen. Components must be in [-1, 1]."
+    ),
+)
+parser.add_argument(
+    "--xarm_keyboard_action_probe",
+    action="store_true",
+    default=False,
+    help=(
+        "Interactively command xArm residual axes with keys 1-6; shifted "
+        "keys command negative directions, and key 7 requests release."
+    ),
+)
+parser.add_argument(
+    "--xarm_action_probe_steps",
+    type=int,
+    default=30,
+    help="Control steps for which --xarm_action_probe is held; default 30.",
+)
+parser.add_argument(
+    "--xarm_action_probe_wait_steps",
+    type=int,
+    default=120,
+    help="Settling steps before the xArm action probe starts; default 120.",
+)
+parser.add_argument(
+    "--xarm_action_probe_observe_steps",
+    type=int,
+    default=180,
+    help="Zero-action settling steps after the xArm action probe; default 180.",
 )
 parser.add_argument(
     "--xarm_grasp_hold_gap_mm",
@@ -308,6 +350,67 @@ def _episode_result(metrics: dict, episode: int, terminated, truncated) -> dict:
     return result
 
 
+def _xarm_action_probe_result(start: dict, final: dict) -> dict:
+    """Summarize one keyboard command using measured EE and book poses."""
+
+    def pose_change(position_key: str, quaternion_key: str) -> dict:
+        start_pos = start[position_key]
+        final_pos = final[position_key]
+        translation = [float(b - a) for a, b in zip(start_pos, final_pos)]
+        start_quat = start[quaternion_key]
+        final_quat = final[quaternion_key]
+        quat_dot = abs(sum(a * b for a, b in zip(start_quat, final_quat)))
+        quat_dot = min(1.0, max(-1.0, quat_dot))
+        return {
+            "before_position_xyz_m": start_pos,
+            "after_position_xyz_m": final_pos,
+            "translation_xyz_m": translation,
+            "translation_norm_m": math.sqrt(sum(v * v for v in translation)),
+            "before_quaternion_wxyz": start_quat,
+            "after_quaternion_wxyz": final_quat,
+            "rotation_deg": math.degrees(2.0 * math.acos(quat_dot)),
+        }
+
+    return {
+        "end_effector": pose_change(
+            "tool_position_env_m",
+            "tool_quaternion_wxyz",
+        ),
+        "book": pose_change(
+            "book_position_env_m",
+            "book_quaternion_wxyz",
+        ),
+        "final_arm_max_target_error_rad": final.get("arm_max_target_error_rad"),
+    }
+
+
+class _TerminalKeyReader:
+    """Read individual terminal keys without blocking the simulator."""
+
+    def __init__(self):
+        if not sys.stdin.isatty():
+            raise RuntimeError(
+                "--xarm_keyboard_action_probe requires an interactive terminal"
+            )
+        self._fd = sys.stdin.fileno()
+        self._settings = termios.tcgetattr(self._fd)
+        self._closed = False
+        tty.setcbreak(self._fd)
+        atexit.register(self.close)
+
+    def read_available(self) -> list[str]:
+        keys = []
+        while select.select([sys.stdin], [], [], 0.0)[0]:
+            keys.append(sys.stdin.read(1))
+        return keys
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        termios.tcsetattr(self._fd, termios.TCSADRAIN, self._settings)
+        self._closed = True
+
+
 def main():
     """Zero actions agent with Isaac Lab environment."""
     # parse configuration
@@ -320,6 +423,10 @@ def main():
         raise ValueError(
             "--all_missing_indices and --missing_index cannot be used together"
         )
+    action_probe_requested = (
+        args_cli.xarm_action_probe is not None
+        or args_cli.xarm_keyboard_action_probe
+    )
     selected_xarm_demos = sum(
         bool(value)
         for value in (
@@ -328,6 +435,7 @@ def main():
             args_cli.xarm_panda_reset_grasp_demo,
             args_cli.xarm_forward_backward_demo,
             args_cli.xarm_nominal_controller_demo,
+            action_probe_requested,
         )
     )
     if selected_xarm_demos > 1:
@@ -335,7 +443,8 @@ def main():
             "--xarm_target_pose_demo, --xarm_reachable_grasp_demo, "
             "--xarm_panda_reset_grasp_demo, and "
             "--xarm_forward_backward_demo, and "
-            "--xarm_nominal_controller_demo are mutually exclusive"
+            "--xarm_nominal_controller_demo, and "
+            "--xarm_action_probe/--xarm_keyboard_action_probe are mutually exclusive"
         )
     if (
         args_cli.xarm_grasp_hold_gap_mm is not None
@@ -358,6 +467,96 @@ def main():
         raise ValueError(
             "--xarm_shelf_closer_mm requires an xArm demo with the bookshelf"
         )
+    if action_probe_requested:
+        if args_cli.xarm_action_probe is not None:
+            if any(not math.isfinite(value) for value in args_cli.xarm_action_probe):
+                raise ValueError("--xarm_action_probe values must be finite")
+            if any(abs(value) > 1.0 for value in args_cli.xarm_action_probe):
+                raise ValueError("--xarm_action_probe values must be within [-1, 1]")
+        if args_cli.xarm_action_probe_steps <= 0:
+            raise ValueError("--xarm_action_probe_steps must be positive")
+        if args_cli.xarm_action_probe_wait_steps < 0:
+            raise ValueError("--xarm_action_probe_wait_steps must be non-negative")
+        if args_cli.xarm_action_probe_observe_steps <= 0:
+            raise ValueError("--xarm_action_probe_observe_steps must be positive")
+        if not hasattr(env_cfg, "debug_pose_ik_rotation_weight"):
+            raise ValueError("--xarm_action_probe requires a residual bookshelf task")
+
+        env_cfg.scene.num_envs = 1
+        env_cfg.enable_residual_reset_curriculum = False
+        env_cfg.enable_residual_action_scale_curriculum = False
+        env_cfg.reset_arm_joint_pos_noise = 0.0
+        env_cfg.book_grasp_x_jitter = 0.0
+        env_cfg.book_grasp_y_jitter = 0.0
+        env_cfg.book_grasp_z_jitter = 0.0
+        env_cfg.book_grasp_yaw_jitter = 0.0
+        env_cfg.book_grasp_translation_jitter_min = (0.0, 0.0, 0.0)
+        env_cfg.book_grasp_translation_jitter_max = (0.0, 0.0, 0.0)
+        env_cfg.debug_freeze_nominal_controller = True
+        env_cfg.debug_disable_episode_resets = True
+        # Use the normal dynamic xArm grasp in the complete bookshelf scene:
+        # support the book during gripper settling, then let physics take over.
+        # Never teleport the book along with the tool during motion.
+        env_cfg.debug_hold_book_fixed_to_tool = False
+        env_cfg.debug_omit_target_book = False
+        env_cfg.debug_omit_bookshelf_obstacles = False
+        env_cfg.debug_use_full_target_ee_quat = False
+        # Explicit base-frame quaternion axes remain independent at the
+        # xArm's near-vertical wrist orientation: key 4 is Z and key 5 is X.
+        env_cfg.debug_use_base_frame_quat_deltas = True
+        env_cfg.debug_action5_as_base_x = True
+        env_cfg.debug_position_only_target_ee = False
+        env_cfg.debug_pose_ik_rotation_weight = None
+        # A key pulse represents a retained Cartesian displacement. Advance
+        # that target once per control step and keep the other pose components
+        # fixed while the arm converges.
+        env_cfg.debug_integrate_position_target_ee = True
+        env_cfg.show_robot_base_reference_marker = False
+        env_cfg.show_target_book_marker = False
+        env_cfg.show_reachable_grasp_target_frame = False
+        env_cfg.show_current_ee_marker = True
+        env_cfg.show_target_ee_marker = True
+        env_cfg.target_ee_marker_source = "controller_target"
+        # Keyboard output is event-based: one key line and one before/after
+        # result. Periodic full grasp dumps make that impossible to read.
+        args_cli.debug_grasp_interval = 0
+
+        if args_cli.xarm_action_probe is not None:
+            probe_action = [float(value) for value in args_cli.xarm_action_probe]
+            per_step_physical = [
+                probe_action[0] * float(env_cfg.dx_action_scale),
+                probe_action[1] * float(env_cfg.dy_action_scale),
+                probe_action[2] * float(env_cfg.dz_action_scale),
+                math.degrees(probe_action[3] * float(env_cfg.dyaw_action_scale)),
+                math.degrees(probe_action[4] * float(env_cfg.dpitch_action_scale)),
+                math.degrees(
+                    probe_action[5]
+                    * float(env_cfg.dbase_y_rotation_action_scale)
+                ),
+                probe_action[6],
+            ]
+            print(
+                "[XARM_ACTION_PROBE] nominal controller frozen; normalized="
+                f"{probe_action}; per_step=[dx={per_step_physical[0]:+.6f}m, "
+                f"dy={per_step_physical[1]:+.6f}m, "
+                f"dz={per_step_physical[2]:+.6f}m, "
+                f"dyaw={per_step_physical[3]:+.6f}deg, "
+                f"dpitch={per_step_physical[4]:+.6f}deg, "
+                f"dbase_y={per_step_physical[5]:+.6f}deg, "
+                f"release={per_step_physical[6]:+.3f}]; "
+                f"hold_steps={args_cli.xarm_action_probe_steps}",
+                flush=True,
+            )
+        else:
+            print(
+                "[XARM_KEYBOARD_ACTION] controls: "
+                "1=+X !=-X 2=+Y @=-Y 3=+Z #=-Z "
+                "4=+base-Z $=-base-Z 5=+base-X %=-base-X "
+                "6=+base-Y ^=-base-Y 7=release/open (use last); "
+                "0=stop p=print pose q=quit; "
+                f"pulse_steps={args_cli.xarm_action_probe_steps}",
+                flush=True,
+            )
     if args_cli.xarm_target_pose_demo:
         required = (
             "reset_to_slot_relative_tool_pose",
@@ -559,8 +758,8 @@ def main():
             env_cfg.debug_robot_target_gripper_settle_steps = 10
             print(
                 "[XARM_PANDA_RESET_GRASP_DEMO] The xArm is spawned at the "
-                "verified target pose; the book is snapped to the measured "
-                "finger midpoint using the Panda reset convention.",
+                "verified target pose; the book is placed from the configured "
+                "grasp calibration before support is released.",
                 flush=True,
             )
             print(
@@ -628,13 +827,9 @@ def main():
                 env_cfg.debug_use_full_target_ee_quat = False
                 env_cfg.debug_use_base_frame_quat_deltas = False
                 env_cfg.debug_position_only_target_ee = True
-                # Solve at the offset xArm tool point instead of assuming the
-                # 172 mm link7-to-tool offset follows wrist rotation exactly.
-                env_cfg.debug_pose_ik_rotation_weight = 1.0
-                # Retain the working Cartesian INSERT and fixed-retreat paths.
-                # PUSH retains a bounded Cartesian target so the arm has enough
-                # error to move under load without allowing target runaway.
-                env_cfg.debug_integrate_position_target_ee = True
+                # Use the same measured-pose-relative DLS IK path as Panda.
+                env_cfg.debug_pose_ik_rotation_weight = None
+                env_cfg.debug_integrate_position_target_ee = False
                 env_cfg.debug_scripted_current_relative_target = False
                 env_cfg.debug_scripted_fixed_retreat_path = True
                 env_cfg.debug_scripted_fixed_retreat_total_dx = (
@@ -776,6 +971,12 @@ def main():
     # create environment
     env = gym.make(args_cli.task, cfg=env_cfg)
 
+    if action_probe_requested and int(env.action_space.shape[-1]) != 7:
+        raise ValueError(
+            "xArm action probes require six Cartesian actions plus release; "
+            f"got action shape {env.action_space.shape}"
+        )
+
     # print info (this is vectorized environment)
     print(f"[INFO]: Gym observation space: {env.observation_space}")
     print(f"[INFO]: Gym action space: {env.action_space}")
@@ -783,6 +984,17 @@ def main():
     env.reset()
     step_count = 0
     completed_episodes = 0
+    action_probe_start = None
+    action_probe_finished = False
+    keyboard_reader = None
+    keyboard_action = torch.zeros(7, device=env.unwrapped.device)
+    keyboard_action_label = ""
+    keyboard_action_steps_left = 0
+    keyboard_observe_steps_left = 0
+    keyboard_probe_start = None
+    keyboard_ready_printed = False
+    if args_cli.xarm_keyboard_action_probe:
+        keyboard_reader = _TerminalKeyReader()
     if args_cli.debug_grasp_interval > 0:
         print(
             "[GRASP_DEBUG] "
@@ -795,9 +1007,176 @@ def main():
         with torch.inference_mode():
             # compute zero actions
             actions = torch.zeros(env.action_space.shape, device=env.unwrapped.device)
+            if args_cli.xarm_keyboard_action_probe:
+                if step_count >= int(args_cli.xarm_action_probe_wait_steps):
+                    if not keyboard_ready_printed:
+                        env.unwrapped.debug_hold_current_robot_pose(env_index=0)
+                        print(
+                            "[XARM_KEYBOARD_READY] press 1-7; Shift reverses "
+                            "directions 1-6; use 7 last",
+                            flush=True,
+                        )
+                        keyboard_ready_printed = True
+
+                    key_actions = {
+                        "1": ("+X", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+                        "!": ("-X", (-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+                        "2": ("+Y", (0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+                        "@": ("-Y", (0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+                        "3": ("+Z", (0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0)),
+                        "#": ("-Z", (0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0)),
+                        "4": ("+base-Z", (0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)),
+                        "$": ("-base-Z", (0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0)),
+                        "5": ("+base-X", (0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)),
+                        "%": ("-base-X", (0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0)),
+                        "6": ("+base-Y", (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)),
+                        "^": ("-base-Y", (0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0)),
+                        "7": ("release/open", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)),
+                    }
+                    quit_requested = False
+                    for key in keyboard_reader.read_available():
+                        if key == "q":
+                            quit_requested = True
+                            break
+                        if key == "p":
+                            print(
+                                "[XARM_KEYBOARD_POSE] "
+                                + json.dumps(
+                                    env.unwrapped.debug_grasp_snapshot(env_index=0),
+                                    sort_keys=True,
+                                ),
+                                flush=True,
+                            )
+                            continue
+                        if key == "0" or key == " ":
+                            keyboard_action_steps_left = 0
+                            keyboard_observe_steps_left = 0
+                            keyboard_probe_start = None
+                            held_pose = env.unwrapped.debug_hold_current_robot_pose(
+                                env_index=0
+                            )
+                            print(
+                                "[XARM_KEYBOARD_ACTION] stopped at measured pose "
+                                f"tool_xyz={held_pose['tool_position_env_m']}",
+                                flush=True,
+                            )
+                            continue
+                        if key not in key_actions:
+                            continue
+                        if keyboard_action_steps_left > 0:
+                            print(
+                                f"[XARM_KEYBOARD_ACTION] key={key!r} ignored; "
+                                "the short command pulse is still active",
+                                flush=True,
+                            )
+                            continue
+                        if keyboard_probe_start is not None:
+                            keyboard_probe_final = (
+                                env.unwrapped.debug_grasp_snapshot(env_index=0)
+                            )
+                            result = _xarm_action_probe_result(
+                                keyboard_probe_start,
+                                keyboard_probe_final,
+                            )
+                            result["command"] = keyboard_action_label
+                            print(
+                                "[XARM_KEYBOARD_RESULT] "
+                                + json.dumps(result, sort_keys=True),
+                                flush=True,
+                            )
+                            keyboard_probe_start = None
+                            keyboard_observe_steps_left = 0
+                        keyboard_action_label, values = key_actions[key]
+                        keyboard_probe_start = (
+                            env.unwrapped.debug_grasp_snapshot(env_index=0)
+                        )
+                        keyboard_action = torch.tensor(
+                            values,
+                            device=env.unwrapped.device,
+                            dtype=actions.dtype,
+                        )
+                        keyboard_action_steps_left = int(
+                            args_cli.xarm_action_probe_steps
+                        )
+                        keyboard_observe_steps_left = 0
+                        print(
+                            "[XARM_KEYBOARD_ACTION] "
+                            f"key={key!r} command={keyboard_action_label} "
+                            f"normalized={list(values)} "
+                            f"steps={keyboard_action_steps_left}",
+                            flush=True,
+                        )
+                    if quit_requested:
+                        print("[XARM_KEYBOARD_ACTION] quitting", flush=True)
+                        break
+
+                if keyboard_action_steps_left > 0:
+                    actions[0, :] = keyboard_action
+                    keyboard_action_steps_left -= 1
+                    if keyboard_action_steps_left == 0:
+                        keyboard_observe_steps_left = int(
+                            args_cli.xarm_action_probe_observe_steps
+                        )
+                elif keyboard_observe_steps_left > 0:
+                    keyboard_observe_steps_left -= 1
+            if args_cli.xarm_action_probe is not None:
+                probe_start_step = int(args_cli.xarm_action_probe_wait_steps)
+                probe_stop_step = probe_start_step + int(args_cli.xarm_action_probe_steps)
+                if step_count == probe_start_step:
+                    action_probe_start = env.unwrapped.debug_grasp_snapshot(env_index=0)
+                    print(
+                        "[XARM_ACTION_PROBE_START] "
+                        + json.dumps(action_probe_start, sort_keys=True),
+                        flush=True,
+                    )
+                if probe_start_step <= step_count < probe_stop_step:
+                    actions[0, :] = torch.tensor(
+                        args_cli.xarm_action_probe,
+                        device=env.unwrapped.device,
+                        dtype=actions.dtype,
+                    )
             # apply actions
             _, _, terminated, truncated, info = env.step(actions)
             step_count += 1
+            if (
+                args_cli.xarm_keyboard_action_probe
+                and keyboard_probe_start is not None
+                and keyboard_action_steps_left == 0
+                and keyboard_observe_steps_left == 0
+            ):
+                keyboard_probe_final = env.unwrapped.debug_grasp_snapshot(env_index=0)
+                result = _xarm_action_probe_result(
+                    keyboard_probe_start, keyboard_probe_final
+                )
+                result["command"] = keyboard_action_label
+                print(
+                    "[XARM_KEYBOARD_RESULT] "
+                    + json.dumps(result, sort_keys=True),
+                    flush=True,
+                )
+                keyboard_probe_start = None
+            if args_cli.xarm_action_probe is not None:
+                probe_finish_step = (
+                    int(args_cli.xarm_action_probe_wait_steps)
+                    + int(args_cli.xarm_action_probe_steps)
+                    + int(args_cli.xarm_action_probe_observe_steps)
+                )
+                if step_count >= probe_finish_step and not action_probe_finished:
+                    if action_probe_start is None:
+                        raise RuntimeError("xArm action probe did not capture its start pose")
+                    action_probe_final = env.unwrapped.debug_grasp_snapshot(env_index=0)
+                    print(
+                        "[XARM_ACTION_PROBE_RESULT] "
+                        + json.dumps(
+                            _xarm_action_probe_result(
+                                action_probe_start, action_probe_final
+                            ),
+                            sort_keys=True,
+                        ),
+                        flush=True,
+                    )
+                    action_probe_finished = True
+                    break
             done = torch.logical_or(
                 torch.as_tensor(terminated), torch.as_tensor(truncated)
             )
@@ -835,6 +1214,9 @@ def main():
                     flush=True,
                 )
                 break
+
+    if keyboard_reader is not None:
+        keyboard_reader.close()
 
     # close the simulator
     env.close()

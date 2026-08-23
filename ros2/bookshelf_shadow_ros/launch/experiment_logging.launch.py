@@ -55,6 +55,8 @@ CORE_TOPICS = [
     "/bookshelf_control/command_valid",
     "/bookshelf_control/status",
     "/bookshelf_control/target_tcp",
+    "/bookshelf_control/task_complete",
+    "/bookshelf_control/task_status",
     "/bookshelf_guarded/plan_valid",
     "/bookshelf_guarded/plan_report",
     "/bookshelf_guarded/target_policy_tool",

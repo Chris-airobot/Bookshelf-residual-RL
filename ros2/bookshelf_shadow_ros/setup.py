@@ -62,6 +62,8 @@ setup(
             "bookshelf_shadow_ros.offline_scene_visualizer_node:main",
             "eef_tcp_context_capture = "
             "bookshelf_shadow_ros.eef_tcp_context_capture_node:main",
+            "ros_release_geometry = "
+            "bookshelf_shadow_ros.ros_release_geometry_node:main",
             "stationary_capture_pipeline = "
             "bookshelf_shadow_ros.stationary_capture_pipeline:main",
             "stationary_shadow_replay = "

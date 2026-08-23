@@ -70,6 +70,17 @@ def test_servo_server_reuses_existing_hardware_stack():
     assert "joy_to_servo_node" not in source
 
 
+def test_servo_server_can_reuse_official_fake_hardware_stack():
+    source = (
+        Path(__file__).parents[1]
+        / "launch"
+        / "xarm7_moveit_servo_server.launch.py"
+    ).read_text(encoding="utf-8")
+    assert 'DeclareLaunchArgument("use_fake_hardware"' in source
+    assert '"uf_robot_hardware/UFRobotFakeSystemHardware"' in source
+    assert '"fake_controllers" if use_fake_hardware' in source
+
+
 def test_physical_hardware_bringup_owns_hardware_but_no_policy():
     source = (
         Path(__file__).parents[1]

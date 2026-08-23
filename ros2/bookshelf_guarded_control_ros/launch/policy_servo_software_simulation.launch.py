@@ -2,16 +2,19 @@
 
 from pathlib import Path
 
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     EmitEvent,
+    IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
     TimerAction,
 )
 from launch.conditions import IfCondition
 from launch.events import Shutdown
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -60,6 +63,14 @@ def _simulation_actions(context):
     adapter = _parameters(document, "policy_observation_adapter")
     target = _parameters(document, "calibrated_preinsert_target")
     scene = _parameters(document, "bookshelf_scene_manager")
+    marker_mount_path = (
+        Path(get_package_share_directory("bookshelf_shadow_ros"))
+        / "config"
+        / "real_book_aruco0_mount.yaml"
+    )
+    marker_mount = yaml.safe_load(marker_mount_path.read_text(encoding="utf-8"))
+    marker_center = marker_mount["marker_center_in_book_m"]
+    marker_rotation = marker_mount["rotation_book_marker"]
 
     transform_base_slot = make_transform(
         adapter["configured_static_slot_translation_xyz"],
@@ -85,28 +96,6 @@ def _simulation_actions(context):
     control_overrides = guarded_policy_tool_overrides(
         approved_config, policy_bundle
     )
-    control_overrides.update(
-        {
-            "base_frame": "sim_link_base",
-            "eef_frame": "sim_link_eef",
-            "tcp_frame": "sim_link_tcp",
-            "start_servo_service": "/bookshelf_sim/servo/start",
-            "twist_command_topic": "/bookshelf_sim/servo/delta_twist_cmds",
-            "command_target_is_hardware": False,
-            "maximum_total_translation_m": 1.0,
-            "tf_max_age_s": 1.0,
-        }
-    )
-    adapter_overrides = {
-        "base_frame": "sim_link_base",
-        "ee_frame": "sim_link_eef",
-        "target_book_frame": "sim_target_book_center",
-        "book_pose_source": "marker",
-        "slot_pose_source": "configured_static",
-        "joint_states_topic": "/bookshelf_sim/joint_states",
-        "message_max_age_s": 1.0,
-        "tf_max_age_s": 1.0,
-    }
     simulator_parameters = {
         "candidate_id": result["candidate_id"],
         "output_dir": LaunchConfiguration("output_dir"),
@@ -131,9 +120,33 @@ def _simulation_actions(context):
         "slot_width_m": float(adapter["configured_static_slot_width_m"]),
         "slot_depth_m": float(adapter["slot_depth_m"]),
         "book_size_xyz": adapter["book_size_xyz"],
+        "marker_size_m": float(marker_mount["marker_black_size_m"]),
+        "marker_thickness_m": float(marker_mount["cardboard_thickness_m"]),
+        "book_marker_translation_xyz": [
+            float(marker_center["x"]),
+            float(marker_center["y"]),
+            float(marker_center["z"]),
+        ],
+        "book_marker_quaternion_xyzw": matrix_to_quaternion_xyzw(
+            marker_rotation
+        ).tolist(),
+        "shelf_size_xyz": scene["shelf_box_size_xyz"],
+        "shelf_center_offset_slot_xyz": scene[
+            "shelf_box_center_offset_slot_xyz"
+        ],
+        "shelf_bottom_height_base_m": float(
+            scene["shelf_bottom_height_base_m"]
+        ),
+        "table_size_xyz": scene["table_box_size_xyz"],
+        "table_center_base_xyz": scene["table_box_center_base_xyz"],
+        "table_quaternion_base_xyzw": scene[
+            "table_box_quaternion_base_xyzw"
+        ],
     }
     package_share = FindPackageShare("bookshelf_guarded_control_ros")
-    shadow_share = FindPackageShare("bookshelf_shadow_ros")
+    deployment_launch = PathJoinSubstitution(
+        [package_share, "launch", "physical_policy_deployment.launch.py"]
+    )
     return [
         LogInfo(
             msg=(
@@ -150,41 +163,31 @@ def _simulation_actions(context):
             output="screen",
             parameters=[simulator_parameters],
         ),
-        Node(
-            package="bookshelf_shadow_ros",
-            executable="policy_observation_adapter",
-            name="policy_observation_adapter",
-            output="screen",
-            parameters=[str(approved_config), adapter_overrides],
-        ),
-        Node(
-            package="bookshelf_shadow_ros",
-            executable="policy_shadow_inference",
-            name="policy_shadow_inference",
-            output="screen",
-            parameters=[
-                PathJoinSubstitution(
-                    [shadow_share, "config", "policy_shadow_inference.yaml"]
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(deployment_launch),
+            launch_arguments={
+                "trial_name": LaunchConfiguration("trial_name"),
+                "approved_config": str(approved_config),
+                "repository_path": LaunchConfiguration("repository_path"),
+                "policy_bundle": str(policy_bundle),
+                "activation_envelope": str(activation_envelope),
+                "enable_logging": "false",
+                "enable_policy_audit": "false",
+                "operation": "control",
+                "maximum_total_translation_m": LaunchConfiguration(
+                    "maximum_total_translation_m"
                 ),
-                {
-                    "policy_bundle_path": str(policy_bundle),
-                    "activation_envelope_path": str(activation_envelope),
-                    "require_activation_envelope": True,
-                    "block_on_activation_checks": False,
-                },
-            ],
-        ),
-        Node(
-            package="bookshelf_guarded_control_ros",
-            executable="direct_policy_servo",
-            name="direct_policy_servo",
-            output="screen",
-            parameters=[
-                PathJoinSubstitution(
-                    [package_share, "config", "direct_policy_servo.yaml"]
-                ),
-                control_overrides,
-            ],
+                "base_frame": "sim_link_base",
+                "eef_frame": "sim_link_eef",
+                "tcp_frame": "sim_link_tcp",
+                "target_book_frame": "sim_target_book_center",
+                "joint_states_topic": "/bookshelf_sim/joint_states",
+                "start_servo_service": "/bookshelf_sim/servo/start",
+                "twist_command_topic": "/bookshelf_sim/servo/delta_twist_cmds",
+                "command_target_is_hardware": "false",
+                "message_max_age_s": "1.0",
+                "tf_max_age_s": "1.0",
+            }.items(),
         ),
         Node(
             package="rviz2",
@@ -219,9 +222,18 @@ def generate_launch_description():
             DeclareLaunchArgument("policy_bundle"),
             DeclareLaunchArgument("activation_envelope"),
             DeclareLaunchArgument(
+                "trial_name", default_value="software_policy_servo_simulation"
+            ),
+            DeclareLaunchArgument(
+                "repository_path", default_value="/home/chris/Chris/bookshelf-unified"
+            ),
+            DeclareLaunchArgument(
                 "output_dir", default_value="/tmp/bookshelf_policy_servo_sim"
             ),
             DeclareLaunchArgument("duration_s", default_value="20.0"),
+            DeclareLaunchArgument(
+                "maximum_total_translation_m", default_value="0.005"
+            ),
             DeclareLaunchArgument("enable_rviz", default_value="true"),
             DeclareLaunchArgument("initial_book_x_slot_m", default_value="-0.10"),
             DeclareLaunchArgument("initial_book_y_slot_m", default_value="0.0"),

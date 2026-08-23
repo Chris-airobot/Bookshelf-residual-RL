@@ -28,3 +28,16 @@ def test_activation_checks_can_be_made_diagnostic_only():
     source = LAUNCH.read_text(encoding="utf-8")
     assert '"block_on_activation_checks"' in source
     assert 'LaunchConfiguration("block_on_activation_checks")' in source
+
+
+def test_observation_frames_can_be_shared_with_software_simulation():
+    source = LAUNCH.read_text(encoding="utf-8")
+    for argument in (
+        '"base_frame"',
+        '"ee_frame"',
+        '"target_book_frame"',
+        '"joint_states_topic"',
+        '"message_max_age_s"',
+        '"tf_max_age_s"',
+    ):
+        assert argument in source

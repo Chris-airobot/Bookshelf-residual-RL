@@ -11,12 +11,14 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32MultiArray, String
 from std_srvs.srv import Trigger
 from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 
 from .policy_servo_simulation_math import integrate_base_frame_twist
+from .planning_scene_math import configured_box, shelf_box_from_slot
+from .direct_policy_servo_math import MAXIMUM_SUPERVISED_TRANSLATION_REASON
 from .policy_tool_control_math import (
     invert_transform,
     make_transform,
@@ -61,6 +63,10 @@ class PolicyServoSimulator(Node):
             self.get_parameter("slot_translation_xyz").value,
             self.get_parameter("slot_quaternion_xyzw").value,
         )
+        self.transform_book_marker = make_transform(
+            self.get_parameter("book_marker_translation_xyz").value,
+            self.get_parameter("book_marker_quaternion_xyzw").value,
+        )
 
         self.started = False
         self.blocked_reason = None
@@ -72,6 +78,8 @@ class PolicyServoSimulator(Node):
         self.inference_valid_messages = 0
         self.controller_valid_messages = 0
         self.latest_controller_status = None
+        self.latest_policy_delta = None
+        self.policy_delta_messages = 0
         self.path_length_m = 0.0
         self.maximum_linear_speed_m_s = 0.0
         self.maximum_angular_speed_rad_s = 0.0
@@ -124,6 +132,12 @@ class PolicyServoSimulator(Node):
             self._controller_status_callback,
             10,
         )
+        self.create_subscription(
+            Float32MultiArray,
+            "/bookshelf_shadow/final_delta",
+            self._policy_delta_callback,
+            10,
+        )
 
         rate = max(float(self.get_parameter("update_rate_hz").value), 1.0)
         self.timer = self.create_timer(1.0 / rate, self._timer_callback)
@@ -173,6 +187,20 @@ class PolicyServoSimulator(Node):
         self.declare_parameter("slot_width_m", 0.04)
         self.declare_parameter("slot_depth_m", 0.20)
         self.declare_parameter("book_size_xyz", [0.156, 0.034, 0.236])
+        self.declare_parameter("marker_size_m", 0.039)
+        self.declare_parameter("marker_thickness_m", 0.002)
+        self.declare_parameter("book_marker_translation_xyz", [-0.08, 0.0375, 0.0665])
+        self.declare_parameter(
+            "book_marker_quaternion_xyzw", [0.5, -0.5, -0.5, 0.5]
+        )
+        self.declare_parameter("shelf_size_xyz", [0.30, 0.95, 0.40])
+        self.declare_parameter("shelf_center_offset_slot_xyz", [0.15, 0.0, 0.0])
+        self.declare_parameter("shelf_bottom_height_base_m", 0.015)
+        self.declare_parameter("table_size_xyz", [1.50, 0.60, 0.05])
+        self.declare_parameter("table_center_base_xyz", [0.75, 0.0, -0.025])
+        self.declare_parameter(
+            "table_quaternion_base_xyzw", [0.0, 0.0, 0.0, 1.0]
+        )
 
     def _now_ns(self) -> int:
         return int(self.get_clock().now().nanoseconds)
@@ -244,6 +272,14 @@ class PolicyServoSimulator(Node):
             self.latest_controller_status = value
             if value.get("valid") is True:
                 self.controller_valid_messages += 1
+
+    def _policy_delta_callback(self, message: Float32MultiArray):
+        try:
+            value = _finite_vector(message.data, 5, "final_delta")
+        except ValueError:
+            return
+        self.latest_policy_delta = value
+        self.policy_delta_messages += 1
 
     def _timer_callback(self):
         now_ns = self._now_ns()
@@ -390,7 +426,150 @@ class PolicyServoSimulator(Node):
             point = Point()
             point.x, point.y, point.z = map(float, value)
             path.points.append(point)
-        return MarkerArray(markers=[book, slot, path])
+
+        marker_size = float(self.get_parameter("marker_size_m").value)
+        marker_thickness = float(
+            self.get_parameter("marker_thickness_m").value
+        )
+        transform_base_marker = transform_base_book @ self.transform_book_marker
+        aruco = self._cube_marker(
+            marker_id=4,
+            name="aruco_marker_0",
+            transform=transform_base_marker,
+            size_xyz=[marker_size, marker_size, marker_thickness],
+            color=[0.03, 0.03, 0.03, 1.0],
+            stamp=stamp,
+        )
+
+        shelf = shelf_box_from_slot(
+            self.transform_base_slot,
+            base_frame=self.base_frame,
+            size_xyz=self.get_parameter("shelf_size_xyz").value,
+            center_offset_slot_xyz=self.get_parameter(
+                "shelf_center_offset_slot_xyz"
+            ).value,
+            level_with_base=True,
+            bottom_height_base_m=float(
+                self.get_parameter("shelf_bottom_height_base_m").value
+            ),
+        )
+        shelf_marker = self._cube_marker(
+            marker_id=5,
+            name="bookshelf",
+            transform=shelf.transform_frame_box,
+            size_xyz=shelf.size_xyz,
+            color=[0.72, 0.22, 0.12, 0.20],
+            stamp=stamp,
+        )
+        table = configured_box(
+            frame_id=self.base_frame,
+            size_xyz=self.get_parameter("table_size_xyz").value,
+            center_xyz=self.get_parameter("table_center_base_xyz").value,
+            quaternion_xyzw=self.get_parameter(
+                "table_quaternion_base_xyzw"
+            ).value,
+            label="table",
+        )
+        table_marker = self._cube_marker(
+            marker_id=6,
+            name="table",
+            transform=table.transform_frame_box,
+            size_xyz=table.size_xyz,
+            color=[0.30, 0.34, 0.40, 0.75],
+            stamp=stamp,
+        )
+
+        transform_base_tcp = self.transform_base_eef @ self.transform_eef_tcp
+        gripper = self._cube_marker(
+            marker_id=7,
+            name="gripper",
+            transform=transform_base_tcp,
+            size_xyz=[0.10, 0.09, 0.04],
+            color=[0.88, 0.88, 0.90, 0.75],
+            stamp=stamp,
+        )
+        robot_base = self._cylinder_marker(
+            marker_id=8,
+            name="xarm_base",
+            center_xyz=[0.0, 0.0, 0.06],
+            size_xyz=[0.16, 0.16, 0.12],
+            color=[0.82, 0.84, 0.88, 0.90],
+            stamp=stamp,
+        )
+        robot_arm = self._robot_arm_marker(stamp)
+        return MarkerArray(
+            markers=[
+                table_marker,
+                shelf_marker,
+                slot,
+                robot_base,
+                robot_arm,
+                gripper,
+                book,
+                aruco,
+                path,
+            ]
+        )
+
+    def _cube_marker(
+        self, *, marker_id, name, transform, size_xyz, color, stamp
+    ):
+        marker = Marker()
+        marker.header.frame_id = self.base_frame
+        marker.header.stamp = stamp
+        marker.ns = "policy_servo_sim_scene"
+        marker.id = int(marker_id)
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose = self._pose_message(transform, stamp).pose
+        marker.scale.x, marker.scale.y, marker.scale.z = map(
+            float, _finite_vector(size_xyz, 3, f"{name}_size_xyz")
+        )
+        marker.color.r, marker.color.g, marker.color.b, marker.color.a = map(
+            float, color
+        )
+        marker.text = str(name)
+        return marker
+
+    def _cylinder_marker(
+        self, *, marker_id, name, center_xyz, size_xyz, color, stamp
+    ):
+        marker = self._cube_marker(
+            marker_id=marker_id,
+            name=name,
+            transform=make_transform(center_xyz),
+            size_xyz=size_xyz,
+            color=color,
+            stamp=stamp,
+        )
+        marker.type = Marker.CYLINDER
+        return marker
+
+    def _robot_arm_marker(self, stamp):
+        marker = Marker()
+        marker.header.frame_id = self.base_frame
+        marker.header.stamp = stamp
+        marker.ns = "policy_servo_sim_scene"
+        marker.id = 9
+        marker.type = Marker.LINE_STRIP
+        marker.action = Marker.ADD
+        marker.scale.x = 0.055
+        marker.color.r = 0.82
+        marker.color.g = 0.84
+        marker.color.b = 0.88
+        marker.color.a = 0.90
+        eef = self.transform_base_eef[:3, 3]
+        points = (
+            [0.0, 0.0, 0.12],
+            [0.12, 0.0, 0.28],
+            [0.35, 0.5 * float(eef[1]), max(float(eef[2]) + 0.12, 0.30)],
+            eef,
+        )
+        for value in points:
+            point = Point()
+            point.x, point.y, point.z = map(float, value)
+            marker.points.append(point)
+        return marker
 
     def _slot_book_transform(self):
         transform_base_book = self.transform_base_eef @ self.transform_eef_book
@@ -410,14 +589,22 @@ class PolicyServoSimulator(Node):
         minimum_progress = float(
             self.get_parameter("minimum_forward_progress_m").value
         )
+        terminal_reason = None
+        if isinstance(self.latest_controller_status, dict):
+            terminal_reason = self.latest_controller_status.get("terminal_reason")
+        bounded_stop_reached = (
+            terminal_reason == MAXIMUM_SUPERVISED_TRANSLATION_REASON
+        )
+        forward_progress_check_passed = forward_progress >= minimum_progress
         passed = bool(
             self.started
             and self.nonzero_twist_messages > 0
             and self.observation_valid_messages > 0
             and self.inference_valid_messages > 0
             and self.controller_valid_messages > 0
+            and self.policy_delta_messages > 0
             and self.blocked_reason is None
-            and forward_progress >= minimum_progress
+            and bounded_stop_reached
         )
         return {
             "kind": "bookshelf_policy_servo_software_simulation",
@@ -433,8 +620,17 @@ class PolicyServoSimulator(Node):
             "observation_valid_messages": self.observation_valid_messages,
             "inference_valid_messages": self.inference_valid_messages,
             "controller_valid_messages": self.controller_valid_messages,
+            "policy_delta_messages": self.policy_delta_messages,
+            "latest_policy_delta": (
+                None
+                if self.latest_policy_delta is None
+                else self.latest_policy_delta.astype(float).tolist()
+            ),
+            "bounded_stop_reached": bounded_stop_reached,
             "path_length_m": self.path_length_m,
             "forward_progress_m": forward_progress,
+            "minimum_forward_progress_m": minimum_progress,
+            "forward_progress_check_passed": forward_progress_check_passed,
             "maximum_linear_speed_m_s": self.maximum_linear_speed_m_s,
             "maximum_angular_speed_rad_s": self.maximum_angular_speed_rad_s,
             "initial_book_pose_slot": transform_to_dict(initial_slot_book),

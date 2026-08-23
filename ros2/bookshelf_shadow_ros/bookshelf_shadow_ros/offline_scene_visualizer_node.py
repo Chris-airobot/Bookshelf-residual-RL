@@ -58,8 +58,14 @@ class OfflineSceneVisualizerNode(Node):
 
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
+        self.target_book_frame = str(
+            self.get_parameter("target_book_frame").value
+        )
         self.publish_joint_states = bool(
             self.get_parameter("publish_joint_states").value
+        )
+        self.show_coarse_bookshelf = bool(
+            self.get_parameter("show_coarse_bookshelf").value
         )
         self.joint_names, self.joint_positions = validated_joint_state(
             self.get_parameter("joint_names").value,
@@ -96,6 +102,13 @@ class OfflineSceneVisualizerNode(Node):
         self.held_book_quaternion_tcp_xyzw = self._vector(
             "held_book_quaternion_tcp_xyzw", 4
         )
+        self.marker_enabled = bool(self.get_parameter("marker_enabled").value)
+        self.marker_center_book_xyz = self._vector(
+            "marker_center_book_xyz", 3
+        )
+        self.marker_quaternion_book_xyzw = self._vector(
+            "marker_quaternion_book_xyzw", 4
+        )
 
         marker_qos = QoSProfile(depth=1)
         marker_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -129,8 +142,10 @@ class OfflineSceneVisualizerNode(Node):
         self.declare_parameter("visualization_only", True)
         self.declare_parameter("scene_configuration_confirmed", False)
         self.declare_parameter("publish_joint_states", True)
+        self.declare_parameter("show_coarse_bookshelf", True)
         self.declare_parameter("base_frame", "link_base")
         self.declare_parameter("tcp_frame", "link_tcp")
+        self.declare_parameter("target_book_frame", "target_book_center")
         self.declare_parameter(
             "joint_names",
             [
@@ -163,6 +178,13 @@ class OfflineSceneVisualizerNode(Node):
         self.declare_parameter(
             "held_book_quaternion_tcp_xyzw", [0.0, 0.0, 0.0, 1.0]
         )
+        self.declare_parameter("marker_enabled", False)
+        self.declare_parameter("marker_center_book_xyz", [0.0, 0.0, 0.0])
+        self.declare_parameter(
+            "marker_quaternion_book_xyzw", [0.0, 0.0, 0.0, 1.0]
+        )
+        self.declare_parameter("marker_size_m", 0.039)
+        self.declare_parameter("marker_thickness_m", 0.002)
         self.declare_parameter(
             "preinsert_book_center_slot_xyz", [-0.108, 0.0, 0.006]
         )
@@ -278,6 +300,27 @@ class OfflineSceneVisualizerNode(Node):
         _set_color(marker, (0.20, 0.55, 1.0, 0.60))
         return marker
 
+    def _book_marker(self) -> Marker:
+        marker = Marker()
+        marker.header.frame_id = self.target_book_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "book_aruco"
+        marker.id = 21
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x = self.marker_center_book_xyz[0]
+        marker.pose.position.y = self.marker_center_book_xyz[1]
+        marker.pose.position.z = self.marker_center_book_xyz[2]
+        marker.pose.orientation.x = self.marker_quaternion_book_xyzw[0]
+        marker.pose.orientation.y = self.marker_quaternion_book_xyzw[1]
+        marker.pose.orientation.z = self.marker_quaternion_book_xyzw[2]
+        marker.pose.orientation.w = self.marker_quaternion_book_xyzw[3]
+        marker.scale.x = float(self.get_parameter("marker_size_m").value)
+        marker.scale.y = float(self.get_parameter("marker_size_m").value)
+        marker.scale.z = float(self.get_parameter("marker_thickness_m").value)
+        _set_color(marker, (0.03, 0.03, 0.03, 1.0))
+        return marker
+
     def _markers(self) -> MarkerArray:
         markers = MarkerArray()
         markers.markers.append(
@@ -289,26 +332,29 @@ class OfflineSceneVisualizerNode(Node):
                 (0.38, 0.42, 0.48, 0.65),
             )
         )
-        markers.markers.append(
-            self._cube(
-                2,
-                "coarse_scene",
-                self.geometry.transform_base_shelf,
-                self.geometry.shelf_size_xyz,
-                (0.92, 0.34, 0.18, 0.34),
+        if self.show_coarse_bookshelf:
+            markers.markers.append(
+                self._cube(
+                    2,
+                    "coarse_scene",
+                    self.geometry.transform_base_shelf,
+                    self.geometry.shelf_size_xyz,
+                    (0.92, 0.34, 0.18, 0.34),
+                )
             )
-        )
-        shelf_position = self.geometry.transform_base_shelf[:3, 3]
-        markers.markers.append(
-            self._text(
-                3,
-                "coarse bookshelf keep-out",
-                shelf_position + np.array([0.0, 0.0, 0.25]),
-                (1.0, 0.55, 0.25, 1.0),
+            shelf_position = self.geometry.transform_base_shelf[:3, 3]
+            markers.markers.append(
+                self._text(
+                    3,
+                    "coarse bookshelf keep-out",
+                    shelf_position + np.array([0.0, 0.0, 0.25]),
+                    (1.0, 0.55, 0.25, 1.0),
+                )
             )
-        )
         markers.markers.extend(self._slot_markers())
         markers.markers.append(self._held_book_marker())
+        if self.marker_enabled:
+            markers.markers.append(self._book_marker())
 
         target_transform = (
             self.geometry.transform_base_slot
@@ -349,6 +395,7 @@ class OfflineSceneVisualizerNode(Node):
             "planning_requested": False,
             "execution_authorized": False,
             "publishes_joint_states": self.publish_joint_states,
+            "shows_coarse_bookshelf": self.show_coarse_bookshelf,
             "base_frame": self.base_frame,
             "tcp_frame": self.tcp_frame,
             "shelf_front_plane_error_m": shelf_front_plane_error_m(self.geometry),

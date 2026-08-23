@@ -7,6 +7,7 @@ import yaml
 from bookshelf_guarded_control_ros.rehearsal_configuration import (
     APPROVAL_TOKEN,
     guarded_policy_tool_overrides,
+    physical_episode_geometry_overrides,
     validate_shadow_rehearsal_assets,
 )
 
@@ -22,6 +23,9 @@ def _write_inputs(tmp_path):
     document = {
         "static_slot_environment_check": {
             "ros__parameters": {
+                "base_frame": "link_base",
+                "static_slot_translation_xyz": [0.8, 0.1, 0.2],
+                "static_slot_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
                 "static_slot_width_m": 0.038,
                 "static_slot_transform_status": (
                     "captured_rgbd_static_human_approved_abc123"
@@ -30,8 +34,11 @@ def _write_inputs(tmp_path):
         },
         "calibrated_preinsert_target": {
             "ros__parameters": {
+                "base_frame": "link_base",
                 "ee_frame": "link_eef",
                 "tcp_frame": "link_tcp",
+                "static_slot_translation_xyz": [0.8, 0.1, 0.2],
+                "static_slot_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
                 "static_slot_transform_status": (
                     "captured_rgbd_static_human_approved_abc123"
                 ),
@@ -42,12 +49,17 @@ def _write_inputs(tmp_path):
                 "policy_tool_transform_status": (
                     "verified_stationary_bag_policy_tool_abc123"
                 ),
+                "book_size_xyz": [0.156, 0.034, 0.236],
             }
         },
         "policy_observation_adapter": {
             "ros__parameters": {
+                "base_frame": "link_base",
+                "ee_frame": "link_eef",
                 "slot_pose_source": "configured_static",
                 "allow_configured_static_slot": True,
+                "configured_static_slot_translation_xyz": [0.8, 0.1, 0.2],
+                "configured_static_slot_quaternion_xyzw": [0.0, 0.0, 0.0, 1.0],
                 "static_slot_transform_status": (
                     "captured_rgbd_static_human_approved_abc123"
                 ),
@@ -61,6 +73,8 @@ def _write_inputs(tmp_path):
                 "eef_book_transform_status": (
                     "measured_stationary_bag_human_approved_abc123"
                 ),
+                "target_book_frame": "target_book_center",
+                "book_size_xyz": [0.156, 0.034, 0.236],
             }
         },
         "bookshelf_scene_manager": {
@@ -205,3 +219,42 @@ def test_guarded_overrides_reject_unverified_policy_tool(tmp_path):
 
     with pytest.raises(ValueError, match="not verified"):
         guarded_policy_tool_overrides(config, policy)
+
+
+def test_physical_episode_geometry_uses_the_approved_slot_and_book(tmp_path):
+    config, _, _ = _write_inputs(tmp_path)
+
+    result = physical_episode_geometry_overrides(config)
+
+    assert result["slot_translation_base_xyz"] == pytest.approx([0.8, 0.1, 0.2])
+    assert result["slot_quaternion_base_xyzw"] == pytest.approx(
+        [0.0, 0.0, 0.0, 1.0]
+    )
+    assert result["retreat_direction_base_xyz"] == pytest.approx([-1.0, 0.0, 0.0])
+    assert result["book_size_xyz"] == pytest.approx([0.156, 0.034, 0.236])
+    assert result["book_frame"] == "target_book_center"
+
+
+def test_physical_episode_geometry_rejects_inconsistent_slot(tmp_path):
+    config, _, _ = _write_inputs(tmp_path)
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["policy_observation_adapter"]["ros__parameters"][
+        "configured_static_slot_translation_xyz"
+    ] = [0.81, 0.1, 0.2]
+    config.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="slot transforms are inconsistent"):
+        physical_episode_geometry_overrides(config)
+
+
+def test_physical_episode_geometry_rejects_requested_frame_mismatch(tmp_path):
+    config, _, _ = _write_inputs(tmp_path)
+
+    with pytest.raises(ValueError, match="does not match approved frame"):
+        physical_episode_geometry_overrides(
+            config,
+            expected_base_frame="world",
+            expected_eef_frame="link_eef",
+            expected_tcp_frame="link_tcp",
+            expected_book_frame="target_book_center",
+        )

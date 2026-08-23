@@ -6,9 +6,13 @@ import pytest
 
 from bookshelf_shadow_ros.policy_shadow_math import (
     NumpyActorBundle,
+    NominalPushConfig,
     ResidualMotionConfig,
     combine_motion_delta,
     compute_insert_nominal_delta,
+    compute_policy_nominal_delta,
+    compute_push_nominal_delta,
+    release_requested_for_mode,
     scale_residual_action,
     validate_shadow_inputs,
 )
@@ -38,6 +42,50 @@ def test_nominal_insert_rejects_non_insert_mode():
     raw[0] = 1.0
     with pytest.raises(ValueError, match="INSERT mode only"):
         compute_insert_nominal_delta(raw)
+
+
+def test_nominal_dispatch_holds_scripted_mode_and_runs_push_mode():
+    raw = np.zeros(12, dtype=np.float32)
+    raw[0] = 0.5
+    np.testing.assert_array_equal(compute_policy_nominal_delta(raw), np.zeros(5))
+
+    raw[0] = 1.0
+    raw[3] = 0.004
+    raw[7] = 0.001
+    raw[8] = -0.0708
+    pushed = compute_policy_nominal_delta(raw)
+    assert pushed[0] == pytest.approx(0.0008)
+    assert pushed[1] == pytest.approx(0.0005)
+    assert pushed[2] == pytest.approx(0.0, abs=1.0e-7)
+
+
+def test_release_action_is_consumed_only_in_insert_mode():
+    assert release_requested_for_mode(0.6, 0.0, 0.5) is True
+    assert release_requested_for_mode(0.6, 0.5, 0.5) is False
+    assert release_requested_for_mode(0.6, 1.0, 0.5) is False
+    assert release_requested_for_mode(0.5, 0.0, 0.5) is False
+
+
+def test_release_mode_check_rejects_nonfinite_values():
+    with pytest.raises(ValueError, match="must be finite"):
+        release_requested_for_mode(float("nan"), 0.0, 0.5)
+
+
+def test_nominal_push_uses_tool_relative_contact_height_and_limits():
+    raw = np.zeros(12, dtype=np.float32)
+    raw[0] = 1.0
+    raw[3] = -0.004
+    raw[7] = 0.002
+    raw[8] = 0.0
+    raw[5] = math.radians(4.0)
+    raw[10] = 0.05
+
+    delta = compute_push_nominal_delta(raw, NominalPushConfig())
+    assert delta[0] == pytest.approx(0.0008)
+    assert delta[1] == pytest.approx(-0.0005)
+    assert delta[2] == pytest.approx(-0.0010)
+    assert delta[3] < 0.0
+    assert delta[4] < 0.0
 
 
 def test_residual_scaling_and_final_limits_match_environment():

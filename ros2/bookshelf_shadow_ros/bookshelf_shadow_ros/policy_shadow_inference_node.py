@@ -20,12 +20,14 @@ from .policy_shadow_math import (
     MOTION_LABELS,
     NumpyActorBundle,
     NominalInsertConfig,
+    NominalPushConfig,
     POLICY_ACTION_LABELS,
     POLICY_ACTION_SIZE,
     POLICY_OBSERVATION_SIZE,
     ResidualMotionConfig,
     combine_motion_delta,
-    compute_insert_nominal_delta,
+    compute_policy_nominal_delta,
+    release_requested_for_mode,
     scale_residual_action,
     validate_shadow_inputs,
 )
@@ -56,6 +58,7 @@ class PolicyShadowInferenceNode(Node):
         )
         self.motion_config = self._motion_config()
         self.nominal_config = self._nominal_config()
+        self.push_config = self._push_config()
 
         self.latest_observation = None
         self.latest_observation_ns = None
@@ -201,6 +204,16 @@ class PolicyShadowInferenceNode(Node):
         self.declare_parameter("nominal_dpitch_limit", 0.004363323129985824)
         self.declare_parameter("nominal_slow_rear_to_mouth", -0.035)
 
+        self.declare_parameter("nominal_push_dx", 0.0008)
+        self.declare_parameter("nominal_push_lateral_gain", 0.35)
+        self.declare_parameter("nominal_push_height_gain", 0.30)
+        self.declare_parameter("nominal_push_yaw_gain", 0.20)
+        self.declare_parameter("nominal_push_pitch_gain", 0.08)
+        self.declare_parameter("nominal_push_z_fraction_from_bottom", 0.20)
+        self.declare_parameter("nominal_push_book_size", [0.156, 0.034, 0.236])
+        self.declare_parameter("nominal_push_dy_limit", 0.0005)
+        self.declare_parameter("nominal_push_dz_limit", 0.0010)
+
         self.declare_parameter("final_dx_limit", 0.0080)
         self.declare_parameter("final_dy_limit", 0.0030)
         self.declare_parameter("final_dz_limit", 0.0070)
@@ -224,6 +237,28 @@ class PolicyShadowInferenceNode(Node):
                 float(self.get_parameter("final_dpitch_limit").value),
             ),
             release_threshold=float(self.get_parameter("release_threshold").value),
+        )
+
+    def _push_config(self) -> NominalPushConfig:
+        return NominalPushConfig(
+            push_dx=float(self.get_parameter("nominal_push_dx").value),
+            lateral_gain=float(
+                self.get_parameter("nominal_push_lateral_gain").value
+            ),
+            height_gain=float(self.get_parameter("nominal_push_height_gain").value),
+            yaw_gain=float(self.get_parameter("nominal_push_yaw_gain").value),
+            pitch_gain=float(self.get_parameter("nominal_push_pitch_gain").value),
+            push_z_fraction_from_bottom=float(
+                self.get_parameter("nominal_push_z_fraction_from_bottom").value
+            ),
+            book_size=tuple(
+                float(value)
+                for value in self.get_parameter("nominal_push_book_size").value
+            ),
+            dy_limit=float(self.get_parameter("nominal_push_dy_limit").value),
+            dz_limit=float(self.get_parameter("nominal_push_dz_limit").value),
+            dyaw_limit=float(self.get_parameter("nominal_dyaw_limit").value),
+            dpitch_limit=float(self.get_parameter("nominal_dpitch_limit").value),
         )
 
     def _activation_limits(self) -> PolicyActivationLimits:
@@ -406,9 +441,10 @@ class PolicyShadowInferenceNode(Node):
                 self.latest_observation
             )
             residual_delta = scale_residual_action(policy_action, self.motion_config)
-            nominal_delta = compute_insert_nominal_delta(
+            nominal_delta = compute_policy_nominal_delta(
                 self.latest_raw_metrics,
                 self.nominal_config,
+                self.push_config,
             )
             final_delta = combine_motion_delta(
                 nominal_delta,
@@ -420,7 +456,15 @@ class PolicyShadowInferenceNode(Node):
             return
 
         release_action = float(policy_action[-1])
-        release_requested = release_action > self.motion_config.release_threshold
+        mode_observation = float(self.latest_raw_metrics[0])
+        release_above_threshold = (
+            release_action > self.motion_config.release_threshold
+        )
+        release_requested = release_requested_for_mode(
+            release_action,
+            mode_observation,
+            self.motion_config.release_threshold,
+        )
 
         self.inference_valid_publisher.publish(Bool(data=True))
         self.activation_ready_publisher.publish(Bool(data=True))
@@ -466,6 +510,8 @@ class PolicyShadowInferenceNode(Node):
                 for label, value in zip(MOTION_LABELS, final_delta)
             },
             "release_action": round(release_action, 7),
+            "mode_observation": round(mode_observation, 7),
+            "release_action_above_threshold": release_above_threshold,
             "release_requested_diagnostic": release_requested,
             "release_executed": False,
         }

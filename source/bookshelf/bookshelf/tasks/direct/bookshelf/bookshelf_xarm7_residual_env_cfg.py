@@ -58,6 +58,20 @@ XARM7_REVIEWED_PRETARGET_TCP_QUAT_WXYZ = (
     0.025591244894331722,
     0.6851697509922721,
 )
+# Human-approved Bag-C calibration. link_eef is coincident with the simulated
+# link7 body used by this task, so this transform places the held book exactly
+# as measured on the physical xArm instead of reusing Panda's hand offset.
+XARM7_EEF_BOOK_TRANSLATION_XYZ = (
+    0.006189808263520789,
+    0.004397635899244547,
+    0.18076520526773382,
+)
+XARM7_EEF_BOOK_QUATERNION_WXYZ = (
+    0.03162994594249451,
+    0.7170947434170492,
+    0.01281329455160485,
+    0.6961397093730864,
+)
 XARM7_SIM_SLOT_CENTER = (
     0.63,
     0.0,
@@ -83,6 +97,11 @@ XARM7_SHELF_TOP_Z = XARM7_SIM_SLOT_CENTER[2] - 0.02 - 0.5 * 0.236
 @configclass
 class BookshelfEnvCfg(PandaResidualEnvCfg):
     """xArm7 task with measured pre-target and configurable grasp-depth bounds."""
+
+    # Six Cartesian residuals followed by release. Panda retains its original
+    # five Cartesian residuals followed by release.
+    action_space = 7
+    enable_base_y_rotation_action = True
 
     robot = XARM7_WITH_GRIPPER_CFG.replace(
         init_state=ArticulationCfg.InitialStateCfg(
@@ -131,8 +150,9 @@ class BookshelfEnvCfg(PandaResidualEnvCfg):
     debug_finger_inner_surface_offset_m = XARM7_FINGER_INNER_SURFACE_OFFSET_M
     debug_book_min_finger_clearance_m = 0.0
 
-    # Keep the original simulated grasp and upright-book convention. These
-    # values are shared by the held book, neighboring books, and target math.
+    # Keep the legacy value for Panda-only helpers, but do not use it to place
+    # the xArm-held book. That inherited 75 mm hand-frame offset put the book
+    # close to the floor in the reviewed xArm pre-target pose.
     book_grasp_offset_hand = (0.0, 0.0, 0.075)
     book_standing_quat = (math.sqrt(0.5), math.sqrt(0.5), 0.0, 0.0)
     # The reviewed xArm wrist is a few degrees from the world-standing book
@@ -140,6 +160,11 @@ class BookshelfEnvCfg(PandaResidualEnvCfg):
     # so its 34 mm thickness, rather than a tilted projection of its height,
     # lies across the gripper pads.
     book_grasp_orientation_source = "grasp_relative"
+    # Use the measured center position, but retain the nominal-controller book
+    # axes that correctly put the 34 mm thickness across the finger pads.
+    book_grasp_pose_source = "eef_calibrated_position"
+    eef_book_translation_xyz = XARM7_EEF_BOOK_TRANSLATION_XYZ
+    eef_book_quaternion_wxyz = XARM7_EEF_BOOK_QUATERNION_WXYZ
 
     # Every reset samples a new rigid grasp. Recompute the controller's
     # tool-to-book transform from that sample instead of retaining episode 1.
@@ -155,6 +180,31 @@ class BookshelfEnvCfg(PandaResidualEnvCfg):
     # Applied only by scripts/sb3/train.py. Direct task creation and evaluation
     # retain the reviewed physical pre-target geometry.
     xarm_training_reset_standoff_m = 0.030
+
+    # Match Panda's action semantics: every Cartesian delta is relative to the
+    # current measured TCP, then the standard Isaac Lab DLS controller solves
+    # the corresponding link7 pose. Quaternion increments remain in base frame
+    # to avoid Euler decomposition at the reviewed near-singular wrist pose.
+    debug_use_full_target_ee_quat = False
+    debug_use_base_frame_quat_deltas = True
+    debug_action5_as_base_x = True
+    debug_position_only_target_ee = False
+    debug_pose_ik_rotation_weight = None
+    debug_integrate_position_target_ee = False
+
+    # Keep release, retreat, and PUSH on the same verified xArm Cartesian path.
+    debug_scripted_current_relative_target = False
+    debug_scripted_fixed_retreat_path = True
+    debug_nominal_push_current_relative_target = False
+    debug_nominal_push_reuse_insert_forward = True
+    debug_nominal_push_lower_before_forward = True
+    debug_nominal_push_align_to_book_center = True
+    debug_nominal_push_hold_y_only = True
+    debug_nominal_push_lock_y_to_entry = True
+    debug_nominal_push_max_target_lead_m = 0.010
+    debug_nominal_push_max_vertical_target_lead_m = 0.010
+    debug_nominal_push_tracking_pause_enabled = False
+    debug_nominal_push_spine_tracking_enabled = False
 
     # Visual references for checking the physical layout at a glance. The
     # orange base footprint is the intended robot mounting point; the green
@@ -201,13 +251,13 @@ class BookshelfEnvCfg(PandaResidualEnvCfg):
     residual_curriculum_reset_3 = (math.radians(2.0), 0.0, 0.0, 0.0, math.radians(3.0))
     residual_curriculum_reset_final = residual_curriculum_reset_3
 
-    # Hold the randomized book pose while the official linkage reaches the
-    # 32 mm grasp target; afterwards the book is an ordinary dynamic rigid body.
-    reset_warmup_steps = 60
+    # Generate one coupled arm/gripper/book state directly. The measured
+    # gripper frame is used after the final arm perturbation, so no supported
+    # close-and-settle loop or online rejection pass is required.
+    enable_constructive_grasp_reset = True
+    reset_warmup_steps = 0
 
-    # scripts/sb3/train.py enables this gate for xArm training. Keeping the
-    # task default false prevents direct evaluation tools from filtering out
-    # difficult randomization samples.
+    # Retained only for explicit diagnostics of older reset behavior.
     enable_reset_acceptance_gate = False
     reset_acceptance_validation_steps = 12
     reset_acceptance_max_attempts = 50

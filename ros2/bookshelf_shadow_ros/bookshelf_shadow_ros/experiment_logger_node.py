@@ -14,7 +14,7 @@ import socket
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, Float32MultiArray, Int8, String
 
 from .experiment_logging import git_snapshot, sha256_file
 
@@ -28,6 +28,7 @@ class ExperimentLoggerNode(Node):
         self.run_dir = Path(str(self.get_parameter("run_dir").value)).expanduser()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.events_path = self.run_dir / "events.jsonl"
+        self.monitor_path = self.run_dir / "monitor.txt"
         self.manifest_path = self.run_dir / "manifest.json"
         self.started_at = datetime.now().astimezone().isoformat()
         self.event_counts = Counter()
@@ -46,9 +47,23 @@ class ExperimentLoggerNode(Node):
         self._subscribe_string("activation_debug_topic", "activation_debug")
         self._subscribe_string("policy_debug_topic", "policy_debug")
         self._subscribe_string("plan_report_topic", "plan_report")
+        self._subscribe_bool("pretarget_ready_topic", "pretarget_ready")
+        self._subscribe_string("pretarget_status_topic", "pretarget_status")
+        self._subscribe_bool("task_complete_topic", "task_complete")
+        self._subscribe_string("task_status_topic", "task_status")
+        self._subscribe_bool(
+            "physical_task_complete_topic", "physical_task_complete"
+        )
+        self._subscribe_string(
+            "physical_task_status_topic", "physical_task_status"
+        )
+        self._subscribe_string("control_status_topic", "control_status")
+        self._subscribe_float_array("final_delta_topic", "final_delta")
+        self._subscribe_int("servo_status_topic", "servo_status")
 
         self.create_timer(5.0, self._write_graph_snapshot)
         self.get_logger().info(f"Automatic experiment log: {self.run_dir}")
+        self.get_logger().info(f"Readable monitor log: {self.monitor_path}")
         self.get_logger().info(
             "Logger is subscriber-only and has no action, IK, trajectory, "
             "controller, gripper, or robot-command interface."
@@ -85,6 +100,23 @@ class ExperimentLoggerNode(Node):
         self.declare_parameter(
             "plan_report_topic", "/bookshelf_guarded/plan_report"
         )
+        self.declare_parameter(
+            "pretarget_ready_topic", "/bookshelf_sim/pretarget_ready"
+        )
+        self.declare_parameter(
+            "pretarget_status_topic", "/bookshelf_sim/pretarget_status"
+        )
+        self.declare_parameter("task_complete_topic", "/bookshelf_sim/task_complete")
+        self.declare_parameter("task_status_topic", "/bookshelf_sim/task_status")
+        self.declare_parameter(
+            "physical_task_complete_topic", "/bookshelf_control/task_complete"
+        )
+        self.declare_parameter(
+            "physical_task_status_topic", "/bookshelf_control/task_status"
+        )
+        self.declare_parameter("control_status_topic", "/bookshelf_control/status")
+        self.declare_parameter("final_delta_topic", "/bookshelf_shadow/final_delta")
+        self.declare_parameter("servo_status_topic", "/servo_server/status")
 
     def _subscribe_bool(self, parameter, event_name):
         topic = str(self.get_parameter(parameter).value)
@@ -110,6 +142,27 @@ class ExperimentLoggerNode(Node):
 
         self.create_subscription(String, topic, callback, 10)
 
+    def _subscribe_float_array(self, parameter, event_name):
+        topic = str(self.get_parameter(parameter).value)
+
+        def callback(message):
+            value = [float(item) for item in message.data]
+            self.latest_values[event_name] = value
+            self._append_event(event_name, value)
+
+        self.create_subscription(Float32MultiArray, topic, callback, 10)
+
+    def _subscribe_int(self, parameter, event_name):
+        topic = str(self.get_parameter(parameter).value)
+
+        def callback(message):
+            value = int(message.data)
+            if self.latest_values.get(event_name) != value:
+                self.latest_values[event_name] = value
+                self._append_event(event_name, value)
+
+        self.create_subscription(Int8, topic, callback, 10)
+
     def _append_event(self, event_name, value):
         self.event_counts[event_name] += 1
         entry = {
@@ -120,6 +173,11 @@ class ExperimentLoggerNode(Node):
         }
         with self.events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(entry, sort_keys=True) + "\n")
+        with self.monitor_path.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f"{entry['recorded_at']} {event_name}: "
+                f"{json.dumps(value, sort_keys=True)}\n"
+            )
 
     def _write_graph_snapshot(self):
         topics = {

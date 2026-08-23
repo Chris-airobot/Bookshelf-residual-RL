@@ -8,6 +8,7 @@
   <license>Apache-2.0</license>
 
   <depend>geometry_msgs</depend>
+  <depend>control_msgs</depend>
   <depend>moveit_msgs</depend>
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
@@ -15,12 +16,15 @@
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>tf2_ros</depend>
+  <depend>trajectory_msgs</depend>
   <depend>visualization_msgs</depend>
 
   <exec_depend>bookshelf_shadow_ros</exec_depend>
   <exec_depend>bookshelf_policy_ros</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>xarm_moveit_config</exec_depend>
+  <exec_depend>xarm_moveit_servo</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
 

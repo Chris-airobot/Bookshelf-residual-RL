@@ -35,6 +35,11 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     book_grasp_y_jitter = 0.003
     book_grasp_z_jitter = 0.0015
     book_grasp_yaw_jitter = math.radians(3.0)
+    # Panda keeps the legacy finger-midpoint reset. Embodiments with a measured
+    # calibration may instead place the book from their end-effector frame.
+    book_grasp_pose_source = "finger_midpoint"
+    eef_book_translation_xyz = (0.0, 0.0, 0.0)
+    eef_book_quaternion_wxyz = (1.0, 0.0, 0.0, 0.0)
     debug_freeze_nominal_controller = False
     debug_disable_nominal_release = True
     debug_spawn_at_target_tool_pose = False
@@ -47,6 +52,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     reset_tool_ik_iters = 120
     debug_freeze_tool_to_book_transform = True
     debug_omit_bookshelf_obstacles = False
+    debug_omit_target_book = False
     debug_start_from_default_grasp_pose = False
     debug_print_sampled_grasp_joints = False
     debug_start_joint_pos = {
@@ -84,6 +90,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     debug_reachable_grasp_settle_steps = 60
     debug_use_full_target_ee_quat = False
     debug_use_base_frame_quat_deltas = False
+    debug_action5_as_base_x = False
     debug_position_only_target_ee = False
     debug_pose_ik_rotation_weight = None
     debug_integrate_position_target_ee = False
@@ -119,6 +126,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     debug_disable_episode_resets = False
     # Training-only reset filter. Diagnostic and evaluation entrypoints keep
     # this disabled so their reported pass rates include every sampled grasp.
+    enable_constructive_grasp_reset = False
     enable_reset_acceptance_gate = False
     reset_acceptance_validation_steps = 12
     reset_acceptance_max_attempts = 50
@@ -132,6 +140,7 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     show_target_book_marker = False
     show_target_ee_marker = False
     show_current_ee_marker = False
+    target_ee_marker_source = "planned_release"
     show_reachable_grasp_target_frame = False
     reachable_grasp_target_frame_source = "slot_relative"
     target_ee_marker_axis_length = 0.20
@@ -181,6 +190,8 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     dz_action_scale = 0.0015
     dyaw_action_scale = math.radians(0.35)
     dpitch_action_scale = math.radians(0.30)
+    enable_base_y_rotation_action = False
+    dbase_y_rotation_action_scale = math.radians(0.30)
     residual_action_l2_weight = 0.01
 
     # --- Residual RL nominal controller ---
@@ -231,3 +242,4 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     final_dz_limit = 0.0070
     final_dyaw_limit = math.radians(0.8)
     final_dpitch_limit = math.radians(0.6)
+    final_dbase_y_rotation_limit = math.radians(0.6)

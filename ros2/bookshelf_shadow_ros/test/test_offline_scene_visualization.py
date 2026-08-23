@@ -155,3 +155,13 @@ def test_launch_and_node_have_no_motion_or_planning_interface():
     assert "create_publisher(" in node_source
     assert '"hardware_commanded": False' in node_source
     assert '"execution_authorized": False' in node_source
+
+
+def test_visualizer_can_show_marker_without_publishing_robot_state():
+    node_source = NODE.read_text(encoding="utf-8")
+    assert 'self.declare_parameter("show_coarse_bookshelf", True)' in node_source
+    assert "if self.show_coarse_bookshelf:" in node_source
+    assert 'self.declare_parameter("marker_enabled", False)' in node_source
+    assert 'self.declare_parameter("target_book_frame"' in node_source
+    assert 'marker.ns = "book_aruco"' in node_source
+    assert "if self.marker_enabled:" in node_source

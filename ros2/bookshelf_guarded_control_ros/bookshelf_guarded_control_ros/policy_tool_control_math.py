@@ -397,7 +397,11 @@ def provenance_error(
         return "EEF-to-book transform status mismatch"
     if str(policy_debug.get("bundle_sha256", "")) != expected_bundle_sha256:
         return "policy bundle SHA-256 mismatch"
-    if bool(policy_debug.get("release_requested_diagnostic", False)):
+    policy_mode = str(adapter_debug.get("mode", "")).strip().lower()
+    if (
+        bool(policy_debug.get("release_requested_diagnostic", False))
+        and policy_mode not in ("scripted", "push")
+    ):
         return "policy requested release; physical release is disabled"
     if bool(policy_debug.get("release_executed", False)):
         return "upstream reported a release execution"

@@ -529,26 +529,13 @@ class BookshelfEnv(DirectRLEnv):
             book_quat_w,
         )
         self._ensure_scenario_trace_buffers()
-        expected_book_pos_g = (
-            torch.tensor(
-                self.cfg.book_grasp_offset_hand,
-                device=self.device,
-                dtype=book_pos_g.dtype,
-            )
-            .unsqueeze(0)
-            .expand(self.num_envs, 3)
-            .clone()
-        )
-        expected_book_pos_g += self._scenario_grasp_jitter_env[:, :3]
-        expected_book_quat_w = self._book_grasp_world_quat(
+        expected_book_pos_w, expected_book_quat_w = self._book_reset_pose_w(
+            env_ids,
+            grasp_pos_w,
             grasp_quat_w,
-            self._scenario_grasp_jitter_env[:, 3],
+            self._scenario_grasp_jitter_env,
         )
-        expected_book_pos_w = grasp_pos_w + math_utils.quat_apply(
-            grasp_quat_w,
-            expected_book_pos_g,
-        )
-        _, expected_book_quat_g = math_utils.subtract_frame_transforms(
+        expected_book_pos_g, expected_book_quat_g = math_utils.subtract_frame_transforms(
             grasp_pos_w,
             grasp_quat_w,
             expected_book_pos_w,
@@ -685,8 +672,78 @@ class BookshelfEnv(DirectRLEnv):
             )
         raise ValueError(f"Unknown book_grasp_orientation_source: {source}")
 
+    def _book_reset_pose_w(
+        self,
+        env_ids_t: torch.Tensor,
+        grasp_pos_w: torch.Tensor,
+        grasp_quat_w: torch.Tensor,
+        jitter: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Resolve the held-book reset pose from one explicit frame source."""
+
+        n = int(env_ids_t.numel())
+        dtype = grasp_pos_w.dtype
+        source = str(getattr(self.cfg, "book_grasp_pose_source", "finger_midpoint"))
+        if source == "finger_midpoint":
+            base_offset = torch.tensor(
+                self.cfg.book_grasp_offset_hand,
+                device=self.device,
+                dtype=dtype,
+            ).unsqueeze(0).expand(n, 3)
+            book_pos_w = grasp_pos_w + math_utils.quat_apply(
+                grasp_quat_w,
+                base_offset + jitter[:, :3],
+            )
+            book_quat_w = self._book_grasp_world_quat(
+                grasp_quat_w,
+                jitter[:, 3],
+            )
+            return book_pos_w, book_quat_w
+
+        if source in ("eef_calibrated", "eef_calibrated_position"):
+            eef_pos_w = self.robot.data.body_pos_w[env_ids_t, self._ee_body_idx]
+            eef_quat_w = self.robot.data.body_quat_w[env_ids_t, self._ee_body_idx]
+            eef_book_translation = torch.tensor(
+                self.cfg.eef_book_translation_xyz,
+                device=self.device,
+                dtype=dtype,
+            ).unsqueeze(0).expand(n, 3)
+            book_pos_w = eef_pos_w + math_utils.quat_apply(
+                eef_quat_w,
+                eef_book_translation,
+            )
+            # Keep the existing grasp-randomization axes while centering every
+            # sample on the approved physical xArm calibration.
+            book_pos_w += math_utils.quat_apply(grasp_quat_w, jitter[:, :3])
+            if source == "eef_calibrated_position":
+                book_quat_w = self._book_grasp_world_quat(
+                    grasp_quat_w,
+                    jitter[:, 3],
+                )
+            else:
+                eef_book_quaternion = torch.tensor(
+                    self.cfg.eef_book_quaternion_wxyz,
+                    device=self.device,
+                    dtype=dtype,
+                ).unsqueeze(0).expand(n, 4)
+                book_quat_w = math_utils.quat_mul(
+                    eef_quat_w,
+                    eef_book_quaternion,
+                )
+                book_quat_w = math_utils.quat_mul(
+                    book_quat_w,
+                    self._quat_world_yaw_half(jitter[:, 3]),
+                )
+            return book_pos_w, book_quat_w
+
+        raise ValueError(
+            "book_grasp_pose_source must be 'finger_midpoint', "
+            "'eef_calibrated', or 'eef_calibrated_position', "
+            f"got {source!r}"
+        )
+
     def _snap_book_to_measured_grasp(self, env_ids_t: torch.Tensor) -> torch.Tensor:
-        """Place book from measured finger-midpoint so it starts inside the gripper.
+        """Place the book from the configured grasp-frame calibration.
 
         Returns the written book world state (N, 13) so the caller can hold the book
         at this exact pose during warmup without re-sampling jitter.
@@ -695,8 +752,6 @@ class BookshelfEnv(DirectRLEnv):
         dtype = torch.float32
 
         self._ensure_scenario_trace_buffers()
-        hx, hy, hz = self.cfg.book_grasp_offset_hand
-        off = torch.tensor([hx, hy, hz], device=self.device, dtype=dtype).unsqueeze(0).expand(n, 3).clone()
         jitter = torch.zeros((n, 4), device=self.device, dtype=dtype)
 
         translation_min = getattr(self.cfg, "book_grasp_translation_jitter_min", None)
@@ -711,7 +766,6 @@ class BookshelfEnv(DirectRLEnv):
             if lower.shape != (3,) or upper.shape != (3,) or torch.any(lower > upper):
                 raise ValueError("book grasp translation jitter bounds must be ordered xyz triples")
             jitter[:, :3] = lower + (upper - lower) * torch.rand((n, 3), device=self.device, dtype=dtype)
-            off += jitter[:, :3]
         else:
             symmetric = (
                 float(self.cfg.book_grasp_x_jitter),
@@ -721,7 +775,6 @@ class BookshelfEnv(DirectRLEnv):
             for axis, amount in enumerate(symmetric):
                 if amount != 0.0:
                     jitter[:, axis] = sample_uniform(-amount, amount, (n,), self.device)
-                    off[:, axis] += jitter[:, axis]
 
         if float(self.cfg.book_grasp_yaw_jitter) != 0.0:
             jitter[:, 3] = sample_uniform(
@@ -733,16 +786,16 @@ class BookshelfEnv(DirectRLEnv):
         bank_active = self._scenario_bank_index_env[env_ids_t] >= 0
         if torch.any(bank_active):
             jitter[bank_active] = self._frozen_grasp_jitter_env[env_ids_t][bank_active]
-            base_offset = torch.tensor([hx, hy, hz], device=self.device, dtype=dtype)
-            off[bank_active] = base_offset + jitter[bank_active, :3]
-        yaw_delta = jitter[:, 3]
         self._scenario_grasp_jitter_env[env_ids_t] = jitter
 
         grasp_pos_w, grasp_quat_w = self._grasp_frame_pose_w(env_ids_t)
-        book_pos_w = grasp_pos_w + math_utils.quat_apply(grasp_quat_w, off)
+        book_pos_w, book_quat_w = self._book_reset_pose_w(
+            env_ids_t,
+            grasp_pos_w,
+            grasp_quat_w,
+            jitter,
+        )
         book_pos_env = book_pos_w - self.scene.env_origins[env_ids_t]
-
-        book_quat_w = self._book_grasp_world_quat(grasp_quat_w, yaw_delta)
 
         book_state = self.book.data.default_root_state[env_ids_t].clone()
         book_state[:, 0:3] = book_pos_env + self.scene.env_origins[env_ids_t]

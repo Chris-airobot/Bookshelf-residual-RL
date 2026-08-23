@@ -60,6 +60,10 @@ class BookshelfEnv(BookshelfEnvV5):
         self._debug_preinsert_hold_buf = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._debug_position_only_ee_quat_b = torch.zeros((self.num_envs, 4), device=self.device, dtype=torch.float32)
         self._debug_position_only_ee_quat_b[:, 0] = 1.0
+        self._debug_target_quat_b = self._debug_position_only_ee_quat_b.clone()
+        self._debug_external_orientation_target_pending = torch.zeros(
+            self.num_envs, dtype=torch.bool, device=self.device
+        )
         self._debug_integrated_target_pos_env = torch.zeros(
             (self.num_envs, 3), device=self.device, dtype=torch.float32
         )
@@ -87,6 +91,7 @@ class BookshelfEnv(BookshelfEnvV5):
         self._debug_nominal_push_line_initialized = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
+        self._debug_integrated_target_control_step = -1
         self._debug_missing_index_sequence_cursor = 0
         pose_ik_rotation_weight = getattr(
             self.cfg, "debug_pose_ik_rotation_weight", None
@@ -200,6 +205,23 @@ class BookshelfEnv(BookshelfEnvV5):
             raise ValueError(
                 "policy_release_guard_mode must be 'none' or "
                 "'observable_geometry'"
+            )
+        base_y_rotation_enabled = bool(
+            getattr(self.cfg, "enable_base_y_rotation_action", False)
+        )
+        expected_action_space = 7 if base_y_rotation_enabled else 6
+        if int(self.cfg.action_space) != expected_action_space:
+            raise ValueError(
+                "residual action_space must be "
+                f"{expected_action_space} when enable_base_y_rotation_action="
+                f"{base_y_rotation_enabled}"
+            )
+        if base_y_rotation_enabled and not (
+            bool(getattr(self.cfg, "debug_use_base_frame_quat_deltas", False))
+            and bool(getattr(self.cfg, "debug_action5_as_base_x", False))
+        ):
+            raise ValueError(
+                "base-Y rotation actions require explicit base Z/X/Y mapping"
             )
         premature_release_penalty = float(
             getattr(self.cfg, "premature_release_penalty", 0.0)
@@ -507,7 +529,26 @@ class BookshelfEnv(BookshelfEnvV5):
             self._target_ee_marker = VisualizationMarkers(marker_cfg)
             self._target_ee_marker.set_visibility(True)
 
-        target_pos, target_quat = self._planned_tool_release_pose_quat()
+        marker_source = str(
+            getattr(self.cfg, "target_ee_marker_source", "planned_release")
+        )
+        if (
+            marker_source == "controller_target"
+            and hasattr(self, "_debug_integrated_target_pos_env")
+            and hasattr(self, "_debug_target_quat_b")
+        ):
+            target_pos = self._debug_integrated_target_pos_env
+            target_quat = math_utils.quat_mul(
+                self.robot.data.root_quat_w,
+                self._debug_target_quat_b,
+            )
+        elif marker_source == "planned_release":
+            target_pos, target_quat = self._planned_tool_release_pose_quat()
+        else:
+            raise ValueError(
+                "target_ee_marker_source must be 'planned_release' or "
+                f"'controller_target', got {marker_source!r}"
+            )
         target_pos_w = target_pos[0:1] + self.scene.env_origins[0:1]
         self._target_ee_marker.visualize(target_pos_w, target_quat[0:1])
 
@@ -527,6 +568,50 @@ class BookshelfEnv(BookshelfEnvV5):
         current_pos_w = self._ee_tool_pos_env()[0:1] + self.scene.env_origins[0:1]
         current_quat_w = self.robot.data.body_quat_w[0:1, self._ee_body_idx]
         self._current_ee_marker.visualize(current_pos_w, current_quat_w)
+
+    def debug_hold_current_robot_pose(self, env_index: int = 0) -> dict:
+        """Cancel a debug Cartesian target and hold the measured arm pose."""
+        if env_index < 0 or env_index >= self.num_envs:
+            raise IndexError(f"env_index {env_index} is outside [0, {self.num_envs})")
+
+        env_ids = torch.tensor([env_index], device=self.device, dtype=torch.long)
+        arm_pos = self.robot.data.joint_pos[env_ids][:, self._arm_joint_ids].clone()
+        self._arm_hold_joint_pos[env_ids] = arm_pos
+        self.robot.set_joint_position_target(
+            arm_pos,
+            joint_ids=self._arm_joint_ids,
+            env_ids=env_ids,
+        )
+
+        tool_pos_env = self._ee_tool_pos_env()[env_ids].detach().clone()
+        _, tool_quat_b = self._ee_pose_in_base()
+        self._debug_integrated_target_pos_env[env_ids] = tool_pos_env
+        self._debug_target_quat_b[env_ids] = tool_quat_b[env_ids].detach().clone()
+        self._debug_external_orientation_target_pending[env_ids] = False
+        self._target_pos_env[env_ids] = tool_pos_env
+        return self.debug_grasp_snapshot(env_index=env_index)
+
+    def debug_nudge_retained_orientation_base_y(
+        self, angle_rad: float, env_index: int = 0
+    ) -> None:
+        """Add an explicit base-Y rotation to the retained probe target."""
+        if env_index < 0 or env_index >= self.num_envs:
+            raise IndexError(f"env_index {env_index} is outside [0, {self.num_envs})")
+        if not math.isfinite(angle_rad):
+            raise ValueError("orientation nudge angle must be finite")
+
+        env_ids = torch.tensor([env_index], device=self.device, dtype=torch.long)
+        angle = torch.tensor([angle_rad], device=self.device, dtype=torch.float32)
+        zeros = torch.zeros_like(angle)
+        delta_quat_b = math_utils.quat_from_euler_xyz(zeros, angle, zeros)
+        self._debug_target_quat_b[env_ids] = math_utils.quat_mul(
+            delta_quat_b,
+            self._debug_target_quat_b[env_ids],
+        )
+        # Key 6 changes the retained quaternion outside the 5D policy action.
+        # Mark this environment so the next controller step accepts the new IK
+        # solution instead of treating its all-zero action as a hold command.
+        self._debug_external_orientation_target_pending[env_ids] = True
 
     def _create_robot_base_reference_marker(self) -> None:
         if not bool(getattr(self.cfg, "show_robot_base_reference_marker", False)):
@@ -810,6 +895,8 @@ class BookshelfEnv(BookshelfEnvV5):
             self._spawn_at_planned_tool_pose(env_ids_t)
         _, ee_quat_b = self._ee_pose_in_base()
         self._debug_position_only_ee_quat_b[env_ids_t] = ee_quat_b[env_ids_t].detach().clone()
+        self._debug_target_quat_b[env_ids_t] = ee_quat_b[env_ids_t].detach().clone()
+        self._debug_external_orientation_target_pending[env_ids_t] = False
         self._debug_integrated_target_pos_env[env_ids_t] = (
             self._ee_tool_pos_env()[env_ids_t].detach().clone()
         )
@@ -835,6 +922,8 @@ class BookshelfEnv(BookshelfEnvV5):
             self._create_robot_base_reference_marker()
             if bool(getattr(self.cfg, "debug_print_sampled_grasp_joints", False)):
                 self._print_env0_joint_values("[Bookshelf v6] sampled grasp joints")
+        if bool(getattr(self.cfg, "enable_constructive_grasp_reset", False)):
+            self._refresh_state_after_reset_acceptance(env_ids_t)
         self._apply_reset_acceptance_gate(env_ids_t)
 
     def _apply_debug_row_layout_y_offset(self, env_ids_t: torch.Tensor) -> None:
@@ -1298,8 +1387,8 @@ class BookshelfEnv(BookshelfEnvV5):
 
         if bool(torch.any(env_ids_t == 0).item()):
             print(
-                "[XARM_PANDA_RESET] book snapped to measured finger midpoint; "
-                f"book_grasp_offset_hand={tuple(self.cfg.book_grasp_offset_hand)}; "
+                "[XARM_PANDA_RESET] book placed from configured grasp source; "
+                f"book_grasp_pose_source={self.cfg.book_grasp_pose_source}; "
                 "velocity reset to zero",
                 flush=True,
             )
@@ -1533,6 +1622,18 @@ class BookshelfEnv(BookshelfEnvV5):
         target_pos_env[env_ids_t, 2] = target_z + offset[2]
         target_quat_b[env_ids_t] = quat
 
+        constructive_reset = bool(
+            getattr(self.cfg, "enable_constructive_grasp_reset", False)
+        )
+        omit_target_book = bool(getattr(self.cfg, "debug_omit_target_book", False))
+        if constructive_reset and not omit_target_book:
+            # Keep the previous episode's dynamic book away from the robot
+            # while the new arm state is generated.
+            self._park_target_book(env_ids_t)
+            self.scene.write_data_to_sim()
+            self.sim.forward()
+            self.scene.update(dt=0.0)
+
         iterations = max(1, int(self.cfg.reset_tool_ik_iters))
         for _ in range(iterations):
             joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
@@ -1549,8 +1650,12 @@ class BookshelfEnv(BookshelfEnvV5):
             self.robot.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids_t)
             self.robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
             self.scene.write_data_to_sim()
-            self.sim.step(render=False)
-            self.scene.update(dt=self.physics_dt)
+            if constructive_reset:
+                self.sim.forward()
+                self.scene.update(dt=0.0)
+            else:
+                self.sim.step(render=False)
+                self.scene.update(dt=self.physics_dt)
 
         # The slot-relative IK above intentionally establishes the nominal
         # xArm pose. Apply reset joint noise once afterwards so IK cannot erase
@@ -1581,8 +1686,12 @@ class BookshelfEnv(BookshelfEnvV5):
             )
             self.robot.set_joint_position_target(joint_pos, env_ids=env_ids_t)
             self.scene.write_data_to_sim()
-            self.sim.step(render=False)
-            self.scene.update(dt=self.physics_dt)
+            if constructive_reset:
+                self.sim.forward()
+                self.scene.update(dt=0.0)
+            else:
+                self.sim.step(render=False)
+                self.scene.update(dt=self.physics_dt)
 
         self._arm_hold_joint_pos[env_ids_t] = self.robot.data.joint_pos[env_ids_t][
             :, self._arm_joint_ids
@@ -1593,37 +1702,48 @@ class BookshelfEnv(BookshelfEnvV5):
             env_ids=env_ids_t,
         )
 
-        # The official xArm USD starts at the 34 mm placement gap. Establish
-        # the configured 32 mm holding gap while the book pose is supported,
-        # then let the rigid book become dynamic after the warmup loop.
-        if len(self._gripper_command_joint_ids) > 0:
-            finger_des = torch.full(
-                (env_ids_t.numel(), len(self._gripper_command_joint_ids)),
-                float(self.cfg.gripper_closed_joint_pos),
-                device=self.device,
-                dtype=torch.float32,
-            )
-            self.robot.set_joint_position_target(
-                finger_des,
-                joint_ids=self._gripper_command_joint_ids,
-                env_ids=env_ids_t,
-            )
+        if omit_target_book:
+            self._park_target_book(env_ids_t)
+        elif constructive_reset:
+            self._write_constructive_grasp_reset(env_ids_t)
+        else:
+            # The official xArm USD starts at the 34 mm placement gap. Establish
+            # the configured 32 mm holding gap while the book pose is supported,
+            # then let the rigid book become dynamic after the warmup loop.
+            if len(self._gripper_command_joint_ids) > 0:
+                finger_des = torch.full(
+                    (env_ids_t.numel(), len(self._gripper_command_joint_ids)),
+                    float(self.cfg.gripper_closed_joint_pos),
+                    device=self.device,
+                    dtype=torch.float32,
+                )
+                self.robot.set_joint_position_target(
+                    finger_des,
+                    joint_ids=self._gripper_command_joint_ids,
+                    env_ids=env_ids_t,
+                )
 
-        snapped_book_state = self._snap_book_to_measured_grasp(env_ids_t)
-        warmup = max(0, int(getattr(self.cfg, "reset_warmup_steps", 0)))
-        for _ in range(warmup):
+            snapped_book_state = self._snap_book_to_measured_grasp(env_ids_t)
+            warmup = max(0, int(getattr(self.cfg, "reset_warmup_steps", 0)))
+            for _ in range(warmup):
+                self.book.write_root_state_to_sim(snapped_book_state, env_ids=env_ids_t)
+                self.scene.write_data_to_sim()
+                self.sim.step(render=False)
+                self.scene.update(dt=self.physics_dt)
+            # End the supported settling phase at the exact requested transform
+            # with zero velocity. The next normal environment step is the first
+            # fully dynamic grasp observation.
             self.book.write_root_state_to_sim(snapped_book_state, env_ids=env_ids_t)
             self.scene.write_data_to_sim()
-            self.sim.step(render=False)
-            self.scene.update(dt=self.physics_dt)
-        # End the supported settling phase at the exact requested transform
-        # with zero velocity. The next normal environment step is the first
-        # fully dynamic grasp observation.
-        self.book.write_root_state_to_sim(snapped_book_state, env_ids=env_ids_t)
-        self.scene.write_data_to_sim()
-        self.scene.update(dt=0.0)
+            self.scene.update(dt=0.0)
 
         actual_pos = self._ee_tool_pos_env()[env_ids_t]
+        book_corners = self._book_corners_env()[env_ids_t]
+        book_lowest_z = book_corners[:, :, 2].amin(dim=1)
+        book_center_z = (
+            self.book.data.root_link_pos_w[env_ids_t, 2]
+            - self.scene.env_origins[env_ids_t, 2]
+        )
         _, actual_quat = self._ee_pose_in_base()
         actual_quat = actual_quat[env_ids_t]
         pos_error = torch.linalg.norm(actual_pos - target_pos_env[env_ids_t], dim=-1)
@@ -1646,12 +1766,57 @@ class BookshelfEnv(BookshelfEnvV5):
                 "nominal_target_rotation_delta_after_joint_noise_deg="
                 f"{math.degrees(float(rot_error[env0_index].item())):.3f} "
                 f"applied_joint_noise_max_deg={sampled_noise_deg:.3f} "
+                f"book_grasp_pose_source={self.cfg.book_grasp_pose_source} "
+                f"book_center_z_m={float(book_center_z[env0_index].item()):.6f} "
+                f"book_lowest_z_m={float(book_lowest_z[env0_index].item()):.6f} "
                 f"target_tcp_env_m={target_pos_env[env_ids_t][env0_index].detach().cpu().tolist()}"
             )
 
         self._target_pos_env[env_ids_t] = actual_pos
         _, _, actual_yaw = math_utils.euler_xyz_from_quat(actual_quat)
         self._target_yaw[env_ids_t] = actual_yaw
+
+    def _write_constructive_grasp_reset(self, env_ids_t: torch.Tensor) -> None:
+        """Write one consistent dynamic arm, gripper, and held-book state."""
+
+        joint_pos = self.robot.data.joint_pos[env_ids_t].clone()
+        joint_vel = torch.zeros_like(self.robot.data.joint_vel[env_ids_t])
+        hold_joint_pos = float(self.cfg.gripper_closed_joint_pos)
+
+        if len(self._finger_joint_ids) > 0:
+            joint_pos[:, self._finger_joint_ids] = hold_joint_pos
+        self.robot.write_joint_state_to_sim(
+            joint_pos,
+            joint_vel,
+            env_ids=env_ids_t,
+        )
+        self.robot.set_joint_position_target(
+            joint_pos[:, self._arm_joint_ids],
+            joint_ids=self._arm_joint_ids,
+            env_ids=env_ids_t,
+        )
+        if len(self._gripper_command_joint_ids) > 0:
+            gripper_target = torch.full(
+                (env_ids_t.numel(), len(self._gripper_command_joint_ids)),
+                hold_joint_pos,
+                device=self.device,
+                dtype=joint_pos.dtype,
+            )
+            self.robot.set_joint_position_target(
+                gripper_target,
+                joint_ids=self._gripper_command_joint_ids,
+                env_ids=env_ids_t,
+            )
+
+        # Forward updates link transforms without integrating contact forces.
+        self.scene.write_data_to_sim()
+        self.sim.forward()
+        self.scene.update(dt=0.0)
+
+        self._snap_book_to_measured_grasp(env_ids_t)
+        self.scene.write_data_to_sim()
+        self.sim.forward()
+        self.scene.update(dt=0.0)
 
     def _print_env0_joint_values(self, label: str) -> None:
         joint_pos = self.robot.data.joint_pos[0].detach().cpu()
@@ -1757,6 +1922,20 @@ class BookshelfEnv(BookshelfEnvV5):
             obj.write_root_state_to_sim(state, env_ids=env_ids_t)
 
         self.scene.write_data_to_sim()
+
+    def _park_target_book(self, env_ids_t: torch.Tensor) -> None:
+        """Move the target book away for a collision-free arm controller probe."""
+        parked_state = self.book.data.root_state_w[env_ids_t].clone()
+        parked_state[:, 0:3] = self.scene.env_origins[env_ids_t]
+        parked_state[:, 2] -= 5.0
+        parked_state[:, 7:] = 0.0
+        self.book.write_root_state_to_sim(parked_state, env_ids=env_ids_t)
+        self.scene.write_data_to_sim()
+        if bool(torch.any(env_ids_t == 0).item()):
+            print(
+                "[XARM_ACTION_PROBE] target book parked; arm motion is collision-free",
+                flush=True,
+            )
 
     def _capture_fixed_tool_to_book_transform(self, env_ids_t: torch.Tensor) -> None:
         if not hasattr(self, "_book_offset_tool"):
@@ -1912,6 +2091,7 @@ class BookshelfEnv(BookshelfEnvV5):
     def _compute_ik_joint_targets_from_tool_quat(
         self, target_pos_env: torch.Tensor, target_quat_b: torch.Tensor
     ) -> torch.Tensor:
+        """Solve the link7 pose that places the offset TCP at the target pose."""
         self._target_pos_env[:] = target_pos_env
 
         target_pos_b = self._position_env_to_base(target_pos_env)
@@ -1925,71 +2105,6 @@ class BookshelfEnv(BookshelfEnvV5):
         ee_pos_b, ee_quat_b = self._ee_pose_in_base()
         jacobian = self.robot.root_physx_view.get_jacobians()[:, self._jacobi_body_idx, :, self._jacobi_joint_ids]
         joint_pos = self.robot.data.joint_pos[:, self._arm_joint_ids]
-
-        rotation_weight = getattr(self.cfg, "debug_pose_ik_rotation_weight", None)
-        if rotation_weight is not None:
-            # Control the offset TCP directly. The xArm Jacobian belongs to
-            # link7, while the pushing point is 172 mm away; assuming perfect
-            # wrist orientation converts small angular errors into large
-            # lateral TCP errors.
-            tool_offset_b = math_utils.quat_apply(
-                ee_quat_b,
-                self._ik_body_offset_pos_b,
-            )
-            tool_pos_b = ee_pos_b + tool_offset_b
-            position_error = target_pos_b - tool_pos_b
-            _, rotation_error = math_utils.compute_pose_error(
-                ee_pos_b,
-                ee_quat_b,
-                ee_pos_b,
-                target_quat_b,
-                rot_error_type="axis_angle",
-            )
-
-            offset_x, offset_y, offset_z = tool_offset_b.unbind(dim=-1)
-            zeros = torch.zeros_like(offset_x)
-            offset_skew = torch.stack(
-                (
-                    zeros,
-                    -offset_z,
-                    offset_y,
-                    offset_z,
-                    zeros,
-                    -offset_x,
-                    -offset_y,
-                    offset_x,
-                    zeros,
-                ),
-                dim=-1,
-            ).reshape(self.num_envs, 3, 3)
-            tool_position_jacobian = (
-                jacobian[:, 0:3, :]
-                - offset_skew @ jacobian[:, 3:6, :]
-            )
-            rotation_weight = float(rotation_weight)
-            weighted_error = torch.cat(
-                (position_error, rotation_weight * rotation_error), dim=-1
-            )
-            weighted_jacobian = torch.cat(
-                (
-                    tool_position_jacobian,
-                    rotation_weight * jacobian[:, 3:6, :],
-                ),
-                dim=1,
-            )
-            jacobian_t = weighted_jacobian.transpose(1, 2)
-            damping = 0.01
-            damping_matrix = (damping**2) * torch.eye(
-                weighted_jacobian.shape[1],
-                device=self.device,
-                dtype=weighted_jacobian.dtype,
-            )
-            delta_joint_pos = jacobian_t @ torch.linalg.solve(
-                weighted_jacobian @ jacobian_t + damping_matrix,
-                weighted_error.unsqueeze(-1),
-            )
-            return joint_pos + delta_joint_pos.squeeze(-1)
-
         return self._ik.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)
 
     @staticmethod
@@ -2428,7 +2543,12 @@ class BookshelfEnv(BookshelfEnvV5):
         if weight <= 0.0:
             return rew
 
-        residual_l2 = torch.mean(torch.square(self.actions[:, 0:5]), dim=-1)
+        motion_action_count = 6 if bool(
+            getattr(self.cfg, "enable_base_y_rotation_action", False)
+        ) else 5
+        residual_l2 = torch.mean(
+            torch.square(self.actions[:, :motion_action_count]), dim=-1
+        )
         penalty = weight * residual_l2
         rew = rew - penalty
         self.extras["log"]["residual_action_l2_mean"] = residual_l2.mean()
@@ -2550,7 +2670,14 @@ class BookshelfEnv(BookshelfEnvV5):
                 )
 
     def _nominal_cartesian_delta(self, mode: torch.Tensor) -> torch.Tensor:
-        nominal = torch.zeros((self.num_envs, 5), device=self.device, dtype=torch.float32)
+        motion_action_count = 6 if bool(
+            getattr(self.cfg, "enable_base_y_rotation_action", False)
+        ) else 5
+        nominal = torch.zeros(
+            (self.num_envs, motion_action_count),
+            device=self.device,
+            dtype=torch.float32,
+        )
         if bool(getattr(self.cfg, "debug_freeze_nominal_controller", False)):
             return nominal
         if not bool(getattr(self.cfg, "enable_nominal_controller", True)):
@@ -2714,16 +2841,21 @@ class BookshelfEnv(BookshelfEnvV5):
 
         self._update_nominal_push_lowering_phase(mode)
 
-        residual = torch.stack(
-            (
-                self.actions[:, 0] * self.cfg.dx_action_scale,
-                self.actions[:, 1] * self.cfg.dy_action_scale,
-                self.actions[:, 2] * self.cfg.dz_action_scale,
-                self.actions[:, 3] * self.cfg.dyaw_action_scale,
-                self.actions[:, 4] * self.cfg.dpitch_action_scale,
-            ),
-            dim=-1,
+        residual_components = [
+            self.actions[:, 0] * self.cfg.dx_action_scale,
+            self.actions[:, 1] * self.cfg.dy_action_scale,
+            self.actions[:, 2] * self.cfg.dz_action_scale,
+            self.actions[:, 3] * self.cfg.dyaw_action_scale,
+            self.actions[:, 4] * self.cfg.dpitch_action_scale,
+        ]
+        base_y_rotation_enabled = bool(
+            getattr(self.cfg, "enable_base_y_rotation_action", False)
         )
+        if base_y_rotation_enabled:
+            residual_components.append(
+                self.actions[:, 5] * self.cfg.dbase_y_rotation_action_scale
+            )
+        residual = torch.stack(residual_components, dim=-1)
         residual = residual * self._residual_action_scale()
         nominal = self._nominal_cartesian_delta(mode)
         delta = nominal + residual
@@ -2734,6 +2866,12 @@ class BookshelfEnv(BookshelfEnvV5):
         delta[:, 4] = torch.clamp(
             delta[:, 4], -float(self.cfg.final_dpitch_limit), float(self.cfg.final_dpitch_limit)
         )
+        if base_y_rotation_enabled:
+            delta[:, 5] = torch.clamp(
+                delta[:, 5],
+                -float(self.cfg.final_dbase_y_rotation_limit),
+                float(self.cfg.final_dbase_y_rotation_limit),
+            )
 
         normal_mask = mode != _MODE_SCRIPTED
         push_mask = normal_mask & (mode == _MODE_PUSH)
@@ -2748,6 +2886,8 @@ class BookshelfEnv(BookshelfEnvV5):
             delta[push_mask, 1] = 0.0
             delta[push_mask, 3] = 0.0
             delta[push_mask, 4] = 0.0
+            if base_y_rotation_enabled:
+                delta[push_mask, 5] = 0.0
             delta[lowering_mask, 0] = 0.0
             delta[pushing_mask, 2] = 0.0
         ee_tool_pos_env = self._ee_tool_pos_env()
@@ -2924,6 +3064,11 @@ class BookshelfEnv(BookshelfEnvV5):
         integrate_position_target = bool(
             getattr(self.cfg, "debug_integrate_position_target_ee", False)
         )
+        advance_integrated_target = (
+            integrate_position_target
+            and self._debug_integrated_target_control_step
+            != int(self.common_step_counter)
+        )
         target_pos_env = (
             self._debug_integrated_target_pos_env.clone()
             if integrate_position_target
@@ -2989,9 +3134,10 @@ class BookshelfEnv(BookshelfEnvV5):
         target_pitch = ee_pitch_b.clone()
 
         if torch.any(normal_mask):
-            target_pos_env[normal_mask] = (
-                target_pos_env[normal_mask] + delta[normal_mask, 0:3]
-            )
+            if not integrate_position_target or advance_integrated_target:
+                target_pos_env[normal_mask] = (
+                    target_pos_env[normal_mask] + delta[normal_mask, 0:3]
+                )
             target_yaw[normal_mask] = _wrap_to_pi(
                 ee_yaw_b[normal_mask] + delta[normal_mask, 3]
             )
@@ -3073,19 +3219,47 @@ class BookshelfEnv(BookshelfEnvV5):
 
         if integrate_position_target:
             self._debug_integrated_target_pos_env[:] = target_pos_env
+            self._debug_integrated_target_control_step = int(
+                self.common_step_counter
+            )
 
         if bool(getattr(self.cfg, "debug_position_only_target_ee", False)):
+            self._debug_target_quat_b[:] = self._debug_position_only_ee_quat_b
             joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
                 target_pos_env, self._debug_position_only_ee_quat_b
             )
         elif bool(getattr(self.cfg, "debug_use_base_frame_quat_deltas", False)):
-            target_quat = ee_quat_b.clone()
-            if torch.any(normal_mask):
-                target_quat[normal_mask] = self._apply_base_frame_orientation_delta(
-                    ee_quat_b[normal_mask],
-                    delta[normal_mask, 3],
-                    delta[normal_mask, 4],
-                )
+            target_quat = (
+                self._debug_target_quat_b.clone()
+                if integrate_position_target
+                else ee_quat_b.clone()
+            )
+            if torch.any(normal_mask) and (
+                not integrate_position_target or advance_integrated_target
+            ):
+                if bool(getattr(self.cfg, "debug_action5_as_base_x", False)):
+                    zeros = torch.zeros_like(delta[normal_mask, 3])
+                    base_y_delta = (
+                        delta[normal_mask, 5]
+                        if base_y_rotation_enabled
+                        else zeros
+                    )
+                    delta_quat_b = math_utils.quat_from_euler_xyz(
+                        delta[normal_mask, 4],
+                        base_y_delta,
+                        delta[normal_mask, 3],
+                    )
+                    target_quat[normal_mask] = math_utils.quat_mul(
+                        delta_quat_b,
+                        target_quat[normal_mask],
+                    )
+                else:
+                    target_quat[normal_mask] = self._apply_base_frame_orientation_delta(
+                        target_quat[normal_mask],
+                        delta[normal_mask, 3],
+                        delta[normal_mask, 4],
+                    )
+            self._debug_target_quat_b[:] = target_quat
             joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
                 target_pos_env,
                 target_quat,
@@ -3104,13 +3278,43 @@ class BookshelfEnv(BookshelfEnvV5):
             target_quat = ee_quat_b.clone()
             if torch.any(normal_mask):
                 target_quat[normal_mask] = full_target_quat_b[normal_mask]
+            self._debug_target_quat_b[:] = target_quat
             joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(target_pos_env, target_quat)
         else:
-            joint_pos_des = self._compute_ik_joint_targets_from_tool(target_pos_env, target_yaw, target_pitch)
+            if integrate_position_target:
+                target_roll, retained_pitch, retained_yaw = (
+                    math_utils.euler_xyz_from_quat(self._debug_target_quat_b)
+                )
+                if advance_integrated_target:
+                    retained_yaw[normal_mask] = _wrap_to_pi(
+                        retained_yaw[normal_mask] + delta[normal_mask, 3]
+                    )
+                    retained_pitch[normal_mask] = _wrap_to_pi(
+                        retained_pitch[normal_mask] + delta[normal_mask, 4]
+                    )
+                target_quat = math_utils.quat_from_euler_xyz(
+                    target_roll,
+                    retained_pitch,
+                    retained_yaw,
+                )
+                self._debug_target_quat_b[:] = target_quat
+                joint_pos_des = self._compute_ik_joint_targets_from_tool_quat(
+                    target_pos_env,
+                    target_quat,
+                )
+            else:
+                joint_pos_des = self._compute_ik_joint_targets_from_tool(
+                    target_pos_env,
+                    target_yaw,
+                    target_pitch,
+                )
 
         act_small = delta.abs() < float(self.cfg.ik_hold_action_epsilon)
         hold_arm = normal_mask & act_small.all(dim=-1)
-        move_arm = ~hold_arm
+        external_orientation_target = (
+            self._debug_external_orientation_target_pending.clone()
+        )
+        move_arm = ~hold_arm | external_orientation_target
 
         move_exp = move_arm.unsqueeze(-1).expand_as(joint_pos_des)
         self._arm_hold_joint_pos = torch.where(move_exp, joint_pos_des, self._arm_hold_joint_pos)
@@ -3119,6 +3323,7 @@ class BookshelfEnv(BookshelfEnvV5):
         joint_pos_des = torch.where(hold_exp, self._arm_hold_joint_pos, joint_pos_des)
 
         self.robot.set_joint_position_target(joint_pos_des, joint_ids=self._arm_joint_ids)
+        self._debug_external_orientation_target_pending[external_orientation_target] = False
 
         if len(self._gripper_command_joint_ids) > 0:
             hold_width = float(self.cfg.gripper_closed_joint_pos)

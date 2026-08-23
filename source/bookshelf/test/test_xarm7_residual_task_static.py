@@ -153,6 +153,111 @@ def test_xarm7_reset_solves_the_reviewed_slot_relative_tcp_pose_with_ik():
     assert '"[XARM_RANDOMIZED_RESET] "' in residual
 
 
+def test_xarm7_training_uses_the_verified_cartesian_controller_path():
+    config = read(TASK / "bookshelf_xarm7_residual_env_cfg.py")
+    for expected in (
+        "debug_use_base_frame_quat_deltas = True",
+        "debug_position_only_target_ee = False",
+        "debug_pose_ik_rotation_weight = None",
+        "debug_integrate_position_target_ee = False",
+        "debug_scripted_fixed_retreat_path = True",
+        "debug_nominal_push_reuse_insert_forward = True",
+        "debug_nominal_push_lower_before_forward = True",
+        "debug_nominal_push_align_to_book_center = True",
+        "debug_nominal_push_lock_y_to_entry = True",
+        "debug_nominal_push_max_target_lead_m = 0.010",
+        "debug_nominal_push_max_vertical_target_lead_m = 0.010",
+    ):
+        assert expected in config
+
+
+def test_xarm7_reset_uses_the_approved_eef_to_book_calibration():
+    panda_config = read(TASK / "bookshelf_residual_env_cfg.py")
+    xarm_config = read(TASK / "bookshelf_xarm7_residual_env_cfg.py")
+    shared = read(TASK / "bookshelf_env_v4.py")
+
+    assert 'book_grasp_pose_source = "finger_midpoint"' in panda_config
+    assert 'book_grasp_pose_source = "eef_calibrated_position"' in xarm_config
+    assert "XARM7_EEF_BOOK_TRANSLATION_XYZ" in xarm_config
+    assert "0.006189808263520789" in xarm_config
+    assert "0.004397635899244547" in xarm_config
+    assert "0.18076520526773382" in xarm_config
+    assert "XARM7_EEF_BOOK_QUATERNION_WXYZ" in xarm_config
+    assert "def _book_reset_pose_w" in shared
+    assert 'if source in ("eef_calibrated", "eef_calibrated_position")' in shared
+    assert 'if source == "eef_calibrated_position"' in shared
+    assert "self.cfg.eef_book_translation_xyz" in shared
+    assert "self.cfg.eef_book_quaternion_wxyz" in shared
+    assert "expected_book_pos_w, expected_book_quat_w = self._book_reset_pose_w(" in shared
+    residual = read(TASK / "bookshelf_residual_env.py")
+    assert 'f"book_grasp_pose_source={self.cfg.book_grasp_pose_source} "' in residual
+    assert 'f"book_lowest_z_m={float(book_lowest_z[env0_index].item()):.6f} "' in residual
+def test_zero_agent_has_an_isolated_xarm_action_probe():
+    zero_agent = read(ROOT / "scripts/zero_agent.py")
+    residual_config = read(TASK / "bookshelf_residual_env_cfg.py")
+    residual = read(TASK / "bookshelf_residual_env.py")
+    for expected in (
+        '"--xarm_action_probe"',
+        '"--xarm_keyboard_action_probe"',
+        '"--xarm_action_probe_steps"',
+        '"--xarm_action_probe_wait_steps"',
+        '"--xarm_action_probe_observe_steps"',
+        "env_cfg.debug_freeze_nominal_controller = True",
+        "env_cfg.debug_hold_book_fixed_to_tool = False",
+        "env_cfg.debug_omit_target_book = False",
+        "env_cfg.debug_omit_bookshelf_obstacles = False",
+        "env_cfg.debug_use_base_frame_quat_deltas = True",
+        "env_cfg.debug_action5_as_base_x = True",
+        "env_cfg.debug_pose_ik_rotation_weight = None",
+        "env_cfg.debug_integrate_position_target_ee = True",
+        'env_cfg.target_ee_marker_source = "controller_target"',
+        '"[XARM_ACTION_PROBE_START] "',
+        '"[XARM_ACTION_PROBE_RESULT] "',
+        '"[XARM_KEYBOARD_READY] press 1-7; Shift reverses "',
+        '"[XARM_KEYBOARD_RESULT] "',
+        '"end_effector": pose_change(',
+        '"book": pose_change(',
+        "args_cli.debug_grasp_interval = 0",
+        '"1": ("+X", (1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))',
+        '"5": ("+base-X", (0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0))',
+        '"6": ("+base-Y", (0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0))',
+        '"7": ("release/open", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0))',
+    ):
+        assert expected in zero_agent
+    assert 'target_ee_marker_source = "planned_release"' in residual_config
+    assert "debug_omit_target_book = False" in residual_config
+    assert "debug_action5_as_base_x = False" in residual_config
+    assert "def _park_target_book" in residual
+    assert '"[XARM_ACTION_PROBE] target book parked; arm motion is collision-free"' in residual
+    assert 'marker_source == "controller_target"' in residual
+    assert "self._debug_integrated_target_pos_env" in residual
+    assert "self._debug_integrated_target_control_step" in residual
+    assert "advance_integrated_target" in residual
+    assert "self._debug_target_quat_b" in residual
+    assert "retained_pitch" in residual
+    assert "retained_yaw" in residual
+    assert "def debug_hold_current_robot_pose" in residual
+    assert "def debug_nudge_retained_orientation_base_y" in residual
+    assert "self._debug_external_orientation_target_pending[env_ids] = True" in residual
+    assert "move_arm = ~hold_arm | external_orientation_target" in residual
+    assert "env.unwrapped.debug_hold_current_robot_pose(" in zero_agent
+    assert "actions[0, :] = keyboard_action" in zero_agent
+    assert '"the short command pulse is still active"' in zero_agent
+
+
+def test_xarm7_policy_exposes_three_rotation_axes_plus_release():
+    panda_config = read(TASK / "bookshelf_residual_env_cfg.py")
+    xarm_config = read(TASK / "bookshelf_xarm7_residual_env_cfg.py")
+    residual = read(TASK / "bookshelf_residual_env.py")
+
+    assert "enable_base_y_rotation_action = False" in panda_config
+    assert "action_space = 7" in xarm_config
+    assert "enable_base_y_rotation_action = True" in xarm_config
+    assert "debug_action5_as_base_x = True" in xarm_config
+    assert "self.actions[:, 5] * self.cfg.dbase_y_rotation_action_scale" in residual
+    assert "delta[normal_mask, 5]" in residual
+
+
 def test_ik_converts_scene_targets_to_the_shifted_robot_base_frame():
     shared = read(TASK / "bookshelf_env_v4.py")
     residual = read(TASK / "bookshelf_residual_env.py")
@@ -208,7 +313,7 @@ def test_xarm_can_compare_against_the_panda_reset_grasp():
     assert 'getattr(self.cfg, "debug_spawn_book_panda_style", False)' in residual
     assert "def _spawn_book_panda_style" in residual
     assert "book_state = self._snap_book_to_measured_grasp(env_ids_t)" in residual
-    assert '"[XARM_PANDA_RESET] book snapped to measured finger midpoint; "' in residual
+    assert '"[XARM_PANDA_RESET] book placed from configured grasp source; "' in residual
 
     assert "show_reachable_grasp_target_frame = False" in residual_config
     assert 'reachable_grasp_target_frame_source = "slot_relative"' in residual_config
@@ -311,8 +416,8 @@ def test_xarm_can_hand_a_dynamic_grasp_to_the_nominal_controller():
     assert "env_cfg.debug_use_full_target_ee_quat = False" in zero_agent
     assert "env_cfg.debug_use_base_frame_quat_deltas = False" in zero_agent
     assert "env_cfg.debug_position_only_target_ee = True" in zero_agent
-    assert "env_cfg.debug_pose_ik_rotation_weight = 1.0" in zero_agent
-    assert "env_cfg.debug_integrate_position_target_ee = True" in zero_agent
+    assert "env_cfg.debug_pose_ik_rotation_weight = None" in zero_agent
+    assert "env_cfg.debug_integrate_position_target_ee = False" in zero_agent
     assert "env_cfg.debug_scripted_current_relative_target = False" in zero_agent
     assert "env_cfg.debug_scripted_fixed_retreat_path = True" in zero_agent
     assert "-0.001 * float(args_cli.xarm_nominal_retreat_mm)" in zero_agent
@@ -378,10 +483,8 @@ def test_xarm_can_hand_a_dynamic_grasp_to_the_nominal_controller():
     assert '"[XARM_NOMINAL_PREINSERT] original book-relative target "' in residual
     assert "def _apply_robot_nominal_controller_handoff" in residual
     assert "def _apply_base_frame_orientation_delta" in residual
-    assert 'getattr(self.cfg, "debug_pose_ik_rotation_weight", None)' in residual
-    assert "tool_position_jacobian = (" in residual
-    assert "offset_skew @ jacobian[:, 3:6, :]" in residual
-    assert "torch.linalg.solve(" in residual
+    assert "return self._ik.compute(ee_pos_b, ee_quat_b, jacobian, joint_pos)" in residual
+    assert "tool_position_jacobian" not in residual
     assert 'getattr(self.cfg, "debug_use_base_frame_quat_deltas", False)' in residual
     assert 'getattr(self.cfg, "debug_integrate_position_target_ee", False)' in residual
     assert 'getattr(self.cfg, "debug_scripted_current_relative_target", False)' in residual
@@ -568,7 +671,7 @@ def test_success_depth_remains_valid_after_passing_the_minimum():
     assert "front_ok = front <= (float(cfg.success_front_clear_max) + front_eps)" in manual_step
 
 
-def test_xarm_training_filters_invalid_randomized_grasps_only_before_ppo():
+def test_xarm_training_constructs_valid_randomized_grasps_without_filtering():
     shared_config = read(TASK / "bookshelf_residual_env_cfg.py")
     xarm_config = read(TASK / "bookshelf_xarm7_residual_env_cfg.py")
     residual = read(TASK / "bookshelf_residual_env.py")
@@ -577,13 +680,10 @@ def test_xarm_training_filters_invalid_randomized_grasps_only_before_ppo():
     zero_agent = read(ROOT / "scripts/zero_agent.py")
     preflight = read(ROOT / "scripts/xarm_randomization_preflight.py")
 
-    for config in (shared_config, xarm_config):
-        assert "enable_reset_acceptance_gate = False" in config
-        assert "reset_acceptance_validation_steps = 12" in config
-        assert "reset_acceptance_max_attempts = 50" in config
-        assert "reset_acceptance_translation_limit_m = 0.003" in config
-        assert "reset_acceptance_rotation_limit_rad = math.radians(3.0)" in config
-        assert "reset_acceptance_arm_error_limit_rad = math.radians(8.0)" in config
+    assert "enable_constructive_grasp_reset = False" in shared_config
+    assert "enable_constructive_grasp_reset = True" in xarm_config
+    assert "reset_warmup_steps = 0" in xarm_config
+    assert "enable_reset_acceptance_gate = False" in xarm_config
 
     assert '"--disable_reset_acceptance_gate"' in train
     assert '"--xarm_training_standoff_mm"' in train
@@ -593,16 +693,16 @@ def test_xarm_training_filters_invalid_randomized_grasps_only_before_ppo():
     assert "env_cfg.xarm_training_reset_standoff_m = standoff_m" in train
     assert '"[XARM_TRAINING_RESET] additional_standoff_mm="' in train
     assert "xarm_training_reset_standoff_m = 0.030" in xarm_config
-    assert "env_cfg.enable_reset_acceptance_gate = not bool(" in train
+    assert "env_cfg.enable_reset_acceptance_gate = False" in train
+    assert '"[XARM_CONSTRUCTIVE_RESET] enabled; "' in train
     for diagnostic_entrypoint in (play, zero_agent, preflight):
         assert "env_cfg.enable_reset_acceptance_gate = False" in diagnostic_entrypoint
 
-    assert "def _validate_randomized_reset(" in residual
-    assert "def _apply_reset_acceptance_gate(" in residual
-    assert "self._reset_idx(rejected_ids)" in residual
-    assert "randomized grasp reset failed the acceptance gate after" in residual
-    assert 'log["reset_gate_acceptance_rate"]' in residual
-    assert 'log[f"reset_gate_{reason}_total"]' in residual
+    assert "def _write_constructive_grasp_reset(" in residual
+    assert "self._park_target_book(env_ids_t)" in residual
+    assert "joint_pos[:, self._finger_joint_ids] = hold_joint_pos" in residual
+    assert "self.sim.forward()" in residual
+    assert "self._snap_book_to_measured_grasp(env_ids_t)" in residual
     assert "self._capture_scenario_initial_pose(env_ids_t)" in residual
 
 
@@ -628,6 +728,19 @@ def test_training_can_compare_baseline_and_observable_geometry_release_guards():
     assert 'self.extras["log"]["raw_policy_release_fraction"]' in residual
     assert 'self.extras["log"]["blocked_policy_release_fraction"]' in residual
     assert 'self.extras["log"]["premature_release_penalty_mean"]' in residual
+
+
+def test_fresh_xarm_policy_can_start_with_a_closed_release_bias_without_a_guard():
+    train = read(ROOT / "scripts/sb3/train.py")
+
+    assert '"--initial_release_action_mean"' in train
+    assert "def _initialize_release_action_mean(" in train
+    assert 'getattr(agent.policy, "action_net", None)' in train
+    assert "bias[-1].fill_(float(initial_mean))" in train
+    assert '"[INITIAL_RELEASE_ACTION] final_action_mean="' in train
+    assert "runtime_guard=false" in train
+    assert "args_cli.checkpoint is not None or args_cli.resume" in train
+    assert "_initialize_release_action_mean(agent, initial_release_action_mean)" in train
 
 
 def test_headless_training_disables_debug_visualization_markers():

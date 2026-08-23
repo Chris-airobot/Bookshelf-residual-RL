@@ -24,6 +24,9 @@ def _servo_server(context):
     hw_ns = LaunchConfiguration("hw_ns")
     limited = LaunchConfiguration("limited")
     add_gripper = LaunchConfiguration("add_gripper")
+    use_fake_hardware = (
+        LaunchConfiguration("use_fake_hardware").perform(context).lower() == "true"
+    )
 
     robot_type_value = robot_type.perform(context)
     dof_value = dof.perform(context)
@@ -45,9 +48,15 @@ def _servo_server(context):
         ros_namespace="",
         robot_type=robot_type_value,
     )
+    controllers_name = "fake_controllers" if use_fake_hardware else "controllers"
+    ros2_control_plugin = (
+        "uf_robot_hardware/UFRobotFakeSystemHardware"
+        if use_fake_hardware
+        else "uf_robot_hardware/UFRobotSystemHardware"
+    )
     moveit_config = MoveItConfigsBuilder(
         context=context,
-        controllers_name="controllers",
+        controllers_name=controllers_name,
         robot_ip=robot_ip,
         report_type="normal",
         dof=dof,
@@ -57,7 +66,7 @@ def _servo_server(context):
         limited=limited,
         effort_control=False,
         velocity_control=False,
-        ros2_control_plugin="uf_robot_hardware/UFRobotSystemHardware",
+        ros2_control_plugin=ros2_control_plugin,
         ros2_control_params=ros2_control_params,
         add_gripper=add_gripper,
     ).to_moveit_configs()
@@ -85,7 +94,8 @@ def _servo_server(context):
         LogInfo(
             msg=(
                 "Starting Servo server only. It reuses the existing xArm "
-                "ROS2-control driver and xarm7 trajectory controller."
+                f"ROS2-control {'fake system' if use_fake_hardware else 'driver'} "
+                "and xarm7 trajectory controller."
             )
         ),
         ComposableNodeContainer(
@@ -108,7 +118,6 @@ def _servo_server(context):
 
 def generate_launch_description():
     """Declare the reusable Servo-only launch description."""
-
     return LaunchDescription(
         [
             DeclareLaunchArgument("robot_ip"),
@@ -118,6 +127,7 @@ def generate_launch_description():
             DeclareLaunchArgument("hw_ns", default_value="xarm"),
             DeclareLaunchArgument("limited", default_value="false"),
             DeclareLaunchArgument("add_gripper", default_value="true"),
+            DeclareLaunchArgument("use_fake_hardware", default_value="false"),
             OpaqueFunction(function=_servo_server),
         ]
     )

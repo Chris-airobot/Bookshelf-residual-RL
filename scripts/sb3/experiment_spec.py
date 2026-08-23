@@ -82,6 +82,14 @@ def build_experiment_spec(
     env_impl_path: str,
 ) -> dict[str, Any]:
     """Build a compact artifact describing task semantics for reproducibility."""
+    base_y_rotation_enabled = bool(
+        getattr(env_cfg, "enable_base_y_rotation_action", False)
+    )
+    action_vector_definition = (
+        "a = [dx, dy, dz, dbase_z, dbase_x, dbase_y, release]"
+        if base_y_rotation_enabled
+        else "a = [dx, dy, dz, dyaw, dpitch, release]"
+    )
     action_scales = _collect_cfg_attrs_by_suffix(env_cfg, "_action_scale")
     obs_scales = _collect_cfg_attrs_by_suffix(env_cfg, "_obs_scale")
     reward_terms = _collect_cfg_attrs_by_prefix(env_cfg, "rew_")
@@ -237,7 +245,7 @@ def build_experiment_spec(
         {
             "name": "action_vector",
             "what_it_means": "Policy outputs residual arm motion and gripper command.",
-            "how_computed": "a = [dx, dy, dz, dyaw, dpitch, gripper]",
+            "how_computed": action_vector_definition,
             "params": {"action_space": getattr(env_cfg, "action_space", None)},
             "unit": "policy output",
             "source": "_pre_physics_step",
@@ -252,6 +260,9 @@ def build_experiment_spec(
                 "dz_action_scale": getattr(env_cfg, "dz_action_scale", None),
                 "dyaw_action_scale": getattr(env_cfg, "dyaw_action_scale", None),
                 "dpitch_action_scale": getattr(env_cfg, "dpitch_action_scale", None),
+                "dbase_y_rotation_action_scale": getattr(
+                    env_cfg, "dbase_y_rotation_action_scale", None
+                ),
             },
             "unit": "m or rad per env step",
             "source": "_pre_physics_step",
@@ -360,7 +371,10 @@ def build_experiment_spec(
         "task": task_name,
         "plain_english_summary": {
             "observation": "Observation is a 16D vector combining phase, depth/alignment errors, support/readiness flags, and tool-book relative pose.",
-            "action": "Action is a 6D residual command for arm motion (dx,dy,dz,dyaw,dpitch) plus gripper command, then scaled and phase-gated.",
+            "action": (
+                "Action uses six Cartesian residuals plus release for xArm, "
+                "and five Cartesian residuals plus release for Panda."
+            ),
             "reward": "Reward is phase-based (insert/release/retreat/push) plus global step/success/drop terms.",
             "termination": "Episode ends on success hold, floor-drop failure, optional debug failures, or timeout.",
         },

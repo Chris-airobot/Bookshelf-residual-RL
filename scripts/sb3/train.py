@@ -60,7 +60,10 @@ parser.add_argument(
     "--disable_reset_acceptance_gate",
     action="store_true",
     default=False,
-    help="Disable the xArm training-only randomized-grasp acceptance gate.",
+    help=(
+        "Compatibility option. xArm training now constructs valid coupled "
+        "arm/gripper/book resets directly and does not enable the old gate."
+    ),
 )
 parser.add_argument(
     "--xarm_training_standoff_mm",
@@ -86,6 +89,16 @@ parser.add_argument(
     type=float,
     default=0.5,
     help="Reward penalty for each release request blocked by the selected guard.",
+)
+parser.add_argument(
+    "--initial_release_action_mean",
+    type=float,
+    default=None,
+    help=(
+        "Initial mean of the final (release/open) action for a fresh xArm PPO "
+        "policy. A negative value starts exploration with the gripper held; "
+        "this is an initialization bias, not a runtime release guard."
+    ),
 )
 parser.add_argument("--export_io_descriptors", action="store_true", default=False, help="Export IO descriptors.")
 parser.add_argument("--mlflow", action="store_true", default=False, help="Enable MLflow logging.")
@@ -145,6 +158,7 @@ from datetime import datetime
 
 import gymnasium as gym
 import numpy as np
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, LogEveryNTimesteps
 from stable_baselines3.common.vec_env import VecNormalize
@@ -210,6 +224,21 @@ def _checkpoint_custom_objects(observation_space, action_space, learning_rate=No
         custom_objects["clip_range"] = _as_schedule(clip_range)
     custom_objects["clip_range_vf"] = None
     return custom_objects
+
+
+def _initialize_release_action_mean(agent: PPO, initial_mean: float) -> None:
+    """Bias only the final continuous action of a fresh PPO actor."""
+    action_net = getattr(agent.policy, "action_net", None)
+    bias = getattr(action_net, "bias", None)
+    if bias is None or bias.ndim != 1 or bias.numel() < 1:
+        raise RuntimeError("PPO policy has no compatible action output bias")
+    with torch.no_grad():
+        bias[-1].fill_(float(initial_mean))
+    print(
+        "[INITIAL_RELEASE_ACTION] final_action_mean="
+        f"{float(initial_mean):+.6f} runtime_guard=false",
+        flush=True,
+    )
 
 
 def _vecnormalize_stats_path(vec_norm_path: Path) -> Path:
@@ -320,6 +349,21 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.max_iterations is not None:
         agent_cfg["n_timesteps"] = args_cli.max_iterations * agent_cfg["n_steps"] * env_cfg.scene.num_envs
 
+    initial_release_action_mean = args_cli.initial_release_action_mean
+    if initial_release_action_mean is not None:
+        initial_release_action_mean = float(initial_release_action_mean)
+        if not np.isfinite(initial_release_action_mean):
+            raise ValueError("--initial_release_action_mean must be finite")
+        if args_cli.task != "Bookshelf-XArm7-Residual-Direct-v0":
+            raise ValueError(
+                "--initial_release_action_mean is only supported for "
+                "Bookshelf-XArm7-Residual-Direct-v0"
+            )
+        if args_cli.checkpoint is not None or args_cli.resume:
+            raise ValueError(
+                "--initial_release_action_mean is only supported for a fresh PPO policy"
+            )
+
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
@@ -346,8 +390,11 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         args_cli.task == "Bookshelf-XArm7-Residual-Direct-v0"
         and hasattr(env_cfg, "enable_reset_acceptance_gate")
     ):
-        env_cfg.enable_reset_acceptance_gate = not bool(
-            args_cli.disable_reset_acceptance_gate
+        env_cfg.enable_reset_acceptance_gate = False
+        print(
+            "[XARM_CONSTRUCTIVE_RESET] enabled; "
+            "online_acceptance_gate=false",
+            flush=True,
         )
     if hasattr(env_cfg, "policy_release_guard_mode"):
         premature_release_penalty = float(args_cli.premature_release_penalty)
@@ -451,6 +498,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    print(
+        "[TRAIN_ENV] "
+        f"observation_space={env.observation_space} "
+        f"action_space={env.action_space}",
+        flush=True,
+    )
 
     # convert to single-agent instance if required by the RL algorithm
     if isinstance(env.unwrapped, DirectMARLEnv):
@@ -539,6 +592,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         # Intentionally do not load old VecNormalize.pkl when warm-starting:
         # reward distribution often shifts across curriculum experiments.
         agent = PPO(policy_arch, env, verbose=1, tensorboard_log=log_dir, **agent_cfg)
+        if initial_release_action_mean is not None:
+            _initialize_release_action_mean(agent, initial_release_action_mean)
     if args_cli.checkpoint is not None and not args_cli.resume:
         _load_actor_warm_start(agent, args_cli.checkpoint, device=agent_cfg.get("device", "auto"))
 

@@ -79,21 +79,61 @@ def test_supervised_translation_budget_rejects_startup_without_positive_bound(
         SupervisedTranslationBudget(invalid_bound)
 
 
-def test_supervised_translation_budget_accepts_normal_command_below_bound():
+def test_supervised_translation_budget_counts_measured_motion_only():
     budget = SupervisedTranslationBudget(0.02)
 
-    assert budget.accept_target(0.008) is None
+    assert budget.observe_position([0.4, 0.0, 0.2]) is None
+    for _ in range(100):
+        assert budget.observe_position([0.4, 0.0, 0.2]) is None
+    assert budget.total_m == 0.0
+
+    assert budget.observe_position([0.408, 0.0, 0.2]) is None
     assert budget.total_m == pytest.approx(0.008)
+    assert budget.remaining_m == pytest.approx(0.012)
     assert not budget.exhausted
     assert budget.terminal_reason is None
+
+
+def test_supervised_translation_budget_can_start_a_new_control_segment():
+    budget = SupervisedTranslationBudget(0.20)
+
+    budget.observe_position([0.40, 0.0, 0.20])
+    budget.observe_position([0.42, 0.0, 0.20])
+    budget.reset_measurement_baseline()
+    budget.observe_position([0.33, 0.0, 0.20])
+    budget.observe_position([0.34, 0.0, 0.20])
+
+    assert budget.total_m == pytest.approx(0.03)
 
 
 def test_supervised_translation_budget_stops_at_bound():
     budget = SupervisedTranslationBudget(0.02)
 
-    assert budget.accept_target(0.01) is None
-    assert budget.accept_target(0.01) is None
+    assert budget.observe_position([0.0, 0.0, 0.0]) is None
+    assert budget.observe_position([0.01, 0.0, 0.0]) is None
+    assert (
+        budget.observe_position([0.01, 0.01, 0.0])
+        == MAXIMUM_SUPERVISED_TRANSLATION_REASON
+    )
     assert budget.exhausted
-    assert budget.finish_at_limit() == MAXIMUM_SUPERVISED_TRANSLATION_REASON
-    assert budget.accept_target(0.001) == MAXIMUM_SUPERVISED_TRANSLATION_REASON
+    assert (
+        budget.observe_position([0.01, 0.011, 0.0])
+        == MAXIMUM_SUPERVISED_TRANSLATION_REASON
+    )
     assert budget.total_m == pytest.approx(0.02)
+
+
+@pytest.mark.parametrize(
+    "invalid_position",
+    ([0.0, 0.0], [0.0, 0.0, float("nan")], [0.0, 0.0, float("inf")]),
+)
+def test_supervised_translation_budget_rejects_invalid_measured_position(
+    invalid_position,
+):
+    budget = SupervisedTranslationBudget(0.02)
+
+    with pytest.raises(
+        ValueError,
+        match="measured TCP position must contain three finite values",
+    ):
+        budget.observe_position(invalid_position)

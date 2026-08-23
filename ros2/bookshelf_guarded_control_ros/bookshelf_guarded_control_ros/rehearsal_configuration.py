@@ -178,6 +178,91 @@ def guarded_policy_tool_overrides(approved_config, policy_bundle) -> dict:
     }
 
 
+def physical_episode_geometry_overrides(
+    approved_config,
+    *,
+    expected_base_frame=None,
+    expected_eef_frame=None,
+    expected_tcp_frame=None,
+    expected_book_frame=None,
+) -> dict:
+    """Extract one consistent slot/book geometry for the episode coordinator."""
+
+    config_path = _required_file(approved_config, "approved configuration")
+    document = _load_yaml(config_path)
+    slot = _parameters(document, "static_slot_environment_check")
+    target = _parameters(document, "calibrated_preinsert_target")
+    adapter = _parameters(document, "policy_observation_adapter")
+
+    frame_checks = {
+        "base": (
+            expected_base_frame,
+            (slot.get("base_frame"), target.get("base_frame"), adapter.get("base_frame")),
+        ),
+        "eef": (
+            expected_eef_frame,
+            (target.get("ee_frame"), adapter.get("ee_frame")),
+        ),
+        "tcp": (expected_tcp_frame, (target.get("tcp_frame"),)),
+        "book": (expected_book_frame, (adapter.get("target_book_frame"),)),
+    }
+    for label, (expected, configured) in frame_checks.items():
+        values = {str(value) for value in configured if value is not None}
+        if len(values) != 1:
+            raise ValueError(f"approved {label} frames are missing or inconsistent")
+        configured_value = next(iter(values))
+        if expected is not None and str(expected) != configured_value:
+            raise ValueError(
+                f"requested {label} frame {expected!r} does not match approved "
+                f"frame {configured_value!r}"
+            )
+
+    translations = (
+        slot.get("static_slot_translation_xyz"),
+        target.get("static_slot_translation_xyz"),
+        adapter.get("configured_static_slot_translation_xyz"),
+    )
+    quaternions = (
+        slot.get("static_slot_quaternion_xyzw"),
+        target.get("static_slot_quaternion_xyzw"),
+        adapter.get("configured_static_slot_quaternion_xyzw"),
+    )
+    slot_transforms = [
+        make_transform(translation, quaternion)
+        for translation, quaternion in zip(translations, quaternions)
+    ]
+    if not all(
+        bool((abs(value - slot_transforms[0]) <= 1.0e-9).all())
+        for value in slot_transforms[1:]
+    ):
+        raise ValueError("approved slot transforms are inconsistent")
+
+    book_sizes = (target.get("book_size_xyz"), adapter.get("book_size_xyz"))
+    if book_sizes[0] is None or book_sizes[1] is None:
+        raise ValueError("approved book dimensions are missing")
+    if len(book_sizes[0]) != 3 or len(book_sizes[1]) != 3:
+        raise ValueError("approved book dimensions must contain three values")
+    if any(
+        abs(float(left) - float(right)) > 1.0e-9
+        for left, right in zip(book_sizes[0], book_sizes[1])
+    ):
+        raise ValueError("approved book dimensions are inconsistent")
+    if any(float(value) <= 0.0 for value in book_sizes[0]):
+        raise ValueError("approved book dimensions must be positive")
+
+    transform_base_slot = slot_transforms[0]
+    retreat_direction = (-transform_base_slot[:3, 0]).tolist()
+    return {
+        "slot_translation_base_xyz": transform_base_slot[:3, 3].tolist(),
+        "slot_quaternion_base_xyzw": matrix_to_quaternion_xyzw(
+            transform_base_slot[:3, :3]
+        ).tolist(),
+        "book_size_xyz": [float(value) for value in book_sizes[0]],
+        "retreat_direction_base_xyz": retreat_direction,
+        "book_frame": str(adapter["target_book_frame"]),
+    }
+
+
 def _validate_provenance(config_path: Path, provenance: dict) -> None:
     if provenance.get("human_approval_recorded") is not True:
         raise ValueError("configuration provenance has no human approval")

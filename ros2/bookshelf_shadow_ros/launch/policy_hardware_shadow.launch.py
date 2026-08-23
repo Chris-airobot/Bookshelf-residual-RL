@@ -78,6 +78,36 @@ def generate_launch_description():
         default_value="0.0",
         description="Optional manually measured physical slot width in metres.",
     )
+    base_frame_argument = DeclareLaunchArgument(
+        "base_frame",
+        default_value="link_base",
+        description="Robot base frame used by the observation adapter.",
+    )
+    ee_frame_argument = DeclareLaunchArgument(
+        "ee_frame",
+        default_value="link_eef",
+        description="Robot end-effector frame used by the observation adapter.",
+    )
+    target_book_frame_argument = DeclareLaunchArgument(
+        "target_book_frame",
+        default_value="target_book_center",
+        description="Live semantic book frame used by the observation adapter.",
+    )
+    joint_states_topic_argument = DeclareLaunchArgument(
+        "joint_states_topic",
+        default_value="/joint_states",
+        description="Joint-state input used for the gripper observation.",
+    )
+    message_max_age_argument = DeclareLaunchArgument(
+        "message_max_age_s",
+        default_value="0.5",
+        description="Maximum accepted age for policy observation inputs.",
+    )
+    tf_max_age_argument = DeclareLaunchArgument(
+        "tf_max_age_s",
+        default_value="0.5",
+        description="Maximum accepted age for observation transforms.",
+    )
     detector_argument = DeclareLaunchArgument(
         "start_live_detector",
         default_value="true",
@@ -107,7 +137,21 @@ def generate_launch_description():
         executable="policy_observation_adapter",
         name="policy_observation_adapter",
         output="screen",
-        parameters=[LaunchConfiguration("adapter_config")],
+        parameters=[
+            LaunchConfiguration("adapter_config"),
+            {
+                "base_frame": LaunchConfiguration("base_frame"),
+                "ee_frame": LaunchConfiguration("ee_frame"),
+                "target_book_frame": LaunchConfiguration("target_book_frame"),
+                "joint_states_topic": LaunchConfiguration("joint_states_topic"),
+                "message_max_age_s": ParameterValue(
+                    LaunchConfiguration("message_max_age_s"), value_type=float
+                ),
+                "tf_max_age_s": ParameterValue(
+                    LaunchConfiguration("tf_max_age_s"), value_type=float
+                ),
+            },
+        ],
     )
     inference = Node(
         package="bookshelf_shadow_ros",
@@ -167,12 +211,17 @@ def generate_launch_description():
             audit_output_argument,
             audit_samples_argument,
             reference_width_argument,
+            base_frame_argument,
+            ee_frame_argument,
+            target_book_frame_argument,
+            joint_states_topic_argument,
+            message_max_age_argument,
+            tf_max_age_argument,
             detector_argument,
             LogInfo(
                 msg=(
-                    "Starting FULL SHADOW pipeline: optional RGB-D detector -> 12D "
-                    "adapter -> VecNormalize -> PPO actor diagnostics -> "
-                    "subscriber-only audit. "
+                    "Starting policy calculation: optional RGB-D detector -> 12D "
+                    "adapter -> VecNormalize -> PPO actor -> optional audit. "
                     "No robot-command node is launched."
                 )
             ),

@@ -150,3 +150,42 @@ def test_policy_independent_generation_is_seeded_and_valid():
     assert first["scenario_sha256"] == repeated["scenario_sha256"]
     assert first["scenario_sha256"] != different["scenario_sha256"]
     assert all(scenario["slot_clearance"] == 0.003 for scenario in first["scenarios"])
+
+
+def test_policy_independent_generation_can_cycle_requested_slots():
+    bank = BANK.generate_frozen_scenario_bank(
+        scenario_count=10,
+        seed=42,
+        slot_clearance_min=0.002,
+        slot_clearance_max=0.004,
+        slot_pitch=0.034,
+        row_book_count=10,
+        side_book_merge_probability=0.35,
+        arm_joint_noise=0.02,
+        grasp_x_jitter=0.003,
+        grasp_y_jitter=0.003,
+        grasp_z_jitter=0.005,
+        grasp_yaw_jitter=0.05,
+        missing_book_indices=range(10),
+    )
+    assert [scenario["missing_book_index"] for scenario in bank["scenarios"]] == list(range(10))
+    assert bank["source"]["generation"]["missing_book_indices"] == list(range(10))
+
+
+def test_policy_independent_generation_rejects_wrong_slot_sequence_length():
+    with pytest.raises(ValueError, match="exactly scenario_count"):
+        BANK.generate_frozen_scenario_bank(
+            scenario_count=10,
+            seed=42,
+            slot_clearance_min=0.002,
+            slot_clearance_max=0.004,
+            slot_pitch=0.034,
+            row_book_count=10,
+            side_book_merge_probability=0.35,
+            arm_joint_noise=0.02,
+            grasp_x_jitter=0.003,
+            grasp_y_jitter=0.003,
+            grasp_z_jitter=0.005,
+            grasp_yaw_jitter=0.05,
+            missing_book_indices=[0, 1],
+        )

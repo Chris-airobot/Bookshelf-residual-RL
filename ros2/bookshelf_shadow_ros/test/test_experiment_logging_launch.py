@@ -34,3 +34,31 @@ def test_manifest_is_finalized_before_shutdown_graph_access():
     graph_index = destroy_source.index("self._write_graph_snapshot()")
     assert manifest_index < graph_index
     assert "except (KeyboardInterrupt, ExternalShutdownException):" in source
+
+
+def test_logger_records_simulation_control_topics_to_readable_text():
+    source = LOGGER.read_text(encoding="utf-8")
+    for token in (
+        'self.monitor_path = self.run_dir / "monitor.txt"',
+        '"/bookshelf_sim/task_status"',
+        '"/bookshelf_sim/task_complete"',
+        '"/bookshelf_control/status"',
+        '"/bookshelf_shadow/final_delta"',
+        '"/servo_server/status"',
+        "self._subscribe_float_array",
+        "self._subscribe_int",
+    ):
+        assert token in source
+
+
+def test_logger_records_physical_episode_status_and_completion():
+    launch_source = LAUNCH.read_text(encoding="utf-8")
+    logger_source = LOGGER.read_text(encoding="utf-8")
+    for token in (
+        '"/bookshelf_control/task_status"',
+        '"/bookshelf_control/task_complete"',
+    ):
+        assert token in launch_source
+        assert token in logger_source
+    assert '"physical_task_status_topic", "physical_task_status"' in logger_source
+    assert '"physical_task_complete_topic", "physical_task_complete"' in logger_source

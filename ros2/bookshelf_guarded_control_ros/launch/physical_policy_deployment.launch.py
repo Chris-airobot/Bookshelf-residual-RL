@@ -10,9 +10,11 @@ from launch.actions import (
     TimerAction,
 )
 from launch.events import Shutdown
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 from bookshelf_guarded_control_ros.rehearsal_configuration import (
@@ -70,6 +72,38 @@ def _control_actions(context):
     overrides = guarded_policy_tool_overrides(approved_config, policy_bundle)
     overrides.pop("require_scene_status", None)
     overrides.pop("required_scene_mode", None)
+    overrides.update(
+        {
+            "base_frame": LaunchConfiguration("base_frame"),
+            "eef_frame": LaunchConfiguration("eef_frame"),
+            "tcp_frame": LaunchConfiguration("tcp_frame"),
+            "start_servo_service": LaunchConfiguration("start_servo_service"),
+            "servo_already_started": ParameterValue(
+                LaunchConfiguration("servo_already_started"), value_type=bool
+            ),
+            "twist_command_topic": LaunchConfiguration("twist_command_topic"),
+            "message_max_age_s": ParameterValue(
+                LaunchConfiguration("message_max_age_s"), value_type=float
+            ),
+            "tf_max_age_s": ParameterValue(
+                LaunchConfiguration("tf_max_age_s"), value_type=float
+            ),
+            "command_target_is_hardware": ParameterValue(
+                LaunchConfiguration("command_target_is_hardware"), value_type=bool
+            ),
+            "enforce_translation_budget": ParameterValue(
+                LaunchConfiguration("enforce_translation_budget"), value_type=bool
+            ),
+            "require_control_enable": ParameterValue(
+                LaunchConfiguration("require_control_enable"), value_type=bool
+            ),
+            "yield_when_control_disabled": ParameterValue(
+                LaunchConfiguration("yield_when_control_disabled"),
+                value_type=bool,
+            ),
+            "control_enable_topic": LaunchConfiguration("control_enable_topic"),
+        }
+    )
     overrides["maximum_total_translation_m"] = maximum_total_translation_m
     return [
         LogInfo(
@@ -127,13 +161,6 @@ def generate_launch_description():
             "experiment_logging.launch.py",
         ]
     )
-    slot_check_launch = PathJoinSubstitution(
-        [
-            FindPackageShare("bookshelf_shadow_ros"),
-            "launch",
-            "static_slot_environment_check.launch.py",
-        ]
-    )
     shadow_launch = PathJoinSubstitution(
         [
             FindPackageShare("bookshelf_shadow_ros"),
@@ -143,16 +170,9 @@ def generate_launch_description():
     )
     audit_output = PathJoinSubstitution(
         [
-            LaunchConfiguration("environment_check_output_root"),
+            LaunchConfiguration("experiment_output_root"),
             LaunchConfiguration("trial_name"),
-            "policy_shadow_audit",
-        ]
-    )
-    frozen_check_output = PathJoinSubstitution(
-        [
-            LaunchConfiguration("environment_check_output_root"),
-            LaunchConfiguration("trial_name"),
-            "frozen_check",
+            "policy_audit",
         ]
     )
     return LaunchDescription(
@@ -187,12 +207,7 @@ def generate_launch_description():
                 "experiment_output_root",
                 default_value="/home/riot/BookshelfFiles/experiment_logs",
             ),
-            DeclareLaunchArgument(
-                "environment_check_output_root",
-                default_value=(
-                    "/home/riot/BookshelfFiles/experiment_logs/environment_checks"
-                ),
-            ),
+            DeclareLaunchArgument("enable_logging", default_value="true"),
             DeclareLaunchArgument("record_camera", default_value="false"),
             DeclareLaunchArgument(
                 "record_raw_replay_inputs", default_value="false"
@@ -202,7 +217,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument("capture_duration_s", default_value="0.0"),
             DeclareLaunchArgument("minimum_free_space_gb", default_value="5.0"),
-            DeclareLaunchArgument("enable_policy_audit", default_value="true"),
+            DeclareLaunchArgument("enable_policy_audit", default_value="false"),
             DeclareLaunchArgument("policy_audit_samples", default_value="1200"),
             DeclareLaunchArgument("reference_slot_width_m", default_value="0.0"),
             DeclareLaunchArgument(
@@ -221,6 +236,40 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "servo_config", default_value=default_servo_config
             ),
+            DeclareLaunchArgument("base_frame", default_value="link_base"),
+            DeclareLaunchArgument("eef_frame", default_value="link_eef"),
+            DeclareLaunchArgument("tcp_frame", default_value="link_tcp"),
+            DeclareLaunchArgument(
+                "target_book_frame", default_value="target_book_center"
+            ),
+            DeclareLaunchArgument(
+                "joint_states_topic", default_value="/joint_states"
+            ),
+            DeclareLaunchArgument(
+                "start_servo_service", default_value="/servo_server/start_servo"
+            ),
+            DeclareLaunchArgument("servo_already_started", default_value="false"),
+            DeclareLaunchArgument(
+                "twist_command_topic",
+                default_value="/servo_server/delta_twist_cmds",
+            ),
+            DeclareLaunchArgument(
+                "command_target_is_hardware", default_value="true"
+            ),
+            DeclareLaunchArgument(
+                "enforce_translation_budget",
+                default_value="true",
+                description="Disable only for fake-hardware simulation.",
+            ),
+            DeclareLaunchArgument("require_control_enable", default_value="false"),
+            DeclareLaunchArgument(
+                "yield_when_control_disabled", default_value="false"
+            ),
+            DeclareLaunchArgument(
+                "control_enable_topic", default_value="/bookshelf_control/enable"
+            ),
+            DeclareLaunchArgument("message_max_age_s", default_value="0.5"),
+            DeclareLaunchArgument("tf_max_age_s", default_value="0.5"),
             OpaqueFunction(function=_validate_inputs),
             LogInfo(
                 msg=(
@@ -232,6 +281,7 @@ def generate_launch_description():
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(logging_launch),
+                condition=IfCondition(LaunchConfiguration("enable_logging")),
                 launch_arguments={
                     "trial_name": LaunchConfiguration("trial_name"),
                     "output_root": LaunchConfiguration("experiment_output_root"),
@@ -251,14 +301,6 @@ def generate_launch_description():
                 }.items(),
             ),
             IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(slot_check_launch),
-                launch_arguments={
-                    "check_config": LaunchConfiguration("approved_config"),
-                    "output_dir": frozen_check_output,
-                    "start_live_detector": "true",
-                }.items(),
-            ),
-            IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(shadow_launch),
                 launch_arguments={
                     "adapter_config": LaunchConfiguration("approved_config"),
@@ -275,6 +317,18 @@ def generate_launch_description():
                         "reference_slot_width_m"
                     ),
                     "start_live_detector": "false",
+                    "base_frame": LaunchConfiguration("base_frame"),
+                    "ee_frame": LaunchConfiguration("eef_frame"),
+                    "target_book_frame": LaunchConfiguration(
+                        "target_book_frame"
+                    ),
+                    "joint_states_topic": LaunchConfiguration(
+                        "joint_states_topic"
+                    ),
+                    "message_max_age_s": LaunchConfiguration(
+                        "message_max_age_s"
+                    ),
+                    "tf_max_age_s": LaunchConfiguration("tf_max_age_s"),
                 }.items(),
             ),
             OpaqueFunction(function=_control_actions),

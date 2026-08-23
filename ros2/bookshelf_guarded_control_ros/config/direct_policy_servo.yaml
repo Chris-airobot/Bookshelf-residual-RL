@@ -5,6 +5,7 @@ direct_policy_servo:
     tcp_frame: link_tcp
     start_servo_service: /servo_server/start_servo
     twist_command_topic: /servo_server/delta_twist_cmds
+    servo_status_topic: /servo_server/status
 
     control_rate_hz: 30.0
     policy_command_duration_s: 0.20
@@ -19,6 +20,9 @@ direct_policy_servo:
 
     # Fail closed unless an explicit supervised control launch overrides this.
     maximum_total_translation_m: 0.0
+    require_control_enable: false
+    yield_when_control_disabled: false
+    control_enable_topic: /bookshelf_control/enable
 
     # Filled from the reviewed trial configuration by the deployment launch.
     eef_tcp_translation_xyz: [0.0, 0.0, 0.0]

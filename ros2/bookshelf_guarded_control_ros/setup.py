@@ -45,6 +45,12 @@ setup(
             "bookshelf_guarded_control_ros.direct_policy_servo_node:main",
             "policy_servo_simulator = "
             "bookshelf_guarded_control_ros.policy_servo_simulator_node:main",
+            "fake_pretarget_initializer = "
+            "bookshelf_guarded_control_ros.fake_pretarget_initializer_node:main",
+            "fake_release_retreat_sequence = "
+            "bookshelf_guarded_control_ros.fake_release_retreat_sequence_node:main",
+            "physical_episode_coordinator = "
+            "bookshelf_guarded_control_ros.physical_episode_coordinator_node:main",
         ],
     },
 )
