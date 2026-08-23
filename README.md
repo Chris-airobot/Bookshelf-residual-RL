@@ -1,4 +1,21 @@
-# Template for Isaac Lab Projects
+# Bookshelf Residual RL and xArm7 Experiment
+
+This repository is the single source of truth for the Bookshelf Isaac Lab,
+policy, ROS observation, and guarded xArm7 experiment code.
+
+For the current physical experiment, use only the canonical scripts below:
+
+```bash
+scripts/ros2/build_xarm_experiment.sh
+scripts/ros2/run_xarm_experiment.sh calculate
+```
+
+See [XARM7_PHYSICAL_EXPERIMENT.md](XARM7_PHYSICAL_EXPERIMENT.md) for the
+reviewed layout, explicit control authorization, path overrides, and legacy
+workspace cleanup boundary. The dated root-level experiment documents are
+historical records and are not current run instructions.
+
+## Isaac Lab Project
 
 ## Overview
 

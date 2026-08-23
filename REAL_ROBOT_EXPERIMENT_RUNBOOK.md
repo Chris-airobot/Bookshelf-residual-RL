@@ -1,5 +1,10 @@
 # Bookshelf Real-Robot Experiment Runbook
 
+> **Historical workflow:** this document records the earlier two-process
+> bringup. Do not use its launch commands for the current experiment. Use
+> [XARM7_PHYSICAL_EXPERIMENT.md](XARM7_PHYSICAL_EXPERIMENT.md) and
+> `scripts/ros2/run_xarm_experiment.sh` instead.
+
 Last offline stationary calibration and shadow replay: 2026-08-19
 
 This runbook is for the xArm7 bookshelf insertion experiment on the Riot PC.

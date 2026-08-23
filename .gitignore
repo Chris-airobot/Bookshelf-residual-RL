@@ -43,6 +43,9 @@ docker/.container.cfg
 docker/artifacts/
 *.tmp
 
+# Canonical in-repository ROS 2 build overlay
+/.ros2_ws/
+
 # Doc Outputs
 **/docs/_build/*
 **/generated/*

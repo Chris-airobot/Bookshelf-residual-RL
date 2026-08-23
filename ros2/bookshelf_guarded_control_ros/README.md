@@ -1,5 +1,10 @@
 # Bookshelf Guarded Control ROS
 
+The supported operator entry point is now the single fail-closed launch wrapped
+by `scripts/ros2/run_xarm_experiment.sh`. See the repository-level
+`XARM7_PHYSICAL_EXPERIMENT.md`. The two-process commands later in this README
+are retained as architecture reference, not as current run instructions.
+
 This package contains two separate control paths. MoveIt is used for the global
 approach to the pre-insertion pose. The physical policy launch uses MoveIt Servo
 for continuous Cartesian corrections during local insertion. It does not
@@ -116,14 +121,16 @@ and 12-channel activation envelope before including any runtime components.
 The observation bringup owns the only RGB-D slot detector; shadow inference
 reuses its topics. This compatibility launch also starts the hardware bringup,
 which creates MoveIt/controller interfaces, but it sends no plan, trajectory,
-gripper, or execution request. The two-launch workflow below is preferred
-because it makes hardware ownership explicit. Policy activation may remain
-false until the robot reaches the local insertion region.
+gripper, or execution request. The canonical full-episode wrapper is preferred
+because it preserves the same ownership boundary while providing one operator
+entry point. Policy activation may remain false until the robot reaches the
+local insertion region.
 
-## Two-launch physical operation
+## Legacy two-launch physical operation
 
-The preferred operator interface separates hardware ownership from policy
-deployment:
+This lower-level interface separates hardware ownership from policy deployment.
+Use it only for component diagnosis; the canonical experiment wrapper combines
+the same ownership boundaries in one launch:
 
 ```bash
 # Terminal 1: the only xArm/MoveIt/camera owner.
