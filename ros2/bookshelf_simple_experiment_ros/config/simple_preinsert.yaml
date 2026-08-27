@@ -1,0 +1,49 @@
+rgbd_slot_detector:
+  ros__parameters:
+    image_topic: /camera/color/image_raw
+    depth_topic: /camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/color/camera_info
+    debug_image_topic: /slot_detector/debug_image
+    minimum_confidence: 0.60
+    minimum_slot_width_m: 0.020
+    maximum_slot_width_m: 0.090
+
+simple_preinsert:
+  ros__parameters:
+    base_frame: link_base
+    eef_frame: link_eef
+    tcp_frame: link_tcp
+    planning_link: link_tcp
+    group_name: xarm7
+    robot_model_id: UF_ROBOT
+    allow_execution: false
+    attach_book_collision: true
+    eef_book_translation_xyz:
+      - 0.006189808263520789
+      - 0.004397635899244547
+      - 0.18076520526773382
+    eef_book_quaternion_xyzw:
+      - 0.7170947434170492
+      - 0.01281329455160485
+      - 0.6961397093730864
+      - 0.03162994594249451
+    book_size_xyz: [0.156, 0.034, 0.236]
+    preinsert_standoff_m: 0.030
+    preinsert_vertical_offset_m: 0.006
+    minimum_confidence: 0.60
+    minimum_slot_width_m: 0.020
+    maximum_slot_width_m: 0.090
+    message_max_age_s: 0.50
+    velocity_scaling: 0.05
+    acceleration_scaling: 0.05
+    expected_arm_joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
+    book_touch_links:
+      - link_eef
+      - link_tcp
+      - xarm_gripper_base_link
+      - left_finger
+      - right_finger
+      - left_inner_knuckle
+      - right_inner_knuckle
+      - left_outer_knuckle
+      - right_outer_knuckle
