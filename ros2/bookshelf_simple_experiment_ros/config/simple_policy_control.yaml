@@ -1,0 +1,45 @@
+simple_policy_control:
+  ros__parameters:
+    approved_config: /home/riot/BookshelfFiles/experiment_configs/stationary_approved_53e7fe80d56d_20260819_142355/trial_static_slot.yaml
+    actor_path: /home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz
+    execute: false
+    rollout: false
+    max_steps: 150
+    command_scale: 0.10
+    visualization_hold_s: 60.0
+
+    base_frame: link_base
+    eef_frame: link_eef
+    tcp_frame: link_tcp
+    joint_states_topic: /joint_states
+    gripper_joint_name: drive_joint
+    expected_arm_joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
+    live_state_max_age_s: 0.50
+    tf_lookup_timeout_s: 0.05
+
+    start_servo_service: /servo_server/start_servo
+    twist_command_topic: /servo_server/delta_twist_cmds
+    servo_status_topic: /servo_server/status
+    control_rate_hz: 30.0
+    policy_rate_hz: 20.0
+    policy_command_duration_s: 0.20
+    maximum_command_duration_s: 2.0
+    maximum_linear_speed_m_s: 0.025
+    maximum_angular_speed_rad_s: 0.10
+    translation_tolerance_m: 0.0005
+    rotation_tolerance_rad: 0.004363323129985824
+    post_command_settle_s: 0.20
+
+    gripper_action: /xarm_gripper_traj_controller/follow_joint_trajectory
+    gripper_open_position: 0.0
+    gripper_closed_position: 0.85
+    gripper_move_duration_s: 0.6
+    gripper_goal_retry_timeout_s: 15.0
+    gripper_goal_retry_period_s: 0.25
+
+    retreat_distance_m: 0.09
+    retreat_speed_m_s: 0.05
+    retreat_timeout_s: 6.0
+    push_book_distance_m: 0.03
+    push_timeout_s: 90.0
+    contact_tolerance_m: 0.001

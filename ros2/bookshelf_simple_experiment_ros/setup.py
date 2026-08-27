@@ -27,6 +27,9 @@ setup(
         "slot_detector = bookshelf_simple_experiment_ros.slot_detector_node:main",
         "saved_slot = bookshelf_simple_experiment_ros.saved_slot_node:main",
         "simple_preinsert = bookshelf_simple_experiment_ros.preinsert_node:main",
+        "simple_policy_control = bookshelf_simple_experiment_ros.simple_policy_control_node:main",
+        "fake_policy_start = bookshelf_simple_experiment_ros.fake_policy_start_node:main",
         "virtual_trigger = bookshelf_simple_experiment_ros.virtual_trigger_node:main",
+        "dual_aruco_book = bookshelf_simple_experiment_ros.dual_aruco_book_node:main",
     ]},
 )

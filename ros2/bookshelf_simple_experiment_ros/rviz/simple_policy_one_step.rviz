@@ -1,0 +1,148 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.45
+      Cell Size: 0.05
+      Class: rviz_default_plugins/Grid
+      Color: 125; 130; 138
+      Enabled: true
+      Name: Base Grid
+      Plane: XY
+      Plane Cell Count: 30
+      Reference Frame: link_base
+    - Class: rviz_default_plugins/RobotModel
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: robot_description
+      Enabled: true
+      Name: Current Fake xArm7
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Enabled: true
+      Move Group Namespace: ""
+      Name: MoveIt
+      Planning Group: xarm7
+      Planning Scene Topic: monitored_planning_scene
+      Robot Description: robot_description
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Policy Geometry
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_simple/policy/markers
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Saved Slot Axes
+      Shape: Axes
+      Axes Length: 0.09
+      Axes Radius: 0.004
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_simple/policy/slot_pose
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Current Book Axes
+      Shape: Axes
+      Axes Length: 0.07
+      Axes Radius: 0.003
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_simple/policy/current_book_pose
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Current TCP Axes
+      Shape: Axes
+      Axes Length: 0.05
+      Axes Radius: 0.002
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_simple/policy/current_tcp_pose
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Current Policy Tool Axes
+      Shape: Axes
+      Axes Length: 0.05
+      Axes Radius: 0.002
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_simple/policy/current_policy_tool_pose
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Target TCP Axes
+      Shape: Axes
+      Axes Length: 0.07
+      Axes Radius: 0.004
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_simple/policy/target_tcp
+    - Class: rviz_default_plugins/Pose
+      Enabled: true
+      Name: Target Policy Tool Axes
+      Shape: Axes
+      Axes Length: 0.07
+      Axes Radius: 0.004
+      Topic:
+        Depth: 1
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /bookshelf_simple/policy/target_policy_tool_pose
+    - Class: rviz_default_plugins/TF
+      Enabled: true
+      Frame Timeout: 1
+      Marker Scale: 0.05
+      Name: Robot Frames
+      Show Arrows: true
+      Show Axes: true
+      Show Names: false
+  Enabled: true
+  Global Options:
+    Background Color: 31; 34; 39
+    Fixed Frame: link_base
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 1.25
+      Focal Point:
+        X: 0.62
+        Y: 0.06
+        Z: 0.18
+      Name: Bookshelf Policy Step
+      Pitch: 0.3
+      Target Frame: link_base
+      Yaw: 3.14
+Window Geometry:
+  Height: 900
+  Width: 1450

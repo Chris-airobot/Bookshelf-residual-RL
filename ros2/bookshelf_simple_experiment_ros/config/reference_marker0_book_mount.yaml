@@ -1,0 +1,10 @@
+# Exact standalone copy of the reviewed marker-0/book mount. Do not recalibrate.
+dictionary: DICT_ARUCO_ORIGINAL
+marker_id: 0
+marker_black_size_m: 0.039
+book_size_xyz_m: [0.156, 0.034, 0.236]
+marker_center_in_book_m: {x: -0.0800, y: 0.0375, z: 0.0665}
+rotation_book_marker:
+  - [0.0, 0.0, -1.0]
+  - [-1.0, 0.0, 0.0]
+  - [0.0, 1.0, 0.0]

@@ -73,3 +73,68 @@ def test_real_launch_has_frozen_slot_and_two_operator_confirmations():
     assert "/bookshelf_simple/execute_preinsert" in launch
     assert "robot_ip" not in launch
     assert "xarm_moveit_config" not in launch
+
+
+def test_simple_policy_defaults_to_shadow_and_keeps_rosbag_optional():
+    launch = (PACKAGE / "launch" / "simple_policy_one_step.launch.py").read_text()
+    node = (
+        PACKAGE
+        / "bookshelf_simple_experiment_ros"
+        / "simple_policy_control_node.py"
+    ).read_text()
+    assert 'DeclareLaunchArgument("execute", default_value="false")' in launch
+    assert 'DeclareLaunchArgument("rollout", default_value="false")' in launch
+    assert 'DeclareLaunchArgument("max_steps", default_value="150")' in launch
+    assert 'DeclareLaunchArgument("translation_tolerance_m", default_value="0.0005")' in launch
+    assert '"rotation_tolerance_rad", default_value="0.004363323129985824"' in launch
+    assert 'DeclareLaunchArgument("record_bag", default_value="false")' in launch
+    assert 'DeclareLaunchArgument("visualization_hold_s", default_value="60.0")' in launch
+    assert "if self.execute:" in node
+    assert "self.servo_start_client = self.create_client" in node
+    assert "release_executed\": False" in node
+    assert "GripperCommand" not in node
+
+
+def test_virtual_policy_launch_is_software_only_and_has_two_modes():
+    launch = (PACKAGE / "launch" / "virtual_policy_one_step.launch.py").read_text()
+    assert 'FindPackageShare("xarm_moveit_config")' in launch
+    assert '"_robot_moveit_fake.launch.py"' in launch
+    assert '"simple_xarm7_servo_server.launch.py"' in launch
+    assert 'condition=IfCondition(execute)' in launch
+    assert 'DeclareLaunchArgument("execute", default_value="false")' in launch
+    assert 'DeclareLaunchArgument("rollout", default_value="false")' in launch
+    assert 'DeclareLaunchArgument("max_steps", default_value="150")' in launch
+    assert 'DeclareLaunchArgument("translation_tolerance_m", default_value="0.0005")' in launch
+    assert '"rotation_tolerance_rad", default_value="0.004363323129985824"' in launch
+    assert 'executable="fake_policy_start"' in launch
+    assert "robot_ip" not in launch
+    assert "bookshelf_guarded_control_ros" not in launch
+    assert "bookshelf_shadow_ros" not in launch
+    assert "bookshelf_policy_ros" not in launch
+
+
+def test_post_insert_uses_only_the_official_trajectory_gripper_action():
+    node = (
+        PACKAGE
+        / "bookshelf_simple_experiment_ros"
+        / "simple_policy_control_node.py"
+    ).read_text()
+    assert "GripperCommand" not in node
+    assert "FollowJointTrajectory" in node
+    assert '"/xarm_gripper_traj_controller/follow_joint_trajectory"' in node
+    assert "release_executed\": False" in node
+    assert "bookshelf_guarded_control_ros" not in node
+
+
+def test_policy_rviz_subscribes_to_every_snapshot_pose():
+    rviz = (PACKAGE / "rviz" / "simple_policy_one_step.rviz").read_text()
+    for topic in (
+        "/bookshelf_simple/policy/markers",
+        "/bookshelf_simple/policy/slot_pose",
+        "/bookshelf_simple/policy/current_book_pose",
+        "/bookshelf_simple/policy/current_tcp_pose",
+        "/bookshelf_simple/policy/current_policy_tool_pose",
+        "/bookshelf_simple/policy/target_tcp",
+        "/bookshelf_simple/policy/target_policy_tool_pose",
+    ):
+        assert topic in rviz
