@@ -7,7 +7,8 @@ import json
 import math
 from pathlib import Path
 
-from control_msgs.action import FollowJointTrajectory
+from action_msgs.msg import GoalStatus
+from control_msgs.action import GripperCommand
 from geometry_msgs.msg import Pose, PoseStamped, TransformStamped, TwistStamped
 import numpy as np
 import rclpy
@@ -20,7 +21,6 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Bool, Float32MultiArray, Int8, String
 from std_srvs.srv import Trigger
 import tf2_ros
-from trajectory_msgs.msg import JointTrajectoryPoint
 from visualization_msgs.msg import Marker, MarkerArray
 import yaml
 
@@ -376,7 +376,7 @@ class SimplePolicyControlNode(Node):
             )
             self.gripper_client = ActionClient(
                 self,
-                FollowJointTrajectory,
+                GripperCommand,
                 str(self.get_parameter("gripper_action").value),
             )
 
@@ -420,10 +420,11 @@ class SimplePolicyControlNode(Node):
         self.declare_parameter("gripper_joint_name", "drive_joint")
         self.declare_parameter(
             "gripper_action",
-            "/xarm_gripper_traj_controller/follow_joint_trajectory",
+            "/xarm_gripper/gripper_action",
         )
         self.declare_parameter("gripper_open_position", 0.0)
         self.declare_parameter("gripper_closed_position", 0.85)
+        self.declare_parameter("gripper_max_effort", 0.0)
         self.declare_parameter("gripper_move_duration_s", 0.6)
         self.declare_parameter("gripper_goal_retry_timeout_s", 15.0)
         self.declare_parameter("gripper_goal_retry_period_s", 0.25)
@@ -740,17 +741,13 @@ class SimplePolicyControlNode(Node):
         position_parameter = (
             "gripper_open_position" if kind == "open" else "gripper_closed_position"
         )
-        duration_s = float(self.get_parameter("gripper_move_duration_s").value)
-        goal = FollowJointTrajectory.Goal()
-        goal.trajectory.joint_names = [
-            str(self.get_parameter("gripper_joint_name").value)
-        ]
-        point = JointTrajectoryPoint()
-        point.positions = [float(self.get_parameter(position_parameter).value)]
-        duration_ns = int(round(duration_s * 1.0e9))
-        point.time_from_start.sec = duration_ns // 1_000_000_000
-        point.time_from_start.nanosec = duration_ns % 1_000_000_000
-        goal.trajectory.points = [point]
+        goal = GripperCommand.Goal()
+        goal.command.position = float(
+            self.get_parameter(position_parameter).value
+        )
+        goal.command.max_effort = float(
+            self.get_parameter("gripper_max_effort").value
+        )
         self.gripper_goal_pending = True
         self.gripper_goal_kind = str(kind)
         future = self.gripper_client.send_goal_async(goal)
@@ -778,12 +775,12 @@ class SimplePolicyControlNode(Node):
     def _gripper_goal_result(self, future):
         try:
             wrapped_result = future.result()
-            error_code = int(wrapped_result.result.error_code)
+            status = int(wrapped_result.status)
         except Exception as error:
             self._halt_and_fail(f"gripper result failed: {error}")
             return
-        if error_code != FollowJointTrajectory.Result.SUCCESSFUL:
-            self._halt_and_fail(f"gripper trajectory error {error_code}")
+        if status != GoalStatus.STATUS_SUCCEEDED:
+            self._halt_and_fail(f"gripper action failed with status {status}")
             return
         kind = self.gripper_goal_kind
         self.gripper_goal_pending = False

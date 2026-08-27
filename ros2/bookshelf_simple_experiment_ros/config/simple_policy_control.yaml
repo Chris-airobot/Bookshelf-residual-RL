@@ -30,9 +30,10 @@ simple_policy_control:
     rotation_tolerance_rad: 0.004363323129985824
     post_command_settle_s: 0.20
 
-    gripper_action: /xarm_gripper_traj_controller/follow_joint_trajectory
+    gripper_action: /xarm_gripper/gripper_action
     gripper_open_position: 0.0
     gripper_closed_position: 0.85
+    gripper_max_effort: 0.0
     gripper_move_duration_s: 0.6
     gripper_goal_retry_timeout_s: 15.0
     gripper_goal_retry_period_s: 0.25

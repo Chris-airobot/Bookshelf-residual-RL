@@ -92,7 +92,7 @@ def test_simple_policy_defaults_to_shadow_and_keeps_rosbag_optional():
     assert "if self.execute:" in node
     assert "self.servo_start_client = self.create_client" in node
     assert "release_executed\": False" in node
-    assert "GripperCommand" not in node
+    assert "GripperCommand" in node
 
 
 def test_virtual_policy_launch_is_software_only_and_has_two_modes():
@@ -113,15 +113,16 @@ def test_virtual_policy_launch_is_software_only_and_has_two_modes():
     assert "bookshelf_policy_ros" not in launch
 
 
-def test_post_insert_uses_only_the_official_trajectory_gripper_action():
+def test_post_insert_uses_real_xarm_gripper_command_action():
     node = (
         PACKAGE
         / "bookshelf_simple_experiment_ros"
         / "simple_policy_control_node.py"
     ).read_text()
-    assert "GripperCommand" not in node
-    assert "FollowJointTrajectory" in node
-    assert '"/xarm_gripper_traj_controller/follow_joint_trajectory"' in node
+    assert "GripperCommand" in node
+    assert "FollowJointTrajectory" not in node
+    assert '"/xarm_gripper/gripper_action"' in node
+    assert 'self.declare_parameter("gripper_max_effort", 0.0)' in node
     assert "release_executed\": False" in node
     assert "bookshelf_guarded_control_ros" not in node
 

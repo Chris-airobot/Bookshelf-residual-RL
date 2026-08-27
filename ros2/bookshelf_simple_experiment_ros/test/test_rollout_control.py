@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
+from action_msgs.msg import GoalStatus
 
 from bookshelf_simple_experiment_ros.simple_policy_control_node import (
     SimplePolicyControlNode,
@@ -182,7 +183,7 @@ def test_open_then_retreat_then_empty_close_then_push_phase_order():
         _halt_and_fail=Mock(),
     )
     result = SimpleNamespace(
-        result=SimpleNamespace(error_code=0),
+        status=GoalStatus.STATUS_SUCCEEDED,
     )
     future = Mock()
     future.result.return_value = result
