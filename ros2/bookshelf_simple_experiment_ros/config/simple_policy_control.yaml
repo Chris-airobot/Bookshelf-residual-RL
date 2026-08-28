@@ -42,5 +42,6 @@ simple_policy_control:
     retreat_speed_m_s: 0.05
     retreat_timeout_s: 6.0
     push_book_distance_m: 0.03
+    push_x_uncertainty_m: 0.005
     push_timeout_s: 90.0
     contact_tolerance_m: 0.001

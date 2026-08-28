@@ -257,6 +257,11 @@ class SimplePolicyControlNode(Node):
         self.max_steps = int(self.get_parameter("max_steps").value)
         if self.max_steps <= 0:
             raise ValueError("max_steps must be positive")
+        push_x_uncertainty_m = float(
+            self.get_parameter("push_x_uncertainty_m").value
+        )
+        if not math.isfinite(push_x_uncertainty_m) or push_x_uncertainty_m < 0.0:
+            raise ValueError("push_x_uncertainty_m must be finite and non-negative")
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.eef_frame = str(self.get_parameter("eef_frame").value)
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
@@ -289,6 +294,7 @@ class SimplePolicyControlNode(Node):
         self.servo_started = False
         self.rollout_final_logged = False
         self.released_book_transform = None
+        self.push_book_transform = None
         self.retreat_direction = -self.geometry.transform_base_slot[:3, 0].copy()
         self.retreat_direction /= np.linalg.norm(self.retreat_direction)
         self.phase_start_ns = None
@@ -296,6 +302,7 @@ class SimplePolicyControlNode(Node):
         self.retreat_distance_m = 0.0
         self.push_start_xyz = None
         self.push_book_origin = None
+        self.push_geometric_contact_distance_m = None
         self.push_contact_distance_m = None
         self.book_contact_gap_m = None
         self.push_distance_m = 0.0
@@ -451,6 +458,7 @@ class SimplePolicyControlNode(Node):
         self.declare_parameter("retreat_speed_m_s", 0.05)
         self.declare_parameter("retreat_timeout_s", 6.0)
         self.declare_parameter("push_book_distance_m", 0.03)
+        self.declare_parameter("push_x_uncertainty_m", 0.005)
         self.declare_parameter("push_timeout_s", 90.0)
         self.declare_parameter("contact_tolerance_m", 0.001)
 
@@ -814,6 +822,8 @@ class SimplePolicyControlNode(Node):
             self.phase_start_ns = self._now_ns()
             self.push_start_xyz = transform_base_eef[:3, 3].copy()
             self.push_book_origin = self.released_book_transform.copy()
+            self.push_book_transform = self.released_book_transform.copy()
+            self.push_geometric_contact_distance_m = None
             self.push_contact_distance_m = None
             self.book_contact_gap_m = None
             self.push_distance_m = 0.0
@@ -883,7 +893,7 @@ class SimplePolicyControlNode(Node):
 
     def _try_calculate_push(self):
         error = self._live_input_error()
-        if error or self.released_book_transform is None:
+        if error or self.push_book_transform is None:
             return
         try:
             transform_base_eef = self._lookup(self.eef_frame)
@@ -892,7 +902,7 @@ class SimplePolicyControlNode(Node):
                 transform_base_eef @ self.geometry.transform_eef_policy_tool
             )
             transform_slot_base = invert_transform(self.geometry.transform_base_slot)
-            transform_slot_book = transform_slot_base @ self.released_book_transform
+            transform_slot_book = transform_slot_base @ self.push_book_transform
             raw, observation = compute_policy_observation(
                 transform_slot_book,
                 transform_slot_base @ transform_base_policy_tool,
@@ -929,7 +939,10 @@ class SimplePolicyControlNode(Node):
                 "push_step_index": self.push_policy_index,
                 "T_base_eef": _transform_record(transform_base_eef),
                 "T_base_tcp": _transform_record(transform_base_tcp),
-                "T_base_book": _transform_record(self.released_book_transform),
+                "T_base_book": _transform_record(self.push_book_transform),
+                "T_base_book_release": _transform_record(
+                    self.released_book_transform
+                ),
                 "T_slot_book": _transform_record(transform_slot_book),
                 "raw_observation": raw.tolist(),
                 "policy_observation": observation.tolist(),
@@ -954,7 +967,7 @@ class SimplePolicyControlNode(Node):
             residual,
             final_delta,
             False,
-            self.released_book_transform,
+            self.push_book_transform,
             transform_base_tcp,
             transform_base_policy_tool,
         )
@@ -985,9 +998,10 @@ class SimplePolicyControlNode(Node):
         )
         tolerance = float(self.get_parameter("contact_tolerance_m").value)
         if self.push_contact_distance_m is None and self.book_contact_gap_m <= tolerance:
-            self.push_contact_distance_m = max(
+            self.push_geometric_contact_distance_m = max(
                 0.0, self.push_distance_m + self.book_contact_gap_m
             )
+            self.push_contact_distance_m = self.push_geometric_contact_distance_m
         requested = float(self.get_parameter("push_book_distance_m").value)
         if self.push_contact_distance_m is None:
             self.book_push_distance_m = 0.0
@@ -997,8 +1011,8 @@ class SimplePolicyControlNode(Node):
                 self.push_contact_distance_m,
                 requested,
             )
-        self.released_book_transform = self.push_book_origin.copy()
-        self.released_book_transform[:3, 3] += (
+        self.push_book_transform = self.push_book_origin.copy()
+        self.push_book_transform[:3, 3] += (
             insertion_direction * self.book_push_distance_m
         )
         self._publish_post_visualization(transform_base_eef, transform_base_tcp)
@@ -1009,7 +1023,14 @@ class SimplePolicyControlNode(Node):
                 transform_base_eef,
                 transform_base_tcp,
                 push_distance_m=self.push_distance_m,
+                push_geometric_contact_distance_m=(
+                    self.push_geometric_contact_distance_m
+                ),
                 push_contact_distance_m=self.push_contact_distance_m,
+                push_x_uncertainty_m=float(
+                    self.get_parameter("push_x_uncertainty_m").value
+                ),
+                contact_source="release_geometry_no_contact_sensor",
                 book_push_distance_m=self.book_push_distance_m,
                 requested_book_push_distance_m=requested,
             )
@@ -1038,10 +1059,10 @@ class SimplePolicyControlNode(Node):
         self._publish_twist(twist)
 
     def _publish_post_visualization(self, transform_base_eef, transform_base_tcp):
-        if self.released_book_transform is None or self.target is None:
+        if self.push_book_transform is None or self.target is None:
             return
         self._publish_visualization(
-            self.released_book_transform,
+            self.push_book_transform,
             transform_base_tcp,
             transform_base_eef @ self.geometry.transform_eef_policy_tool,
         )
@@ -1058,11 +1079,21 @@ class SimplePolicyControlNode(Node):
             payload["T_base_eef"] = _transform_record(transform_base_eef)
         if transform_base_tcp is not None:
             payload["T_base_tcp"] = _transform_record(transform_base_tcp)
-        if self.released_book_transform is not None:
-            payload["T_base_book"] = _transform_record(self.released_book_transform)
+        book_transform = (
+            self.push_book_transform
+            if self.phase in ("push", "episode_complete")
+            and self.push_book_transform is not None
+            else self.released_book_transform
+        )
+        if book_transform is not None:
+            payload["T_base_book"] = _transform_record(book_transform)
             payload["T_slot_book"] = _transform_record(
                 invert_transform(self.geometry.transform_base_slot)
-                @ self.released_book_transform
+                @ book_transform
+            )
+        if self.released_book_transform is not None:
+            payload["T_base_book_release"] = _transform_record(
+                self.released_book_transform
             )
         payload.update(values)
         self._append_payload(payload)
@@ -1347,15 +1378,24 @@ class SimplePolicyControlNode(Node):
                 else None
             ),
             "final_book_pose": (
+                _transform_record(self.push_book_transform)
+                if self.push_book_transform is not None
+                else (
+                    _transform_record(self.released_book_transform)
+                    if self.released_book_transform is not None
+                    else (
+                        _transform_record(
+                            transform_base_eef @ self.geometry.transform_eef_book
+                        )
+                        if transform_base_eef is not None
+                        else None
+                    )
+                )
+            ),
+            "release_book_pose": (
                 _transform_record(self.released_book_transform)
                 if self.released_book_transform is not None
-                else (
-                    _transform_record(
-                        transform_base_eef @ self.geometry.transform_eef_book
-                    )
-                    if transform_base_eef is not None
-                    else None
-                )
+                else None
             ),
             "error": None if error is None else str(error),
             "policy_update_count": self.total_steps,
@@ -1394,7 +1434,12 @@ class SimplePolicyControlNode(Node):
                 payload["final_arm_joint_positions_rad"] = joint_positions
             except ValueError:
                 pass
-        if self.released_book_transform is not None:
+        if self.push_book_transform is not None:
+            payload["final_book_pose_slot"] = _transform_record(
+                invert_transform(self.geometry.transform_base_slot)
+                @ self.push_book_transform
+            )
+        elif self.released_book_transform is not None:
             payload["final_book_pose_slot"] = _transform_record(
                 invert_transform(self.geometry.transform_base_slot)
                 @ self.released_book_transform

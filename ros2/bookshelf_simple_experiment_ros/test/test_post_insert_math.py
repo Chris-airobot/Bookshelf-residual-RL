@@ -49,3 +49,32 @@ def test_oriented_contact_and_nominal_push_match_verified_old_helpers():
         rtol=0.0,
         atol=0.0,
     )
+
+
+def test_x_uncertainty_does_not_change_push_command_semantics():
+    geometric_contact = 0.09
+    uncertainty = 0.005
+    raw = np.array(
+        [1.0, -0.05, 0.1, 0.002, 0.006, 0.03, 0.0, -0.001,
+         -0.07, 0.0, 0.05, -0.02],
+        dtype=np.float32,
+    )
+    raw_before = raw.copy()
+    nominal_before = compute_push_nominal_delta(raw)
+    commanded_completion = geometric_contact + 0.03
+    assert commanded_completion == pytest.approx(0.12)
+    assert commanded_completion != pytest.approx(
+        geometric_contact + uncertainty + 0.03
+    )
+    np.testing.assert_array_equal(raw, raw_before)
+    np.testing.assert_array_equal(compute_push_nominal_delta(raw), nominal_before)
+
+
+def test_requested_book_push_remains_thirty_mm_from_geometric_contact():
+    geometric_contact = 0.09
+    assert simulated_book_push_distance(0.12, geometric_contact, 0.03) == pytest.approx(
+        0.03
+    )
+    assert simulated_book_push_distance(1.0, geometric_contact, 0.03) == pytest.approx(
+        0.03
+    )
