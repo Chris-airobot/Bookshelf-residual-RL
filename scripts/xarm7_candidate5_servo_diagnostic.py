@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise Candidate 5 through MoveIt Servo on verified xArm fake hardware only."""
+"""Exercise selected preinsert joints through Servo on verified fake hardware only."""
 
 import argparse
 from collections import deque
@@ -46,7 +46,7 @@ STATUS_NAMES = {
 HALTING_STATUSES = {2, 4, 5}
 
 
-def arguments():
+def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--run-log",
@@ -59,6 +59,13 @@ def arguments():
     parser.add_argument(
         "--output", default="/tmp/xarm7_candidate5_servo_diagnostic.json"
     )
+    parser.add_argument(
+        "--start-joints",
+        type=float,
+        nargs=7,
+        metavar="J",
+        help="Seven fake xArm7 start joints; defaults to Candidate 5.",
+    )
     parser.add_argument("--distance-m", type=float, default=0.100)
     parser.add_argument("--control-rate-hz", type=float, default=30.0)
     parser.add_argument("--maximum-speed-m-s", type=float, default=0.025)
@@ -67,7 +74,7 @@ def arguments():
     parser.add_argument("--timeout-s", type=float, default=30.0)
     parser.add_argument("--stall-window-s", type=float, default=3.0)
     parser.add_argument("--stall-progress-m", type=float, default=0.0002)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def slot_x_direction(log_path):
@@ -166,28 +173,28 @@ class Candidate5ServoDiagnostic(Node):
             )
         return components
 
-    def initialize_candidate(self):
+    def initialize_candidate(self, start_joints):
         if not self.initializer.wait_for_server(timeout_sec=10.0):
             raise RuntimeError("fake xArm trajectory controller is unavailable")
         goal = FollowJointTrajectory.Goal()
         goal.trajectory.joint_names = JOINT_NAMES
         point = JointTrajectoryPoint()
-        point.positions = CANDIDATE_5
+        point.positions = start_joints
         point.time_from_start.sec = 2
         goal.trajectory.points = [point]
         goal.trajectory.header.stamp = self.get_clock().now().to_msg()
         future = self.initializer.send_goal_async(goal)
         rclpy.spin_until_future_complete(self, future, timeout_sec=10.0)
         if not future.done() or not future.result().accepted:
-            raise RuntimeError("fake trajectory controller rejected Candidate 5")
+            raise RuntimeError("fake trajectory controller rejected the start joints")
         result_future = future.result().get_result_async()
         rclpy.spin_until_future_complete(self, result_future, timeout_sec=10.0)
         if not result_future.done():
-            raise RuntimeError("fake Candidate 5 initialization timed out")
+            raise RuntimeError("fake start-joint initialization timed out")
         error_code = int(result_future.result().result.error_code)
         if error_code != int(FollowJointTrajectory.Result.SUCCESSFUL):
             raise RuntimeError(
-                f"fake Candidate 5 initialization failed with error {error_code}"
+                f"fake start-joint initialization failed with error {error_code}"
             )
 
     def lookup_tcp(self, timeout_s=5.0):
@@ -319,13 +326,17 @@ def run_motion(node, args, direction):
 
 def main():
     args = arguments()
+    start_joints = CANDIDATE_5 if args.start_joints is None else args.start_joints
+    start_joints_source = (
+        "Candidate 5 default" if args.start_joints is None else "custom --start-joints"
+    )
     direction = slot_x_direction(args.run_log)
     rclpy.init()
     node = Candidate5ServoDiagnostic()
     result = None
     try:
         components = node.verify_fake_hardware()
-        node.initialize_candidate()
+        node.initialize_candidate(start_joints)
         result = run_motion(node, args, direction)
         result.update(
             {
@@ -333,6 +344,8 @@ def main():
                 "fake_hardware_verified": True,
                 "hardware_components": components,
                 "candidate_5_joints": CANDIDATE_5,
+                "start_joints": [float(value) for value in start_joints],
+                "start_joints_source": start_joints_source,
                 "source_run_log": str(Path(args.run_log).expanduser()),
                 "control_rate_hz": float(args.control_rate_hz),
                 "maximum_speed_m_s": float(args.maximum_speed_m_s),
@@ -347,6 +360,8 @@ def main():
             "fake_hardware_verified": False,
             "failure_reason": str(error),
             "candidate_5_joints": CANDIDATE_5,
+            "start_joints": [float(value) for value in start_joints],
+            "start_joints_source": start_joints_source,
             "source_run_log": str(Path(args.run_log).expanduser()),
         }
     finally:
@@ -356,6 +371,7 @@ def main():
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    print(f"start joints ({start_joints_source}): {result['start_joints']}")
     print(
         f"{result['verdict']}: actual forward displacement "
         f"{result.get('actual_forward_tcp_displacement_m', 0.0):.6f} m / "
