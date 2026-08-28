@@ -186,7 +186,7 @@ class RealExperimentOperator(Node):
         super().__init__("bookshelf_real_experiment_operator")
         self.workflow = OperatorWorkflow()
         self.events = queue.Queue()
-        self.clients = {
+        self.service_clients = {
             action: self.create_client(Trigger, service)
             for action, service in SERVICES.items()
         }
@@ -233,7 +233,7 @@ class RealExperimentOperator(Node):
             self.keyboard.stop()
             rclpy.shutdown()
             return
-        client = self.clients[action]
+        client = self.service_clients[action]
         if not client.service_is_ready():
             self.workflow.service_result(action, False)
             self.get_logger().error(f"Service is not ready: {SERVICES[action]}")
