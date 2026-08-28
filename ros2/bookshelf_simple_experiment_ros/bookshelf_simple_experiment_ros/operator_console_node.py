@@ -40,6 +40,11 @@ class OperatorWorkflow:
         self.slot_accepted = False
         self.plan_ready = False
         self.pending = None
+        self.plan_cycle_active = False
+        self.plan_request_accepted = False
+        self.planning_status_seen = False
+        self.execution_request_accepted = False
+        self.execution_status_seen = False
 
     def command(self, key):
         key = str(key).lower()
@@ -59,14 +64,25 @@ class OperatorWorkflow:
                 return None, "P requires an accepted slot and loading preparation."
             self.pending = "plan"
             self.plan_ready = False
+            self.plan_cycle_active = True
+            self.plan_request_accepted = False
+            self.planning_status_seen = False
+            self.execution_request_accepted = False
+            self.execution_status_seen = False
             self.state = self.PLANNING
             return "plan", None
         if key == "e":
-            if self.state != self.PLAN_READY or not self.plan_ready:
+            if (
+                self.state != self.PLAN_READY
+                or not self.plan_ready
+                or not self.plan_cycle_active
+                or not self.plan_request_accepted
+            ):
                 return None, "E is locked until a successful reviewed plan is ready."
             self.pending = "execute"
             self.plan_ready = False
-            self.state = self.EXECUTING
+            self.execution_request_accepted = False
+            self.execution_status_seen = False
             return "execute", None
         return None, "Unknown key. Use S, P, E, or Q."
 
@@ -79,12 +95,19 @@ class OperatorWorkflow:
                 self.state = self.SLOT_ACCEPTED
             else:
                 self.state = self.SCAN
-        elif action == "plan" and not success:
-            self.plan_ready = False
-            self.state = self.SLOT_ACCEPTED if self.slot_accepted else self.SCAN
-        elif action == "execute" and not success:
-            self.plan_ready = True
-            self.state = self.PLAN_READY
+        elif action == "plan":
+            self.plan_request_accepted = bool(success)
+            if not success:
+                self.plan_cycle_active = False
+                self.plan_ready = False
+                self.state = self.SLOT_ACCEPTED if self.slot_accepted else self.SCAN
+        elif action == "execute":
+            self.execution_request_accepted = bool(success)
+            if success:
+                self.state = self.EXECUTING
+            else:
+                self.plan_ready = True
+                self.state = self.PLAN_READY
 
     def status(self, phase, slot_frozen=False):
         self.slot_accepted = self.slot_accepted or bool(slot_frozen)
@@ -97,16 +120,33 @@ class OperatorWorkflow:
             "requesting_ik_branches",
             "planning",
             "planning_ik_branches",
-        ):
+        ) and self.plan_cycle_active and self.state == self.PLANNING:
             self.plan_ready = False
+            if self.plan_request_accepted:
+                self.planning_status_seen = True
             self.state = self.PLANNING
-        elif phase == "awaiting_execute_confirmation":
+        elif (
+            phase == "awaiting_execute_confirmation"
+            and self.plan_cycle_active
+            and self.plan_request_accepted
+            and self.planning_status_seen
+            and self.state == self.PLANNING
+        ):
             self.plan_ready = True
             self.state = self.PLAN_READY
-        elif phase == "executing":
-            self.plan_ready = False
-            self.state = self.EXECUTING
-        elif phase == "done":
+        elif phase == "executing" and (
+            self.pending == "execute" or self.execution_request_accepted
+        ):
+            self.execution_status_seen = True
+            if self.execution_request_accepted:
+                self.plan_ready = False
+                self.state = self.EXECUTING
+        elif (
+            phase == "done"
+            and self.execution_request_accepted
+            and self.execution_status_seen
+            and self.state == self.EXECUTING
+        ):
             self.plan_ready = False
             self.state = self.COMPLETE
         elif phase in ("failed", "rejected"):
@@ -192,7 +232,9 @@ class RealExperimentOperator(Node):
         }
         status_qos = QoSProfile(
             depth=1,
-            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            # Operator authorization is based only on live transitions from
+            # this console session, never replayed retained execution status.
+            durability=DurabilityPolicy.VOLATILE,
             reliability=ReliabilityPolicy.RELIABLE,
         )
         self.create_subscription(

@@ -1,6 +1,9 @@
 from pathlib import Path
 
-from bookshelf_simple_experiment_ros.operator_console_node import OperatorWorkflow
+from bookshelf_simple_experiment_ros.operator_console_node import (
+    OperatorWorkflow,
+    SERVICES,
+)
 
 
 PACKAGE = Path(__file__).resolve().parents[1]
@@ -27,10 +30,17 @@ def test_reviewed_operator_sequence_is_state_aware():
     workflow.service_result("plan", True)
     assert workflow.command("e")[0] is None
 
+    workflow.status("planning_ik_branches", slot_frozen=True)
     workflow.status("awaiting_execute_confirmation", slot_frozen=True)
     assert workflow.state == workflow.PLAN_READY
     assert workflow.command("e") == ("execute", None)
+    assert workflow.state == workflow.PLAN_READY
+    workflow.status("executing", slot_frozen=True)
+    assert workflow.state == workflow.PLAN_READY
+    workflow.service_result("execute", True)
     assert workflow.state == workflow.EXECUTING
+    workflow.status("done", slot_frozen=True)
+    assert workflow.state == workflow.COMPLETE
 
 
 def test_pending_service_prevents_double_dispatch():
@@ -51,6 +61,74 @@ def test_plan_never_enables_execute_without_plan_ready_status():
 
     assert workflow.plan_ready is False
     assert workflow.command("e")[0] is None
+
+
+def test_s_p_without_e_never_enters_execution_states():
+    workflow = OperatorWorkflow()
+    workflow.command("s")
+    workflow.service_result("accept_slot", True)
+    workflow.command("p")
+    workflow.service_result("plan", True)
+
+    observed = [workflow.state]
+    for phase in ("executing", "planning_ik_branches",
+                  "awaiting_execute_confirmation", "done"):
+        workflow.status(phase, slot_frozen=True)
+        observed.append(workflow.state)
+
+    assert observed == [
+        workflow.PLANNING,
+        workflow.PLANNING,
+        workflow.PLANNING,
+        workflow.PLAN_READY,
+        workflow.PLAN_READY,
+    ]
+    assert workflow.execution_request_accepted is False
+
+
+def test_stale_status_cannot_unlock_or_create_execution_state():
+    workflow = OperatorWorkflow()
+
+    for phase in ("awaiting_execute_confirmation", "executing", "done"):
+        workflow.status(phase, slot_frozen=False)
+    assert workflow.state == workflow.SCAN
+    assert workflow.command("e")[0] is None
+
+    workflow.command("s")
+    workflow.service_result("accept_slot", True)
+    workflow.command("p")
+    workflow.status("awaiting_execute_confirmation", slot_frozen=True)
+    assert workflow.state == workflow.PLANNING
+    assert workflow.command("e")[0] is None
+    workflow.service_result("plan", True)
+    workflow.status("awaiting_execute_confirmation", slot_frozen=True)
+    assert workflow.state == workflow.PLANNING
+
+
+def test_new_plan_invalidates_previous_execute_authorization():
+    workflow = OperatorWorkflow()
+    workflow.command("s")
+    workflow.service_result("accept_slot", True)
+    workflow.command("p")
+    workflow.service_result("plan", True)
+    workflow.status("planning_ik_branches", slot_frozen=True)
+    workflow.status("awaiting_execute_confirmation", slot_frozen=True)
+    assert workflow.plan_ready
+
+    workflow.command("p")
+
+    assert workflow.state == workflow.PLANNING
+    assert workflow.plan_ready is False
+    assert workflow.execution_request_accepted is False
+    workflow.status("done", slot_frozen=True)
+    assert workflow.state == workflow.PLANNING
+
+
+def test_service_mapping_is_strictly_plan_then_execute():
+    assert SERVICES["plan"] == "/bookshelf_simple/plan_preinsert"
+    assert SERVICES["execute"] == "/bookshelf_simple/execute_preinsert"
+    assert SERVICES["accept_slot"] == "/bookshelf_simple/accept_slot"
+    assert "/bookshelf_simple/plan_and_execute_preinsert" not in SERVICES.values()
 
 
 def test_no_reset_is_invented():
