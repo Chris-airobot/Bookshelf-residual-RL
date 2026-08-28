@@ -39,6 +39,14 @@ from .geometry import (
     make_transform,
     matrix_to_quaternion_xyzw,
 )
+from .ik_branch_selection import (
+    XArm7Kinematics,
+    diverse_seeds,
+    is_duplicate,
+    select_candidate,
+    trajectory_joint_path_length,
+    wrapped_joint_delta,
+)
 from .moveit_requests import (
     build_joint_motion_plan_request,
     build_position_ik_request,
@@ -160,6 +168,8 @@ class SimplePreinsertNode(Node):
         self.diagnostics_printed = False
         self.phase = "waiting_for_slot"
         self.pending = None
+        self.branch_search = None
+        self.branch_kinematics = None
 
         latched = QoSProfile(
             depth=1,
@@ -277,6 +287,14 @@ class SimplePreinsertNode(Node):
         self.declare_parameter("acceleration_scaling", 0.05)
         self.declare_parameter("joint_goal_tolerance_rad", 0.001)
         self.declare_parameter("maximum_goal_joint_delta_rad", 1.5)
+        self.declare_parameter("ik_branch_seed_count", 24)
+        self.declare_parameter("ik_branch_random_seed", 7)
+        self.declare_parameter("ik_branch_deduplication_rad", 0.01)
+        self.declare_parameter("ik_branch_path_samples", 11)
+        self.declare_parameter("predicted_insertion_distance_m", 0.10)
+        self.declare_parameter("minimum_predicted_joint_margin_rad", 0.05)
+        self.declare_parameter("maximum_predicted_condition", 27.0)
+        self.declare_parameter("similar_condition_band", 1.0)
         self.declare_parameter("expected_arm_joint_names", [
             "joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7",
         ])
@@ -490,7 +508,14 @@ class SimplePreinsertNode(Node):
         return markers
 
     def _accept_slot_callback(self, _request, response):
-        if self.phase in ("attaching_book", "requesting_ik", "planning", "executing"):
+        if self.phase in (
+            "attaching_book",
+            "requesting_ik",
+            "requesting_ik_branches",
+            "planning",
+            "planning_ik_branches",
+            "executing",
+        ):
             response.success = False
             response.message = f"workflow is busy ({self.phase})"
             return response
@@ -524,7 +549,14 @@ class SimplePreinsertNode(Node):
         return response
 
     def _target_error(self):
-        if self.phase in ("attaching_book", "requesting_ik", "planning", "executing"):
+        if self.phase in (
+            "attaching_book",
+            "requesting_ik",
+            "requesting_ik_branches",
+            "planning",
+            "planning_ik_branches",
+            "executing",
+        ):
             return f"workflow is busy ({self.phase})"
         if (bool(self.get_parameter("require_slot_acceptance").value)
                 and self.frozen_slot is None):
@@ -560,6 +592,9 @@ class SimplePreinsertNode(Node):
         self.pending = {
             "target": copy.deepcopy(self.latest_target[1]),
             "joint_state": copy.deepcopy(self.latest_joint_state),
+            "insertion_direction": np.asarray(
+                self.latest_target[0][:3, 0], dtype=np.float64
+            ).copy(),
         }
         self.planned_trajectory = None
         if bool(self.get_parameter("attach_book_collision").value):
@@ -645,41 +680,211 @@ class SimplePreinsertNode(Node):
         self._request_ik()
 
     def _request_ik(self):
-        self._publish_status("requesting_ik")
+        expected = [str(v) for v in self.get_parameter("expected_arm_joint_names").value]
+        current = dict(zip(self.pending["joint_state"].name, self.pending["joint_state"].position))
+        missing = [name for name in expected if name not in current]
+        if missing:
+            self._fail(f"current joint state is missing {missing}")
+            return
+        try:
+            if self.branch_kinematics is None:
+                self.branch_kinematics = XArm7Kinematics(expected, self.planning_link)
+        except Exception as error:
+            self._fail(f"could not load xArm7 branch-scoring model: {error}")
+            return
+        current_arm = np.asarray([current[name] for name in expected], dtype=np.float64)
+        seeds = diverse_seeds(
+            current_arm,
+            self.branch_kinematics.lower,
+            self.branch_kinematics.upper,
+            int(self.get_parameter("ik_branch_seed_count").value),
+            int(self.get_parameter("ik_branch_random_seed").value),
+        )
+        direction = np.asarray(self.pending["insertion_direction"], dtype=np.float64)
+        direction_norm = float(np.linalg.norm(direction))
+        if direction_norm <= 0.0:
+            self._fail("slot +X insertion direction is invalid")
+            return
+        self.branch_search = {
+            "expected": expected,
+            "current_arm": current_arm,
+            "seeds": seeds,
+            "seed_index": 0,
+            "unique": [],
+            "candidates": [],
+            "generated": 0,
+            "surviving_checks": 0,
+            "plan_index": 0,
+            "direction": direction / direction_norm,
+        }
+        self._publish_status("requesting_ik_branches")
+        self._request_next_seed_ik()
+
+    def _joint_state_with_arm_positions(self, positions):
+        state = copy.deepcopy(self.pending["joint_state"])
+        values = dict(zip(state.name, state.position))
+        values.update(dict(zip(self.branch_search["expected"], positions)))
+        state.position = [float(values[name]) for name in state.name]
+        state.velocity = []
+        state.effort = []
+        return state
+
+    def _arm_solution(self, result):
+        if int(result.error_code.val) != int(MoveItErrorCodes.SUCCESS):
+            return None
+        values = dict(zip(result.solution.joint_state.name, result.solution.joint_state.position))
+        expected = self.branch_search["expected"]
+        if any(name not in values for name in expected):
+            return None
+        return np.asarray([values[name] for name in expected], dtype=np.float64)
+
+    def _ik_request_for(self, transform_base_tcp, seed):
         request = build_position_ik_request(
-            target_pose=_transform_to_pose(self.pending["target"].transform_base_tcp),
-            start_joint_state=self.pending["joint_state"],
+            target_pose=_transform_to_pose(transform_base_tcp),
+            start_joint_state=self._joint_state_with_arm_positions(seed),
             base_frame=self.base_frame,
             planning_link=self.planning_link,
             group_name=self.group_name,
             timeout_s=float(self.get_parameter("ik_timeout_s").value),
         )
-        future = self.ik_client.call_async(request)
-        future.add_done_callback(self._ik_response_callback)
+        # Preserve the held-book attachment already applied to the planning scene.
+        request.ik_request.robot_state.is_diff = True
+        return request
 
-    def _ik_response_callback(self, future):
+    def _request_next_seed_ik(self):
+        search = self.branch_search
+        if search is None:
+            return
+        if search["seed_index"] >= len(search["seeds"]):
+            self._begin_candidate_plans()
+            return
+        seed = search["seeds"][search["seed_index"]]
+        search["seed_index"] += 1
+        request = self._ik_request_for(
+            self.pending["target"].transform_base_tcp, seed
+        )
+        future = self.ik_client.call_async(request)
+        future.add_done_callback(self._seed_ik_response_callback)
+
+    def _seed_ik_response_callback(self, future):
         try:
-            result = future.result()
+            joints = self._arm_solution(future.result())
         except Exception as error:
-            self._fail(f"MoveIt IK call failed: {error}")
+            self._fail(f"MoveIt IK branch call failed: {error}")
             return
-        if int(result.error_code.val) != int(MoveItErrorCodes.SUCCESS):
-            self._fail(f"MoveIt IK failed with code {int(result.error_code.val)}")
+        search = self.branch_search
+        if joints is None or is_duplicate(
+            joints,
+            search["unique"],
+            float(self.get_parameter("ik_branch_deduplication_rad").value),
+        ):
+            self._request_next_seed_ik()
             return
-        expected = [str(v) for v in self.get_parameter("expected_arm_joint_names").value]
-        current = dict(zip(self.pending["joint_state"].name, self.pending["joint_state"].position))
-        target = dict(zip(result.solution.joint_state.name, result.solution.joint_state.position))
-        missing = [name for name in expected if name not in current or name not in target]
-        if missing:
-            self._fail(f"IK joint state is missing {missing}")
+        search["unique"].append(joints.copy())
+        search["generated"] += 1
+        margin = self.branch_kinematics.joint_limit_margin(joints)
+        maximum_delta = float(np.max(np.abs(wrapped_joint_delta(
+            joints, search["current_arm"]
+        ))))
+        if (
+            margin < float(self.get_parameter("minimum_predicted_joint_margin_rad").value)
+            or maximum_delta > float(self.get_parameter("maximum_goal_joint_delta_rad").value)
+        ):
+            self._request_next_seed_ik()
             return
-        maximum_delta = max(abs(float(target[name]) - float(current[name])) for name in expected)
-        if maximum_delta > float(self.get_parameter("maximum_goal_joint_delta_rad").value):
-            self._fail(f"IK branch jump {maximum_delta:.3f} rad exceeds the limit")
+        candidate = {
+            "candidate_id": search["generated"],
+            "joints": joints.copy(),
+            "last_joints": joints.copy(),
+            "conditions": [self.branch_kinematics.condition_number(joints)],
+            "minimum_margin": margin,
+            "plan": None,
+            "transition_cost": math.inf,
+        }
+        self._request_candidate_path_ik(candidate, 1)
+
+    def _request_candidate_path_ik(self, candidate, sample_index):
+        sample_count = max(int(self.get_parameter("ik_branch_path_samples").value), 2)
+        if sample_index >= sample_count:
+            candidate["max_condition"] = max(candidate["conditions"])
+            candidate["final_condition"] = candidate["conditions"][-1]
+            self.branch_search["candidates"].append(candidate)
+            self.branch_search["surviving_checks"] += 1
+            self._request_next_seed_ik()
             return
+        distance = (
+            float(self.get_parameter("predicted_insertion_distance_m").value)
+            * sample_index
+            / (sample_count - 1)
+        )
+        target = self.pending["target"].transform_base_tcp.copy()
+        target[:3, 3] += self.branch_search["direction"] * distance
+        request = self._ik_request_for(target, candidate["last_joints"])
+        future = self.ik_client.call_async(request)
+        future.add_done_callback(
+            lambda completed, candidate=candidate, sample_index=sample_index: (
+                self._candidate_path_ik_response(candidate, sample_index, completed)
+            )
+        )
+
+    def _candidate_path_ik_response(self, candidate, sample_index, future):
+        try:
+            joints = self._arm_solution(future.result())
+        except Exception as error:
+            self._fail(f"MoveIt insertion-path IK call failed: {error}")
+            return
+        if joints is None:
+            self._request_next_seed_ik()
+            return
+        margin = self.branch_kinematics.joint_limit_margin(joints)
+        if margin < float(self.get_parameter("minimum_predicted_joint_margin_rad").value):
+            self._request_next_seed_ik()
+            return
+        candidate["last_joints"] = joints
+        candidate["minimum_margin"] = min(candidate["minimum_margin"], margin)
+        candidate["conditions"].append(
+            self.branch_kinematics.condition_number(joints)
+        )
+        self._request_candidate_path_ik(candidate, sample_index + 1)
+
+    def _begin_candidate_plans(self):
+        search = self.branch_search
+        maximum_condition = float(
+            self.get_parameter("maximum_predicted_condition").value
+        )
+        search["candidates"] = [
+            candidate
+            for candidate in search["candidates"]
+            if math.isfinite(candidate["max_condition"])
+            and candidate["max_condition"] < maximum_condition
+        ]
+        self.get_logger().info(
+            "PREINSERT IK SEARCH "
+            f"generated={search['generated']} "
+            f"surviving_collision_joint_checks={search['surviving_checks']} "
+            f"below_condition_limit={len(search['candidates'])}"
+        )
+        if not search["candidates"]:
+            self._fail(
+                "no acceptable preinsert IK branch survived collision, joint-limit, "
+                "insertion-path, and singularity checks"
+            )
+            return
+        search["candidates"].sort(key=lambda candidate: candidate["max_condition"])
+        search["plan_index"] = 0
+        self._publish_status("planning_ik_branches")
+        self._request_next_candidate_plan()
+
+    def _request_next_candidate_plan(self):
+        search = self.branch_search
+        if search["plan_index"] >= len(search["candidates"]):
+            self._finish_branch_selection()
+            return
+        candidate = search["candidates"][search["plan_index"]]
+        search["plan_index"] += 1
         request = build_joint_motion_plan_request(
-            target_joint_names=expected,
-            target_joint_positions=[target[name] for name in expected],
+            target_joint_names=search["expected"],
+            target_joint_positions=candidate["joints"],
             start_joint_state=self.pending["joint_state"],
             group_name=self.group_name,
             planning_pipeline_id=str(self.get_parameter("planning_pipeline_id").value),
@@ -690,9 +895,49 @@ class SimplePreinsertNode(Node):
             acceleration_scaling=float(self.get_parameter("acceleration_scaling").value),
             joint_tolerance_rad=float(self.get_parameter("joint_goal_tolerance_rad").value),
         )
-        self._publish_status("planning")
+        # Preserve the held-book attachment while planning from the supplied joints.
+        request.motion_plan_request.start_state.is_diff = True
         future = self.plan_client.call_async(request)
-        future.add_done_callback(self._plan_response_callback)
+        future.add_done_callback(
+            lambda completed, candidate=candidate: self._candidate_plan_callback(
+                candidate, completed
+            )
+        )
+
+    def _candidate_plan_callback(self, candidate, future):
+        try:
+            result = future.result().motion_plan_response
+        except Exception as error:
+            self._fail(f"MoveIt candidate planning call failed: {error}")
+            return
+        if (
+            int(result.error_code.val) == int(MoveItErrorCodes.SUCCESS)
+            and len(result.trajectory.joint_trajectory.points) >= 2
+        ):
+            candidate["plan"] = result
+            candidate["transition_cost"] = trajectory_joint_path_length(
+                result.trajectory, self.branch_search["expected"]
+            )
+        self._request_next_candidate_plan()
+
+    def _finish_branch_selection(self):
+        selected = select_candidate(
+            self.branch_search["candidates"],
+            float(self.get_parameter("similar_condition_band").value),
+        )
+        if selected is None:
+            self._fail("no singularity-safe preinsert IK branch could be planned")
+            return
+        self.get_logger().info(
+            "PREINSERT IK SELECTED "
+            f"candidate={selected['candidate_id']} "
+            f"max_predicted_condition={selected['max_condition']:.3f} "
+            f"transition_cost={selected['transition_cost']:.3f} "
+            f"joints={np.array2string(selected['joints'], precision=6, separator=',')}"
+        )
+        result = selected["plan"]
+        self.branch_search = None
+        SimplePreinsertNode._accept_plan_result(self, result)
 
     def _plan_response_callback(self, future):
         try:
@@ -700,6 +945,9 @@ class SimplePreinsertNode(Node):
         except Exception as error:
             self._fail(f"MoveIt planning call failed: {error}")
             return
+        SimplePreinsertNode._accept_plan_result(self, result)
+
+    def _accept_plan_result(self, result):
         points = result.trajectory.joint_trajectory.points
         if int(result.error_code.val) != int(MoveItErrorCodes.SUCCESS) or len(points) < 2:
             self._fail(f"MoveIt planning failed with code {int(result.error_code.val)}")
@@ -758,6 +1006,7 @@ class SimplePreinsertNode(Node):
 
     def _fail(self, reason):
         self.pending = None
+        self.branch_search = None
         self.planned_trajectory = None
         self._publish_status("failed", reason=reason)
 

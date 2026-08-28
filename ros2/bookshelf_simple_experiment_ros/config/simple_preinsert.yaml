@@ -36,6 +36,14 @@ simple_preinsert:
     message_max_age_s: 0.50
     velocity_scaling: 0.05
     acceleration_scaling: 0.05
+    ik_branch_seed_count: 24
+    ik_branch_random_seed: 7
+    ik_branch_deduplication_rad: 0.01
+    ik_branch_path_samples: 11
+    predicted_insertion_distance_m: 0.10
+    minimum_predicted_joint_margin_rad: 0.05
+    maximum_predicted_condition: 27.0
+    similar_condition_band: 1.0
     expected_arm_joint_names: [joint1, joint2, joint3, joint4, joint5, joint6, joint7]
     book_touch_links:
       - link_eef
