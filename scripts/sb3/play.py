@@ -107,6 +107,15 @@ parser.add_argument(
     default=0,
     help="Environment index to print when --print_residual_components is set.",
 )
+parser.add_argument(
+    "--post_release_pose_csv",
+    type=str,
+    default=None,
+    help=(
+        "Evaluation-only CSV of TCP-based book-pose estimates at learned release "
+        "and Isaac ground truth at release and the pre-PUSH settle boundary."
+    ),
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -144,6 +153,7 @@ from isaaclab.envs import (
     multi_agent_to_single_agent,
 )
 from isaaclab.utils.dict import print_dict
+from isaaclab.utils import math as math_utils
 
 from isaaclab_rl.sb3 import Sb3VecEnvWrapper, process_sb3_cfg
 import isaaclab_tasks  # noqa: F401
@@ -161,6 +171,7 @@ from evaluation_scenarios import (
     git_revision,
     sha256_file,
 )
+from post_release_pose_evaluation import PoseSample, PostReleasePoseCsv
 
 
 def _scalar(value, env_idx: int | None = None, default=None):
@@ -235,6 +246,38 @@ def _scenario_trace_row(infos, env_idx: int) -> dict:
     if vector is not None and len(vector) == len(SCENARIO_VECTOR_FIELDS):
         row.update(zip(SCENARIO_VECTOR_FIELDS, vector))
     return row
+
+
+def _post_release_pose_sample(raw_env, env_idx: int) -> PoseSample:
+    """Read evaluation poses without feeding them into policy or control."""
+    env_id = torch.tensor([env_idx], device=raw_env.device, dtype=torch.long)
+    tcp_pos_base = raw_env._position_env_to_base(raw_env._ee_tool_pos_env())[env_idx]
+    _, tcp_quat_base_all = raw_env._ee_pose_in_base()
+    book_pos_base, book_quat_base = math_utils.subtract_frame_transforms(
+        raw_env.robot.data.root_pos_w[env_id],
+        raw_env.robot.data.root_quat_w[env_id],
+        raw_env.book.data.root_link_pos_w[env_id],
+        raw_env.book.data.root_link_quat_w[env_id],
+    )
+
+    def values(tensor) -> tuple[float, ...]:
+        return tuple(float(value) for value in tensor.detach().cpu().tolist())
+
+    return PoseSample(
+        tcp_base=values(torch.cat((tcp_pos_base, tcp_quat_base_all[env_idx]))),
+        tcp_to_book=values(
+            torch.cat(
+                (
+                    raw_env._book_offset_tool[env_idx],
+                    raw_env._book_rel_quat_tool[env_idx],
+                )
+            )
+        ),
+        gt_book_base=values(torch.cat((book_pos_base[0], book_quat_base[0]))),
+        # Isaac clones translate environments without rotating them; the slot
+        # axes are the environment/world axes in this task.
+        slot_from_base_quaternion=values(raw_env.robot.data.root_quat_w[env_idx]),
+    )
 
 
 @hydra_task_config(args_cli.task, args_cli.agent)
@@ -339,6 +382,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     # create isaac environment
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.video else None)
+    raw_env = env.unwrapped
 
     # post-process agent configuration
     agent_cfg = process_sb3_cfg(agent_cfg, env.unwrapped.num_envs)
@@ -452,6 +496,27 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     dt = env.unwrapped.step_dt
     num_envs = env.num_envs
+    post_release_pose_log = None
+    if args_cli.post_release_pose_csv is not None:
+        required = (
+            "_release_step_buf",
+            "_push_start_step_buf",
+            "_book_offset_tool",
+            "_book_rel_quat_tool",
+        )
+        missing = [name for name in required if not hasattr(raw_env, name)]
+        if missing:
+            raise ValueError(
+                "--post_release_pose_csv requires the residual bookshelf environment; "
+                f"missing {missing}"
+            )
+        post_release_pose_log = PostReleasePoseCsv(
+            args_cli.post_release_pose_csv, num_envs
+        )
+        print(
+            "[INFO] Post-release pose evaluation CSV: "
+            f"{post_release_pose_log.output_path}"
+        )
 
     # Episode tracking
     # success = terminated with reward > SUCCESS_THRESH (success_bonus=100, drop=-20)
@@ -479,9 +544,35 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # env stepping
             obs, rewards, dones, infos = env.step(actions)
 
+        if post_release_pose_log is not None:
+            release_steps = raw_env._release_step_buf.detach().cpu().tolist()
+            push_start_steps = raw_env._push_start_step_buf.detach().cpu().tolist()
+            for i in range(num_envs):
+                row = post_release_pose_log.observe(
+                    env_id=i,
+                    release_step=int(release_steps[i]),
+                    push_start_step=int(push_start_steps[i]),
+                    sample=lambda env_idx=i: _post_release_pose_sample(raw_env, env_idx),
+                )
+                if row is not None:
+                    print(
+                        "[post-release pose] "
+                        f"env={i} release_step={row['release_step']} "
+                        "estimate_error_slot_m="
+                        f"({row['estimate_error_slot_dx_m']:+.6f}, "
+                        f"{row['estimate_error_slot_dy_m']:+.6f}, "
+                        f"{row['estimate_error_slot_dz_m']:+.6f}) "
+                        "orientation_error_rad="
+                        f"{row['estimate_orientation_error_rad']:.6f} "
+                        "settling_displacement_m="
+                        f"{row['true_settling_displacement_m']:.6f}"
+                    )
+
         for i in range(num_envs):
             ep_reward[i] += float(rewards[i])
             if dones[i]:
+                if post_release_pose_log is not None:
+                    post_release_pose_log.episode_done(i)
                 trace_row = _scenario_trace_row(infos, i) if trace is not None else {}
                 bank_index = trace_row.get("scenario_bank_index", -1)
                 if frozen_bank is not None and (bank_index is None or int(bank_index) < 0):
@@ -560,6 +651,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if trace is not None:
         summary_path = trace.write()
         print(f"[INFO] Scenario trace summary: {summary_path}")
+
+    if post_release_pose_log is not None:
+        post_release_pose_log.close()
+        print(
+            "[INFO] Post-release pose rows: "
+            f"{post_release_pose_log.row_count} ({post_release_pose_log.output_path})"
+        )
 
     # close the simulator
     env.close()
