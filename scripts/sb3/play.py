@@ -434,7 +434,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         print("[INFO] Evaluation policy: nominal controller only (zero residual actions).")
     else:
         print(f"Loading checkpoint from: {checkpoint_path}")
-        agent = PPO.load(checkpoint_path, env, print_system_info=True)
+        ppo_load_path = checkpoint_path[:-4] if str(checkpoint_path).endswith(".zip") else checkpoint_path
+        agent = PPO.load(ppo_load_path, env, print_system_info=True)
         checkpoint_agent_seed = apply_evaluation_seed_after_agent_load(agent, evaluation_seed)
         print(
             "[INFO] Reapplied evaluation seed after PPO.load: "
@@ -501,8 +502,6 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         required = (
             "_release_step_buf",
             "_push_start_step_buf",
-            "_book_offset_tool",
-            "_book_rel_quat_tool",
         )
         missing = [name for name in required if not hasattr(raw_env, name)]
         if missing:
