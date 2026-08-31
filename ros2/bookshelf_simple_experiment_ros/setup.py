@@ -30,6 +30,7 @@ setup(
         "simple_policy_control = bookshelf_simple_experiment_ros.simple_policy_control_node:main",
         "fake_policy_start = bookshelf_simple_experiment_ros.fake_policy_start_node:main",
         "virtual_trigger = bookshelf_simple_experiment_ros.virtual_trigger_node:main",
+        "offline_slot_debug_image = bookshelf_simple_experiment_ros.offline_slot_debug_image_node:main",
         "dual_aruco_book = bookshelf_simple_experiment_ros.dual_aruco_book_node:main",
         "real_experiment_operator = bookshelf_simple_experiment_ros.operator_console_node:main",
     ]},

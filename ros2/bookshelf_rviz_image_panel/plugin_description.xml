@@ -1,0 +1,10 @@
+<library path="bookshelf_rviz_image_panel">
+  <class
+    name="bookshelf_rviz_image_panel/DebugImagePanel"
+    type="bookshelf_rviz_image_panel::DebugImagePanel"
+    base_class_type="rviz_common::Panel">
+    <description>
+      Displays /slot_detector/debug_image with Qt raster painting and no extra OpenGL render surface.
+    </description>
+  </class>
+</library>

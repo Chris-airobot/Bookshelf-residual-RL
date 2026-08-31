@@ -3,6 +3,8 @@ Panels:
     Name: Displays
   - Class: rviz_common/Views
     Name: Views
+  - Class: bookshelf_rviz_image_panel/DebugImagePanel
+    Name: Slot Detector Debug
 Visualization Manager:
   Class: ""
   Displays:
@@ -24,7 +26,7 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: robot_description
       Enabled: true
-      Name: Real xArm7
+      Name: Virtual xArm7
     - Class: moveit_rviz_plugin/MotionPlanning
       Enabled: true
       Move Group Namespace: ""
@@ -41,17 +43,6 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /bookshelf_simple/markers
-    - Class: rviz_default_plugins/Image
-      Enabled: true
-      Max Value: 1
-      Median window: 5
-      Min Value: 0
-      Name: Slot Detector Debug
-      Normalize Range: true
-      Queue Size: 2
-      Topic: /slot_detector/debug_image
-      Unreliable: false
-      Value: true
     - Class: rviz_default_plugins/Pose
       Color: 255; 90; 60
       Enabled: true
@@ -89,18 +80,13 @@ Visualization Manager:
         X: 0.55
         Y: 0.05
         Z: 0.18
-      Name: Bookshelf Real Preinsert
+      Name: Bookshelf xArm7
       Pitch: 0.3
       Target Frame: link_base
       Yaw: 3.14
 Window Geometry:
-  Displays:
-    collapsed: false
   Height: 900
-  Hide Left Dock: false
+  Width: 1450
   Hide Right Dock: false
   Slot Detector Debug:
     collapsed: false
-  Views:
-    collapsed: false
-  Width: 1450
