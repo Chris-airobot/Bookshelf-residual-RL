@@ -29,6 +29,19 @@ The script builds the three Bookshelf ROS packages into only
 installed. The official xArm underlay must include `xarm_moveit_config`,
 `xarm_moveit_servo`, and `xarm_planner`.
 
+## Capture operator poses
+
+With the robot already positioned by the operator and `/joint_states` active:
+
+```bash
+scripts/ros2/capture_operator_joint_pose.sh scan
+scripts/ros2/capture_operator_joint_pose.sh loading
+```
+
+These commands only record the current joint state under
+`~/BookshelfFiles/experiment_configs/operator_joint_poses/`; they never command
+the robot.
+
 ## Calculate-only check
 
 This starts the complete camera, marker, policy, logging, and hardware state
