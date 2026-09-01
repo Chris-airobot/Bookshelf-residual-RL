@@ -24,7 +24,7 @@ cd ~/Chris/bookshelf-unified
 scripts/ros2/build_xarm_experiment.sh
 ```
 
-The script builds the three Bookshelf ROS packages into only
+The script builds the five Bookshelf ROS packages used by the workflow into only
 `.ros2_ws/install`. It also verifies that the full physical launch was
 installed. The official xArm underlay must include `xarm_moveit_config`,
 `xarm_moveit_servo`, and `xarm_planner`.
@@ -59,22 +59,94 @@ before starting hardware when `realsense2_camera` is unavailable.
 Use this first after every hardware or camera restart. Continue only when the
 marker is visible and both observation and inference validity are true.
 
-## Authorized physical episode
+## Complete operator sequence
 
-Stop the calculate-only launch first. After reviewing its geometry and the
-physical release boundary, run:
+The loading pose is also the hold/return pose. The complete keyboard sequence
+is:
+
+```text
+G  verify/preview the saved scan joint trajectory; inspect, then E executes
+S  freeze the detected slot
+L  verify/preview the loading/hold joint trajectory; inspect, then E executes
+O  open the gripper
+C  close the gripper after the operator loads the book
+P  calculate and plan preinsert
+E  execute the reviewed preinsert trajectory
+I  start PPO INSERT -> release -> retreat -> close empty -> PUSH
+H  after PUSH, verify/preview return-to-loading; E executes and opens
+Q  quit the operator console
+```
+
+Every key is state-gated. PUSH ends in
+`PUSH_COMPLETE_WAITING_RETURN`; there is no automatic return. `H` is accepted
+only in that state. A failed return does not open the gripper and does not enter
+`READY_FOR_NEXT_BOOK`.
+
+At startup, and after `READY_FOR_NEXT_BOOK`, press `G`, inspect its displayed
+collision-checked direct joint trajectory, then press `E`. Slot freeze `S` is
+accepted only after that reviewed motion reaches `SCAN`. `G`, `L`, and `H`
+preview the exact direct controller trajectory; `P` retains robust IK and
+MoveIt planning. None execute by themselves.
+
+## Alienware full fake-hardware rehearsal
+
+This uses the recorded RGB-D bag, unchanged slot detector, official fake xArm7
+MoveIt/gripper, reviewed preinsert planner, and existing PPO/post-insert
+controller. It starts no physical hardware:
 
 ```bash
 cd ~/Chris/bookshelf-unified
-
-BOOKSHELF_AUTHORIZATION_TOKEN=I_APPROVE_XARM_FULL_EPISODE \
-BOOKSHELF_PHYSICAL_RELEASE_BOUNDARY_CONFIRMED=true \
-scripts/ros2/run_xarm_experiment.sh control
+unset PYTHONPATH
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+source .ros2_ws/install/local_setup.bash
+ros2 launch bookshelf_simple_experiment_ros \
+  offline_full_sequence_rehearsal.launch.py
 ```
 
-The control command remains fail-closed unless both explicit values are
-present. Keep the emergency stop available and do not run another MoveIt or
-Servo owner at the same time.
+The captured scan and loading files must exist under
+`~/BookshelfFiles/experiment_configs/operator_joint_poses/` on Alienware.
+
+## Riot full-sequence shadow
+
+This starts the real xArm connection, live joint states/TF, RealSense,
+perception, planning, and PPO calculations. The shadow override prevents the
+preinsert, loading/return, gripper, Servo-start, and Twist command owners from
+creating or using actuator interfaces:
+
+```bash
+cd ~/Chris/bookshelf-unified
+unset PYTHONPATH
+source /opt/ros/humble/setup.bash
+source ~/Chris/ros2_ws/install/setup.bash
+source .ros2_ws/install/local_setup.bash
+ros2 launch bookshelf_simple_experiment_ros \
+  real_experiment_operator.launch.py \
+  allow_execution:=true shadow_full_sequence:=true
+```
+
+The stationary robot state remains authoritative. Later phases are explicitly
+labelled logical shadow transitions; no replacement joint states or TF are
+published.
+
+## Authorized physical episode
+
+Stop the shadow or calculate-only launch first. After reviewing its geometry
+and the physical release boundary, start the complete state-gated workflow:
+
+```bash
+cd ~/Chris/bookshelf-unified
+unset PYTHONPATH
+source /opt/ros/humble/setup.bash
+source ~/Chris/ros2_ws/install/setup.bash
+source .ros2_ws/install/local_setup.bash
+ros2 launch bookshelf_simple_experiment_ros \
+  real_experiment_operator.launch.py \
+  allow_execution:=true shadow_full_sequence:=false
+```
+
+Keep the emergency stop available and do not run another MoveIt or Servo owner
+at the same time.
 
 ## Optional overrides
 

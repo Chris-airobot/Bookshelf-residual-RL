@@ -18,22 +18,28 @@ colcon \
     "${BOOKSHELF_REPO_ROOT}/ros2/bookshelf_policy_ros" \
     "${BOOKSHELF_REPO_ROOT}/ros2/bookshelf_shadow_ros" \
     "${BOOKSHELF_REPO_ROOT}/ros2/bookshelf_guarded_control_ros" \
+    "${BOOKSHELF_REPO_ROOT}/ros2/bookshelf_simple_experiment_ros" \
+    "${BOOKSHELF_REPO_ROOT}/ros2/bookshelf_rviz_image_panel" \
   --build-base "${BOOKSHELF_ROS_BUILD_ROOT}/build" \
   --install-base "${BOOKSHELF_ROS_BUILD_ROOT}/install" \
+  --cmake-args -DPython3_EXECUTABLE=/usr/bin/python3 \
   --packages-select \
     bookshelf_policy_ros \
     bookshelf_shadow_ros \
-    bookshelf_guarded_control_ros
+    bookshelf_guarded_control_ros \
+    bookshelf_simple_experiment_ros \
+    bookshelf_rviz_image_panel
 
 _bookshelf_source_setup "${BOOKSHELF_ROS_BUILD_ROOT}/install/local_setup.bash"
 
-package_prefix="$(ros2 pkg prefix bookshelf_guarded_control_ros)"
-launch_file="${package_prefix}/share/bookshelf_guarded_control_ros/launch/xarm7_policy_physical_experiment.launch.py"
-if [[ ! -f "$launch_file" ]]; then
-  echo "ERROR: canonical physical launch was not installed: ${launch_file}" >&2
+package_prefix="$(ros2 pkg prefix bookshelf_simple_experiment_ros)"
+launch_file="${package_prefix}/share/bookshelf_simple_experiment_ros/launch/real_experiment_operator.launch.py"
+rehearsal_file="${package_prefix}/share/bookshelf_simple_experiment_ros/launch/offline_full_sequence_rehearsal.launch.py"
+if [[ ! -f "$launch_file" || ! -f "$rehearsal_file" ]]; then
+  echo "ERROR: complete experiment launches were not installed." >&2
   exit 1
 fi
 
 echo "Canonical ROS overlay: ${BOOKSHELF_ROS_BUILD_ROOT}/install"
 echo "Physical launch: ${launch_file}"
-echo "Build complete. Run: scripts/ros2/run_xarm_experiment.sh calculate"
+echo "Offline rehearsal: ${rehearsal_file}"

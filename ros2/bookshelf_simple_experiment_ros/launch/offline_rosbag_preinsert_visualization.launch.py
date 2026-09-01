@@ -3,8 +3,10 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, IncludeLaunchDescription, LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.conditions import IfCondition
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -14,6 +16,11 @@ def generate_launch_description():
     bag_path = LaunchConfiguration("bag_path")
     rviz_config = LaunchConfiguration("rviz_config")
     preview_rviz = LaunchConfiguration("preview_rviz")
+    allow_execution = LaunchConfiguration("allow_execution")
+    require_slot_acceptance = LaunchConfiguration("require_slot_acceptance")
+    auto_plan = LaunchConfiguration("auto_plan")
+    scan_joint_state_path = LaunchConfiguration("scan_joint_state_path")
+    loading_joint_state_path = LaunchConfiguration("loading_joint_state_path")
 
     fake_moveit = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
@@ -60,6 +67,17 @@ def generate_launch_description():
             ]),
         ),
         DeclareLaunchArgument("preview_rviz", default_value="true"),
+        DeclareLaunchArgument("allow_execution", default_value="false"),
+        DeclareLaunchArgument("require_slot_acceptance", default_value="false"),
+        DeclareLaunchArgument("auto_plan", default_value="true"),
+        DeclareLaunchArgument("scan_joint_state_path", default_value=PathJoinSubstitution([
+            EnvironmentVariable("HOME"), "BookshelfFiles", "experiment_configs",
+            "operator_joint_poses", "scan_joint_state.yaml",
+        ])),
+        DeclareLaunchArgument("loading_joint_state_path", default_value=PathJoinSubstitution([
+            EnvironmentVariable("HOME"), "BookshelfFiles", "experiment_configs",
+            "operator_joint_poses", "loading_joint_state.yaml",
+        ])),
         LogInfo(msg=(
             "SOFTWARE-ONLY ROSBAG PREVIEW: recorded RGB-D, unchanged slot "
             "detector and preinsert planner, official fake xArm7 MoveIt, "
@@ -108,11 +126,16 @@ def generate_launch_description():
             name="simple_preinsert",
             output="screen",
             parameters=[config, {
-                "allow_execution": False,
-                "require_slot_acceptance": False,
+                "allow_execution": ParameterValue(allow_execution, value_type=bool),
+                "require_slot_acceptance": ParameterValue(
+                    require_slot_acceptance, value_type=bool
+                ),
                 "separate_execution_confirmation": True,
                 "print_target_diagnostics": True,
                 "maximum_goal_joint_delta_rad": 3.2,
+                "direct_joint_move_duration_s": 2.0,
+                "scan_joint_state_path": scan_joint_state_path,
+                "loading_joint_state_path": loading_joint_state_path,
             }],
         ),
         Node(
@@ -133,6 +156,7 @@ def generate_launch_description():
                 ],
                 "initial_move_duration_s": 2.0,
             }],
+            condition=IfCondition(auto_plan),
         ),
         ExecuteProcess(
             cmd=[

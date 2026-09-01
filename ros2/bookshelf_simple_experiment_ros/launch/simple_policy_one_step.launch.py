@@ -75,6 +75,12 @@ def _launch_setup(context):
             "actor_path": LaunchConfiguration("actor_path"),
             "run_dir": str(run_dir),
             "execute": ParameterValue(LaunchConfiguration("execute"), value_type=bool),
+            "shadow_full_sequence": ParameterValue(
+                LaunchConfiguration("shadow_full_sequence"), value_type=bool
+            ),
+            "wait_for_start": ParameterValue(
+                LaunchConfiguration("wait_for_start"), value_type=bool
+            ),
             "rollout": ParameterValue(LaunchConfiguration("rollout"), value_type=bool),
             "max_steps": ParameterValue(LaunchConfiguration("max_steps"), value_type=int),
             "command_scale": ParameterValue(
@@ -89,6 +95,8 @@ def _launch_setup(context):
             "rotation_tolerance_rad": ParameterValue(
                 LaunchConfiguration("rotation_tolerance_rad"), value_type=float
             ),
+            "gripper_action": LaunchConfiguration("gripper_action"),
+            "gripper_action_type": LaunchConfiguration("gripper_action_type"),
         }],
     )
     bag = ExecuteProcess(
@@ -123,11 +131,17 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument("execute", default_value="false"),
+        DeclareLaunchArgument("shadow_full_sequence", default_value="false"),
+        DeclareLaunchArgument("wait_for_start", default_value="false"),
         DeclareLaunchArgument("rollout", default_value="false"),
         DeclareLaunchArgument("max_steps", default_value="150"),
         DeclareLaunchArgument("command_scale", default_value="0.10"),
         DeclareLaunchArgument("record_bag", default_value="false"),
         DeclareLaunchArgument("visualization_hold_s", default_value="60.0"),
+        DeclareLaunchArgument(
+            "gripper_action", default_value="/xarm_gripper/gripper_action"
+        ),
+        DeclareLaunchArgument("gripper_action_type", default_value="gripper_command"),
         DeclareLaunchArgument("translation_tolerance_m", default_value="0.0005"),
         DeclareLaunchArgument(
             "rotation_tolerance_rad", default_value="0.004363323129985824"

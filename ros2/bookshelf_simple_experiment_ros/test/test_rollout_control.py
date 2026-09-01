@@ -4,7 +4,6 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 from action_msgs.msg import GoalStatus
-
 from bookshelf_simple_experiment_ros.simple_policy_control_node import (
     SimplePolicyControlNode,
 )
@@ -79,6 +78,7 @@ def test_rollout_stops_before_motion_when_release_is_requested():
         gripper_goal_kind="stale",
         gripper_retry_start_ns=1,
         gripper_next_attempt_ns=1,
+        get_logger=lambda: SimpleNamespace(warning=Mock()),
     )
     stopped = SimplePolicyControlNode._stop_rollout_for_release(
         harness, True, np.eye(4), np.eye(4)
@@ -182,6 +182,7 @@ def test_open_then_retreat_then_empty_close_then_push_phase_order():
         _log_phase_event=Mock(),
         _publish_status=Mock(),
         _halt_and_fail=Mock(),
+        get_logger=lambda: SimpleNamespace(warning=Mock()),
     )
     result = SimpleNamespace(
         status=GoalStatus.STATUS_SUCCEEDED,
@@ -191,6 +192,10 @@ def test_open_then_retreat_then_empty_close_then_push_phase_order():
     SimplePolicyControlNode._gripper_goal_result(harness, future)
     assert harness.phase == "retreat"
     assert harness.retreat_distance_m == 0.0
+    assert [call.args[0] for call in harness._publish_status.call_args_list] == [
+        "release_complete",
+        "retreat_started",
+    ]
 
     harness.gripper_goal_kind = "close_empty"
     harness.gripper_goal_pending = True

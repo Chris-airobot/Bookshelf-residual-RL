@@ -33,5 +33,6 @@ setup(
         "offline_slot_debug_image = bookshelf_simple_experiment_ros.offline_slot_debug_image_node:main",
         "dual_aruco_book = bookshelf_simple_experiment_ros.dual_aruco_book_node:main",
         "real_experiment_operator = bookshelf_simple_experiment_ros.operator_console_node:main",
+        "operator_actions = bookshelf_simple_experiment_ros.operator_action_node:main",
     ]},
 )

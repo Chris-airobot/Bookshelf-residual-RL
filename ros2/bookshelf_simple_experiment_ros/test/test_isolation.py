@@ -102,8 +102,10 @@ def test_offline_rosbag_preview_uses_real_detector_and_fake_moveit_only():
     assert 'executable="slot_detector"' in launch
     assert 'executable="saved_slot"' not in launch
     assert 'executable="simple_preinsert"' in launch
-    assert '"allow_execution": False' in launch
-    assert '"require_slot_acceptance": False' in launch
+    assert 'DeclareLaunchArgument("allow_execution", default_value="false")' in launch
+    assert '"allow_execution": ParameterValue(allow_execution, value_type=bool)' in launch
+    assert 'DeclareLaunchArgument("require_slot_acceptance", default_value="false")' in launch
+    assert '"require_slot_acceptance": ParameterValue(' in launch
     assert 'executable="virtual_trigger"' in launch
     assert "1.283901572227478" in launch
     assert '"ros2", "bag", "play", bag_path' in launch
@@ -136,7 +138,8 @@ def test_real_launch_has_frozen_slot_and_two_operator_confirmations():
     launch = (PACKAGE / "launch" / "real_preinsert_workflow.launch.py").read_text()
     assert '"require_slot_acceptance": True' in launch
     assert '"separate_execution_confirmation": True' in launch
-    assert '"allow_execution": True' in launch
+    assert 'DeclareLaunchArgument("allow_execution", default_value="true")' in launch
+    assert '"allow_execution": ParameterValue(allow_execution, value_type=bool)' in launch
     assert "/bookshelf_simple/accept_slot" in launch
     assert "/bookshelf_simple/plan_preinsert" in launch
     assert "/bookshelf_simple/execute_preinsert" in launch
@@ -161,6 +164,19 @@ def test_real_preinsert_rviz_restores_slot_detector_debug_image():
         "/bookshelf_simple/target_tcp_pose",
     ):
         assert existing_topic in rviz
+
+
+def test_experiment_rviz_uses_compact_target_tcp_and_hides_moveit_goal_ring():
+    for name in (
+        "offline_rosbag_preinsert_workflow.rviz",
+        "real_preinsert_workflow.rviz",
+    ):
+        rviz = (PACKAGE / "rviz" / name).read_text()
+        assert "Class: moveit_rviz_plugin/MotionPlanning" in rviz
+        assert "Axes Length: 0.08" in rviz
+        assert "Axes Radius: 0.008" in rviz
+        assert "Interactive Marker Size: 0" in rviz
+        assert "Query Goal State: false" in rviz
 
 
 def test_real_operator_owns_one_rviz_using_real_preinsert_config():
@@ -227,15 +243,16 @@ def test_virtual_policy_launch_is_software_only_and_has_two_modes():
     assert "bookshelf_policy_ros" not in launch
 
 
-def test_post_insert_uses_real_xarm_gripper_command_action():
+def test_post_insert_defaults_to_real_xarm_gripper_and_supports_fake_rehearsal():
     node = (
         PACKAGE
         / "bookshelf_simple_experiment_ros"
         / "simple_policy_control_node.py"
     ).read_text()
     assert "GripperCommand" in node
-    assert "FollowJointTrajectory" not in node
+    assert "FollowJointTrajectory" in node
     assert '"/xarm_gripper/gripper_action"' in node
+    assert 'self.declare_parameter("gripper_action_type", GRIPPER_COMMAND)' in node
     assert 'self.declare_parameter("gripper_max_effort", 0.0)' in node
     assert "release_executed\": False" in node
     assert "bookshelf_guarded_control_ros" not in node

@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+from control_msgs.action import FollowJointTrajectory
 from geometry_msgs.msg import Point, Pose, PoseStamped
 from moveit_msgs.action import ExecuteTrajectory
 from moveit_msgs.msg import (
@@ -16,8 +17,17 @@ from moveit_msgs.msg import (
     DisplayTrajectory,
     MoveItErrorCodes,
     PlanningScene,
+    PlanningSceneComponents,
+    RobotState,
+    RobotTrajectory,
 )
-from moveit_msgs.srv import ApplyPlanningScene, GetMotionPlan, GetPositionIK
+from moveit_msgs.srv import (
+    ApplyPlanningScene,
+    GetMotionPlan,
+    GetPositionIK,
+    GetPlanningScene,
+    GetStateValidity,
+)
 import numpy as np
 import rclpy
 from rclpy.action import ActionClient
@@ -30,6 +40,7 @@ from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Float32, String
 from std_srvs.srv import Trigger
 import tf2_ros
+from trajectory_msgs.msg import JointTrajectoryPoint
 from visualization_msgs.msg import Marker, MarkerArray
 import yaml
 
@@ -51,6 +62,8 @@ from .moveit_requests import (
     build_joint_motion_plan_request,
     build_position_ik_request,
 )
+from .execution_gate import hardware_commands_allowed
+from .joint_pose import JOINT_NAMES, load_joint_pose
 
 
 def _pose_to_transform(pose) -> np.ndarray:
@@ -118,6 +131,40 @@ def _frozen_slot_document(base_frame, transform_base_slot, width_m, confidence):
     }
 
 
+def build_direct_joint_trajectory(joint_names, start, target, duration_s, sample_count):
+    """Build the exact linearly interpolated trajectory used for preview and execution."""
+    names = [str(name) for name in joint_names]
+    start = np.asarray(start, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    count = int(sample_count)
+    duration = float(duration_s)
+    if len(names) == 0 or start.shape != target.shape or start.size != len(names):
+        raise ValueError("direct trajectory joint names/start/target dimensions do not match")
+    if count < 2:
+        raise ValueError("direct trajectory requires at least two samples")
+    if not np.all(np.isfinite(start)) or not np.all(np.isfinite(target)):
+        raise ValueError("direct trajectory contains a non-finite joint value")
+    if not math.isfinite(duration) or duration <= 0.0:
+        raise ValueError("direct trajectory duration must be positive")
+
+    trajectory = RobotTrajectory()
+    trajectory.joint_trajectory.joint_names = names
+    for index in range(count):
+        alpha = float(index + 1) / float(count)
+        point = JointTrajectoryPoint()
+        point.positions = [float(value) for value in start + alpha * (target - start)]
+        point.time_from_start = Duration(seconds=duration * alpha).to_msg()
+        trajectory.joint_trajectory.points.append(point)
+    return trajectory
+
+
+def collision_pairs(result):
+    return {
+        frozenset((str(contact.contact_body_1), str(contact.contact_body_2)))
+        for contact in getattr(result, "contacts", [])
+    }
+
+
 class SimplePreinsertNode(Node):
     """A single explicit plan/execute boundary around proven target math."""
 
@@ -130,7 +177,13 @@ class SimplePreinsertNode(Node):
         self.planning_link = str(self.get_parameter("planning_link").value)
         self.group_name = str(self.get_parameter("group_name").value)
         self.robot_model_id = str(self.get_parameter("robot_model_id").value)
-        self.allow_execution = bool(self.get_parameter("allow_execution").value)
+        self.shadow_full_sequence = bool(
+            self.get_parameter("shadow_full_sequence").value
+        )
+        self.requested_execution = bool(self.get_parameter("allow_execution").value)
+        self.allow_execution = hardware_commands_allowed(
+            self.requested_execution, self.shadow_full_sequence
+        )
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -144,11 +197,28 @@ class SimplePreinsertNode(Node):
             ApplyPlanningScene,
             str(self.get_parameter("apply_planning_scene_service").value),
         )
+        self.state_validity_client = self.create_client(
+            GetStateValidity,
+            str(self.get_parameter("state_validity_service").value),
+        )
+        self.planning_scene_client = self.create_client(
+            GetPlanningScene,
+            str(self.get_parameter("get_planning_scene_service").value),
+        )
         self.execution_client = (
             ActionClient(
                 self,
                 ExecuteTrajectory,
                 str(self.get_parameter("execution_action").value),
+            )
+            if self.allow_execution
+            else None
+        )
+        self.direct_execution_client = (
+            ActionClient(
+                self,
+                FollowJointTrajectory,
+                str(self.get_parameter("direct_trajectory_action").value),
             )
             if self.allow_execution
             else None
@@ -165,11 +235,24 @@ class SimplePreinsertNode(Node):
         self.latest_slot_candidate = None
         self.frozen_slot = None
         self.planned_trajectory = None
+        self.planned_kind = None
+        self.planned_type = None
+        self.executing_kind = None
+        self.executing_type = None
         self.diagnostics_printed = False
         self.phase = "waiting_for_slot"
         self.pending = None
         self.branch_search = None
         self.branch_kinematics = None
+        self.direct_check = None
+        self.book_detach_pending = False
+        self.book_scene_transition_state = "idle"
+        self.scan_positions = load_joint_pose(
+            self.get_parameter("scan_joint_state_path").value
+        )
+        self.loading_positions = load_joint_pose(
+            self.get_parameter("loading_joint_state_path").value
+        )
 
         latched = QoSProfile(
             depth=1,
@@ -213,6 +296,12 @@ class SimplePreinsertNode(Node):
             self._joint_state_callback,
             20,
         )
+        self.create_subscription(
+            String,
+            "/bookshelf_simple/policy/status",
+            self._policy_status_callback,
+            10,
+        )
         self.create_service(
             Trigger,
             "/bookshelf_simple/plan_and_execute_preinsert",
@@ -227,6 +316,17 @@ class SimplePreinsertNode(Node):
             Trigger,
             "/bookshelf_simple/plan_preinsert",
             self._plan_trigger_callback,
+        )
+        self.create_service(
+            Trigger, "/bookshelf_simple/plan_scan", self._plan_scan_callback
+        )
+        self.create_service(
+            Trigger, "/bookshelf_simple/plan_loading", self._plan_loading_callback
+        )
+        self.create_service(
+            Trigger,
+            "/bookshelf_simple/plan_return_loading",
+            self._plan_return_loading_callback,
         )
         self.create_service(
             Trigger,
@@ -248,11 +348,29 @@ class SimplePreinsertNode(Node):
         self.declare_parameter("group_name", "xarm7")
         self.declare_parameter("robot_model_id", "UF_ROBOT")
         self.declare_parameter("joint_states_topic", "/joint_states")
+        self.declare_parameter(
+            "scan_joint_state_path",
+            "~/BookshelfFiles/experiment_configs/operator_joint_poses/scan_joint_state.yaml",
+        )
+        self.declare_parameter(
+            "loading_joint_state_path",
+            "~/BookshelfFiles/experiment_configs/operator_joint_poses/loading_joint_state.yaml",
+        )
         self.declare_parameter("ik_service", "/compute_ik")
         self.declare_parameter("planning_service", "/plan_kinematic_path")
         self.declare_parameter("apply_planning_scene_service", "/apply_planning_scene")
         self.declare_parameter("execution_action", "/execute_trajectory")
+        self.declare_parameter("state_validity_service", "/check_state_validity")
+        self.declare_parameter("get_planning_scene_service", "/get_planning_scene")
+        self.declare_parameter(
+            "direct_trajectory_action",
+            "/xarm7_traj_controller/follow_joint_trajectory",
+        )
+        self.declare_parameter("direct_joint_move_duration_s", 5.0)
+        self.declare_parameter("direct_trajectory_sample_count", 21)
+        self.declare_parameter("held_book_collision_id", "bookshelf_simple_held_book")
         self.declare_parameter("allow_execution", False)
+        self.declare_parameter("shadow_full_sequence", False)
         self.declare_parameter("require_slot_acceptance", False)
         self.declare_parameter("separate_execution_confirmation", False)
         self.declare_parameter(
@@ -333,6 +451,138 @@ class SimplePreinsertNode(Node):
     def _joint_state_callback(self, message):
         self.latest_joint_state = message
         self.latest_joint_state_ns = self._now_ns()
+
+    def _policy_status_callback(self, message):
+        try:
+            phase = str(json.loads(message.data).get("phase", ""))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        if phase != "release_complete":
+            return
+        if not bool(self.get_parameter("attach_book_collision").value):
+            self.book_scene_transition_state = "verified"
+            self._publish_status("book_scene_transition_verified")
+            return
+        self._begin_release_detach()
+
+    def _planning_scene_request(self):
+        request = GetPlanningScene.Request()
+        request.components.components = int(
+            PlanningSceneComponents.ROBOT_STATE_ATTACHED_OBJECTS
+            | PlanningSceneComponents.WORLD_OBJECT_GEOMETRY
+        )
+        return request
+
+    def _begin_release_detach(self):
+        if self.book_detach_pending or self.book_scene_transition_state in (
+            "transitioning",
+            "verified",
+            "warning",
+        ):
+            return
+        if not self.planning_scene_client.wait_for_service(timeout_sec=0.25):
+            self._book_scene_transition_warning(
+                "MoveIt planning-scene query service is unavailable"
+            )
+            return
+        self.book_scene_transition_state = "transitioning"
+        self.book_detach_pending = True
+        self.get_logger().warning("BOOK SCENE TRANSITION START")
+        self._publish_status("book_scene_transition_started")
+        future = self.planning_scene_client.call_async(self._planning_scene_request())
+        future.add_done_callback(self._release_scene_response_callback)
+
+    def _book_scene_transition_warning(self, reason):
+        self.book_detach_pending = False
+        self.book_scene_transition_state = "warning"
+        self.get_logger().warning(f"BOOK SCENE UPDATE WARNING: {reason}")
+        self._publish_status("book_scene_transition_warning", reason=reason)
+
+    def _release_scene_response_callback(self, future):
+        book_id = str(self.get_parameter("held_book_collision_id").value)
+        try:
+            scene = future.result().scene
+        except Exception as error:
+            self._book_scene_transition_warning(f"scene query failed: {error}")
+            return
+        attached = next(
+            (
+                item
+                for item in scene.robot_state.attached_collision_objects
+                if item.object.id == book_id
+            ),
+            None,
+        )
+        if attached is None:
+            world = any(item.id == book_id for item in scene.world.collision_objects)
+            if world:
+                self.get_logger().warning("BOOK DETACHED")
+                self.get_logger().warning("BOOK WORLD ADDED")
+                self.book_detach_pending = False
+                self.book_scene_transition_state = "verified"
+                self.get_logger().warning("BOOK SCENE TRANSITION VERIFIED")
+                self._publish_status("book_scene_transition_verified")
+            else:
+                self._book_scene_transition_warning(
+                    "book is neither attached nor present in the world planning scene"
+                )
+            return
+        try:
+            request = self._detach_book_to_world_request(attached)
+        except Exception as error:
+            self._book_scene_transition_warning(f"detach preparation failed: {error}")
+            return
+        future = self.scene_client.call_async(request)
+        future.add_done_callback(self._release_detach_response_callback)
+
+    def _detach_book_to_world_request(self, attached):
+        remove = AttachedCollisionObject()
+        remove.link_name = attached.link_name
+        remove.object.id = attached.object.id
+        remove.object.operation = CollisionObject.REMOVE
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.robot_state.is_diff = True
+        scene.robot_state.attached_collision_objects = [remove]
+        request = ApplyPlanningScene.Request()
+        request.scene = scene
+        return request
+
+    def _release_detach_response_callback(self, future):
+        try:
+            success = bool(future.result().success)
+        except Exception as error:
+            self._book_scene_transition_warning(f"detach failed: {error}")
+            return
+        if not success:
+            self._book_scene_transition_warning("MoveIt rejected released-book detach")
+            return
+        self.get_logger().warning("BOOK DETACHED")
+        future = self.planning_scene_client.call_async(self._planning_scene_request())
+        future.add_done_callback(self._verify_release_detach_callback)
+
+    def _verify_release_detach_callback(self, future):
+        book_id = str(self.get_parameter("held_book_collision_id").value)
+        try:
+            scene = future.result().scene
+        except Exception as error:
+            self._book_scene_transition_warning(f"detach verification failed: {error}")
+            return
+        attached = any(
+            item.object.id == book_id
+            for item in scene.robot_state.attached_collision_objects
+        )
+        world = any(item.id == book_id for item in scene.world.collision_objects)
+        if attached or not world:
+            self._book_scene_transition_warning(
+                f"post-detach state attached={attached} world={world}"
+            )
+            return
+        self.book_detach_pending = False
+        self.book_scene_transition_state = "verified"
+        self.get_logger().warning("BOOK WORLD ADDED")
+        self.get_logger().warning("BOOK SCENE TRANSITION VERIFIED")
+        self._publish_status("book_scene_transition_verified")
 
     def _lookup(self, parent, child):
         timeout = Duration(seconds=float(self.get_parameter("tf_lookup_timeout_s").value))
@@ -507,6 +757,303 @@ class SimplePreinsertNode(Node):
             markers.append(marker)
         return markers
 
+    def _clear_trial_state_for_scan(self):
+        """Release only per-trial state while preserving configuration and ROS I/O."""
+
+        self.frozen_slot = None
+        self.latest_target = None
+        self.latest_target_ns = None
+        self.planned_trajectory = None
+        self.planned_kind = None
+        self.planned_type = None
+        self.executing_kind = None
+        self.executing_type = None
+        self.pending = None
+        self.branch_search = None
+        self.direct_check = None
+        self.book_detach_pending = False
+        self.book_scene_transition_state = "idle"
+        self.diagnostics_printed = False
+
+    def _plan_scan_callback(self, _request, response):
+        self._clear_trial_state_for_scan()
+        return self._plan_joint_pose("scan", self.scan_positions, response)
+
+    def _plan_loading_callback(self, _request, response):
+        return self._plan_joint_pose("loading", self.loading_positions, response)
+
+    def _plan_return_loading_callback(self, _request, response):
+        return self._plan_joint_pose("return_loading", self.loading_positions, response)
+
+    def _plan_joint_pose(self, kind, positions, response):
+        if self.phase in (
+            "clearing_book",
+            "attaching_book",
+            "requesting_ik",
+            "requesting_ik_branches",
+            "planning",
+            "planning_ik_branches",
+            "executing",
+        ):
+            response.success = False
+            response.message = f"workflow is busy ({self.phase})"
+            return response
+        if self.latest_joint_state is None or not self._fresh(self.latest_joint_state_ns):
+            response.success = False
+            response.message = "no fresh joint state is available"
+            return response
+        if not self.state_validity_client.wait_for_service(timeout_sec=0.25):
+            response.success = False
+            response.message = "MoveIt state-validity service is unavailable"
+            return response
+        self.planned_trajectory = None
+        self.planned_kind = None
+        self.planned_type = None
+        self.executing_kind = None
+        self.executing_type = None
+        self.pending = {
+            "kind": str(kind),
+            "joint_state": copy.deepcopy(self.latest_joint_state),
+            "joint_positions": [float(value) for value in positions],
+        }
+        if kind == "return_loading":
+            if self.book_detach_pending or self.book_scene_transition_state != "verified":
+                self.get_logger().warning(
+                    "RETURN: released-book planning-scene state is stale or incomplete; "
+                    "ignoring that object while preserving robot/environment checks"
+                )
+            self._prepare_direct_joint_trajectory()
+            response.success = True
+            response.message = (
+                f"{kind} trajectory verification accepted; execution requires E"
+            )
+            return response
+        if not self.planning_scene_client.wait_for_service(timeout_sec=0.25):
+            self.pending = None
+            response.success = False
+            response.message = "MoveIt planning-scene query service is unavailable"
+            return response
+        self._publish_status("checking_book_lifecycle")
+        future = self.planning_scene_client.call_async(self._planning_scene_request())
+        future.add_done_callback(self._direct_scene_state_response_callback)
+        response.success = True
+        response.message = f"{kind} trajectory verification accepted; execution requires E"
+        return response
+
+    def _book_scene_cleanup_request(self, scene_state):
+        book_id = str(self.get_parameter("held_book_collision_id").value)
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.robot_state.is_diff = True
+        for item in scene_state.robot_state.attached_collision_objects:
+            if item.object.id != book_id:
+                continue
+            remove = AttachedCollisionObject()
+            remove.link_name = item.link_name
+            remove.object.id = book_id
+            remove.object.operation = CollisionObject.REMOVE
+            scene.robot_state.attached_collision_objects.append(remove)
+        if any(item.id == book_id for item in scene_state.world.collision_objects):
+            remove = CollisionObject()
+            remove.header.frame_id = self.base_frame
+            remove.id = book_id
+            remove.operation = CollisionObject.REMOVE
+            scene.world.collision_objects.append(remove)
+        request = ApplyPlanningScene.Request()
+        request.scene = scene
+        return request
+
+    def _direct_scene_state_response_callback(self, future):
+        book_id = str(self.get_parameter("held_book_collision_id").value)
+        try:
+            scene = future.result().scene
+        except Exception as error:
+            self._fail(f"planning-scene query failed: {error}")
+            return
+        attached = [
+            item
+            for item in scene.robot_state.attached_collision_objects
+            if item.object.id == book_id
+        ]
+        world = [item for item in scene.world.collision_objects if item.id == book_id]
+        if not attached and not world:
+            self._prepare_direct_joint_trajectory()
+            return
+        if not self.scene_client.wait_for_service(timeout_sec=0.25):
+            self._fail("MoveIt planning-scene cleanup service is unavailable")
+            return
+        self._publish_status("clearing_book")
+        future = self.scene_client.call_async(self._book_scene_cleanup_request(scene))
+        future.add_done_callback(self._joint_scene_response_callback)
+
+    def _joint_scene_response_callback(self, future):
+        try:
+            success = bool(future.result().success)
+        except Exception as error:
+            self._fail(f"planning-scene cleanup failed: {error}")
+            return
+        if not success:
+            self._fail("MoveIt rejected held-book cleanup")
+            return
+        self._prepare_direct_joint_trajectory()
+
+    def _prepare_direct_joint_trajectory(self):
+        current = dict(zip(self.pending["joint_state"].name, self.pending["joint_state"].position))
+        missing = [name for name in JOINT_NAMES if name not in current]
+        if missing:
+            self._fail(f"current joint state is missing {missing}")
+            return
+        start = np.asarray([current[name] for name in JOINT_NAMES], dtype=np.float64)
+        target = np.asarray(self.pending["joint_positions"], dtype=np.float64)
+        try:
+            if self.branch_kinematics is None:
+                self.branch_kinematics = XArm7Kinematics(JOINT_NAMES, self.planning_link)
+            if np.any(target < self.branch_kinematics.lower) or np.any(
+                target > self.branch_kinematics.upper
+            ):
+                offenders = [
+                    name
+                    for name, value, lower, upper in zip(
+                        JOINT_NAMES,
+                        target,
+                        self.branch_kinematics.lower,
+                        self.branch_kinematics.upper,
+                    )
+                    if value < lower or value > upper
+                ]
+                raise ValueError(f"target joints outside model limits: {offenders}")
+            trajectory = build_direct_joint_trajectory(
+                JOINT_NAMES,
+                start,
+                target,
+                float(self.get_parameter("direct_joint_move_duration_s").value),
+                int(self.get_parameter("direct_trajectory_sample_count").value),
+            )
+        except Exception as error:
+            self._fail(f"direct trajectory generation failed: {error}")
+            return
+
+        states = [self._direct_robot_state(self.pending["joint_state"], start)]
+        states.extend(
+            self._direct_robot_state(self.pending["joint_state"], point.positions)
+            for point in trajectory.joint_trajectory.points
+        )
+        self.direct_check = {
+            "kind": self.pending["kind"],
+            "trajectory": trajectory,
+            "trajectory_start": RobotState(
+                joint_state=copy.deepcopy(self.pending["joint_state"]), is_diff=False
+            ),
+            "states": states,
+            "index": 0,
+        }
+        self._publish_status("verifying_direct_trajectory")
+        self._request_next_direct_state_check()
+
+    @staticmethod
+    def _direct_robot_state(template, positions):
+        state = copy.deepcopy(template)
+        values = dict(zip(state.name, state.position))
+        values.update(dict(zip(JOINT_NAMES, positions)))
+        state.position = [float(values[name]) for name in state.name]
+        state.velocity = []
+        state.effort = []
+        return RobotState(joint_state=state, is_diff=False)
+
+    def _request_next_direct_state_check(self):
+        check = self.direct_check
+        if check is None:
+            return
+        if check["index"] >= len(check["states"]):
+            self._accept_direct_trajectory()
+            return
+        request = GetStateValidity.Request()
+        request.robot_state = check["states"][check["index"]]
+        request.group_name = self.group_name
+        future = self.state_validity_client.call_async(request)
+        future.add_done_callback(self._direct_state_check_callback)
+
+    def _direct_state_check_callback(self, future):
+        check = self.direct_check
+        if check is None:
+            return
+        sample = int(check["index"])
+        try:
+            result = future.result()
+        except Exception as error:
+            self._fail(f"direct trajectory collision check failed at sample {sample}: {error}")
+            return
+        pairs = collision_pairs(result)
+        if check["kind"] == "return_loading":
+            error = self._return_contact_error(result, pairs)
+            if error:
+                self._fail(error)
+                return
+        elif not bool(result.valid):
+            self._fail(
+                self._collision_failure_message(
+                    "direct trajectory is invalid/colliding", sample, pairs
+                )
+            )
+            return
+        check["index"] += 1
+        self._request_next_direct_state_check()
+
+    @staticmethod
+    def _pair_labels(pairs):
+        return sorted("<->".join(sorted(pair)) for pair in pairs)
+
+    def _collision_failure_message(self, prefix, sample, pairs):
+        detail = f"; contacts={self._pair_labels(pairs)[:4]}" if pairs else ""
+        return (
+            f"{prefix} at sample {sample}/{len(self.direct_check['states']) - 1}"
+            f"{detail}"
+        )
+
+    def _return_contact_error(self, result, pairs):
+        check = self.direct_check
+        sample = int(check["index"])
+        book_id = str(self.get_parameter("held_book_collision_id").value)
+        book_pairs = {pair for pair in pairs if book_id in pair}
+        blocking_pairs = pairs - book_pairs
+        if blocking_pairs:
+            return self._collision_failure_message(
+                "return trajectory is invalid/colliding", sample, blocking_pairs
+            )
+        if not bool(result.valid) and not book_pairs:
+            return self._collision_failure_message(
+                "return trajectory is invalid without reported held-book contact",
+                sample,
+                pairs,
+            )
+        if book_pairs:
+            self.get_logger().warning(
+                "RETURN: ignoring stale held-book planning-scene contacts at sample "
+                f"{sample}: {self._pair_labels(book_pairs)[:4]}"
+            )
+        return None
+
+    def _accept_direct_trajectory(self):
+        check = self.direct_check
+        if check is None:
+            return
+        display = DisplayTrajectory()
+        display.model_id = self.robot_model_id
+        display.trajectory_start = check["trajectory_start"]
+        display.trajectory = [check["trajectory"]]
+        self.display_publisher.publish(display)
+        self.planned_trajectory = check["trajectory"]
+        self.planned_kind = str(check["kind"])
+        self.planned_type = "direct_joint"
+        sample_count = len(check["trajectory"].joint_trajectory.points)
+        self.direct_check = None
+        self.pending = None
+        self.get_logger().warning(
+            f"{self.planned_kind.upper()} DIRECT TRAJECTORY READY - "
+            f"{sample_count} collision-checked samples; waiting for E"
+        )
+        self._publish_status("awaiting_execute_confirmation")
+
     def _accept_slot_callback(self, _request, response):
         if self.phase in (
             "attaching_book",
@@ -542,6 +1089,8 @@ class SimplePreinsertNode(Node):
         self.frozen_slot = (base_slot.copy(), float(width), float(confidence))
         self.latest_target = None
         self.planned_trajectory = None
+        self.planned_kind = None
+        self.planned_type = None
         self.diagnostics_printed = False
         self._publish_status("slot_frozen", reason=str(output_path))
         response.success = True
@@ -590,6 +1139,7 @@ class SimplePreinsertNode(Node):
                 response.message = f"MoveIt {label} service is unavailable"
                 return response
         self.pending = {
+            "kind": "preinsert",
             "target": copy.deepcopy(self.latest_target[1]),
             "joint_state": copy.deepcopy(self.latest_joint_state),
             "insertion_direction": np.asarray(
@@ -597,6 +1147,10 @@ class SimplePreinsertNode(Node):
             ).copy(),
         }
         self.planned_trajectory = None
+        self.planned_kind = None
+        self.planned_type = None
+        self.executing_kind = None
+        self.executing_type = None
         if bool(self.get_parameter("attach_book_collision").value):
             if not self.scene_client.wait_for_service(timeout_sec=0.25):
                 response.success = False
@@ -624,23 +1178,70 @@ class SimplePreinsertNode(Node):
             response.success = False
             response.message = "separate execution confirmation is not enabled"
             return response
-        if not self.allow_execution or self.execution_client is None:
+        if (
+            getattr(self, "shadow_full_sequence", False)
+            and self.phase == "awaiting_execute_confirmation"
+            and self.planned_trajectory is not None
+        ):
+            kind = self.planned_kind
+            trajectory_type = self.planned_type
+            self.planned_trajectory = None
+            self.planned_kind = None
+            self.planned_type = None
+            self.executing_kind = kind
+            self.executing_type = trajectory_type
+            self.get_logger().warning(
+                f"SHADOW: would execute {kind} {trajectory_type} trajectory"
+            )
+            self._publish_status(
+                "executing",
+                reason=f"SHADOW: would execute {kind} {trajectory_type} trajectory",
+            )
+            self._publish_status(
+                "done", reason=f"SHADOW: {kind} logical completion"
+            )
+            self.executing_kind = None
+            self.executing_type = None
+            response.success = True
+            response.message = f"SHADOW: {kind} execution suppressed"
+            return response
+        if not self.allow_execution:
             response.success = False
             response.message = "trajectory execution is disabled"
             return response
         if self.phase != "awaiting_execute_confirmation" or self.planned_trajectory is None:
             response.success = False
-            response.message = "no confirmed MoveIt plan is awaiting execution"
-            return response
-        if not self.execution_client.wait_for_server(timeout_sec=0.5):
-            response.success = False
-            response.message = "MoveIt execution action is unavailable"
+            response.message = "no confirmed trajectory is awaiting execution"
             return response
         trajectory = self.planned_trajectory
+        self.executing_kind = self.planned_kind
+        self.executing_type = self.planned_type
         self.planned_trajectory = None
-        self._send_execution(trajectory)
+        self.planned_kind = None
+        self.planned_type = None
+        if self.executing_type == "direct_joint":
+            if (
+                self.direct_execution_client is None
+                or not self.direct_execution_client.wait_for_server(timeout_sec=0.5)
+            ):
+                self._fail("direct joint trajectory action is unavailable")
+                response.success = False
+                response.message = "direct joint trajectory action is unavailable"
+                return response
+            self._send_direct_execution(trajectory)
+            response.message = "reviewed direct joint trajectory submitted"
+        else:
+            if (
+                self.execution_client is None
+                or not self.execution_client.wait_for_server(timeout_sec=0.5)
+            ):
+                self._fail("MoveIt execution action is unavailable")
+                response.success = False
+                response.message = "MoveIt execution action is unavailable"
+                return response
+            self._send_execution(trajectory)
+            response.message = "reviewed MoveIt trajectory submitted"
         response.success = True
-        response.message = "trajectory submitted to MoveIt"
         return response
 
     def _book_scene_request(self):
@@ -677,6 +1278,8 @@ class SimplePreinsertNode(Node):
         if not success:
             self._fail("MoveIt rejected the held-book collision object")
             return
+        self.book_detach_pending = False
+        self.book_scene_transition_state = "attached"
         self._request_ik()
 
     def _request_ik(self):
@@ -958,11 +1561,16 @@ class SimplePreinsertNode(Node):
         display.trajectory = [result.trajectory]
         self.display_publisher.publish(display)
         if bool(self.get_parameter("separate_execution_confirmation").value):
+            kind = str(self.pending.get("kind", "preinsert"))
             self.planned_trajectory = copy.deepcopy(result.trajectory)
+            self.planned_kind = kind
+            self.planned_type = "moveit"
             self.pending = None
             self.get_logger().warning(
-                "PREINSERT PLAN READY - waiting for execution confirmation"
+                f"{kind.upper()} PLAN READY - waiting for execution confirmation"
             )
+            if getattr(self, "shadow_full_sequence", False):
+                self.get_logger().warning(f"SHADOW: {kind} plan ready")
             self._publish_status("awaiting_execute_confirmation")
             return
         if not self.allow_execution:
@@ -980,6 +1588,40 @@ class SimplePreinsertNode(Node):
         self._publish_status("executing")
         future = self.execution_client.send_goal_async(goal)
         future.add_done_callback(self._execution_goal_callback)
+
+    def _send_direct_execution(self, trajectory):
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = trajectory.joint_trajectory
+        self._publish_status("executing")
+        future = self.direct_execution_client.send_goal_async(goal)
+        future.add_done_callback(self._direct_execution_goal_callback)
+
+    def _direct_execution_goal_callback(self, future):
+        try:
+            goal_handle = future.result()
+        except Exception as error:
+            self._fail(f"direct trajectory submission failed: {error}")
+            return
+        if not goal_handle.accepted:
+            self._fail("trajectory controller rejected the direct trajectory")
+            return
+        goal_handle.get_result_async().add_done_callback(
+            self._direct_execution_result_callback
+        )
+
+    def _direct_execution_result_callback(self, future):
+        try:
+            error_code = int(future.result().result.error_code)
+        except Exception as error:
+            self._fail(f"direct trajectory result failed: {error}")
+            return
+        self.pending = None
+        if error_code == int(FollowJointTrajectory.Result.SUCCESSFUL):
+            self._publish_status("done")
+            self.executing_kind = None
+            self.executing_type = None
+        else:
+            self._fail(f"direct trajectory execution code {error_code}")
 
     def _execution_goal_callback(self, future):
         try:
@@ -1001,22 +1643,43 @@ class SimplePreinsertNode(Node):
         self.pending = None
         if error_code == int(MoveItErrorCodes.SUCCESS):
             self._publish_status("done")
+            self.executing_kind = None
+            self.executing_type = None
         else:
-            self._publish_status("failed", reason=f"MoveIt execution code {error_code}")
+            self._fail(f"MoveIt execution code {error_code}")
 
     def _fail(self, reason):
+        kind = self.planned_kind or self.executing_kind or (
+            self.pending.get("kind") if isinstance(self.pending, dict) else None
+        )
+        trajectory_type = self.planned_type or self.executing_type or (
+            "direct_joint" if self.direct_check is not None else None
+        )
         self.pending = None
         self.branch_search = None
         self.planned_trajectory = None
+        self.planned_kind = None
+        self.planned_type = None
+        self.direct_check = None
+        self.executing_kind = kind
+        self.executing_type = trajectory_type
         self._publish_status("failed", reason=reason)
+        self.executing_kind = None
+        self.executing_type = None
 
     def _publish_status(self, phase, reason=None):
         self.phase = phase
         payload = {
             "phase": phase,
             "allow_execution": self.allow_execution,
+            "requested_execution": self.requested_execution,
+            "shadow_full_sequence": self.shadow_full_sequence,
             "motion_requires_trigger": True,
             "slot_frozen": self.frozen_slot is not None,
+            "plan_kind": self.planned_kind or self.executing_kind or (
+                self.pending.get("kind") if isinstance(self.pending, dict) else None
+            ),
+            "trajectory_type": self.planned_type or self.executing_type,
         }
         if reason:
             payload["reason"] = str(reason)

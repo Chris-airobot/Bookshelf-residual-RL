@@ -1,165 +1,135 @@
-from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from bookshelf_simple_experiment_ros.operator_console_node import (
     OperatorWorkflow,
     SERVICES,
+    log_service_response,
 )
 
 
-PACKAGE = Path(__file__).resolve().parents[1]
+def _plan_and_execute(workflow, key, action, kind, destination):
+    assert workflow.command(key) == (action, None)
+    workflow.service_result(action, True)
+    workflow.preinsert_status("planning", kind)
+    workflow.preinsert_status("awaiting_execute_confirmation", kind)
+    assert workflow.command("e") == ("execute", None)
+    workflow.service_result("execute", True)
+    followup = workflow.preinsert_status("done", kind)
+    assert workflow.state == destination
+    return followup
 
 
-def test_execute_is_locked_until_successful_plan_status():
+def _complete_cycle(workflow):
+    _plan_and_execute(workflow, "g", "plan_scan", "scan", workflow.SCAN)
+    assert workflow.command("s") == ("accept_slot", None)
+    workflow.service_result("accept_slot", True)
+    _plan_and_execute(
+        workflow, "l", "plan_loading", "loading", workflow.LOADING_HOLD
+    )
+    for key, action, status, destination in (
+        ("o", "open", "open", workflow.WAITING_FOR_BOOK),
+        ("c", "close", "close", workflow.BOOK_HELD),
+    ):
+        assert workflow.command(key) == (action, None)
+        workflow.service_result(action, True)
+        workflow.operator_action_status(status, True)
+        assert workflow.state == destination
+    _plan_and_execute(
+        workflow, "p", "plan_preinsert", "preinsert", workflow.PREINSERT_READY
+    )
+    assert workflow.command("i") == ("start_policy", None)
+    workflow.service_result("start_policy", True)
+    workflow.policy_status("episode_complete")
+    followup = _plan_and_execute(
+        workflow,
+        "h",
+        "plan_return",
+        "return_loading",
+        workflow.OPENING_AFTER_RETURN,
+    )
+    assert followup == "finish_return"
+    workflow.pending = followup
+    workflow.service_result(followup, True)
+    workflow.operator_action_status("ready", True)
+    assert workflow.state == workflow.READY_FOR_NEXT_BOOK
+
+
+def test_two_complete_cycles_accept_second_slot_freeze():
     workflow = OperatorWorkflow()
-
-    action, message = workflow.command("e")
-
-    assert action is None
-    assert "locked" in message
-
-
-def test_reviewed_operator_sequence_is_state_aware():
-    workflow = OperatorWorkflow()
-
+    _complete_cycle(workflow)
+    _plan_and_execute(workflow, "g", "plan_scan", "scan", workflow.SCAN)
     assert workflow.command("s") == ("accept_slot", None)
     workflow.service_result("accept_slot", True)
     assert workflow.state == workflow.SLOT_ACCEPTED
+    # Finish the second cycle too, proving all subsequent gates are re-usable.
+    _plan_and_execute(
+        workflow, "l", "plan_loading", "loading", workflow.LOADING_HOLD
+    )
 
-    assert workflow.command("p") == ("plan", None)
-    assert workflow.state == workflow.PLANNING
-    workflow.service_result("plan", True)
+
+def test_arm_keys_plan_and_only_e_executes():
+    cases = (
+        (OperatorWorkflow.START, "g", "plan_scan", "scan"),
+        (OperatorWorkflow.SLOT_ACCEPTED, "l", "plan_loading", "loading"),
+        (OperatorWorkflow.BOOK_HELD, "p", "plan_preinsert", "preinsert"),
+        (
+            OperatorWorkflow.PUSH_COMPLETE_WAITING_RETURN,
+            "h",
+            "plan_return",
+            "return_loading",
+        ),
+    )
+    for state, key, action, kind in cases:
+        workflow = OperatorWorkflow()
+        workflow.state = state
+        assert workflow.command(key) == (action, None)
+        assert workflow.command("e")[0] is None
+        workflow.service_result(action, True)
+        workflow.preinsert_status("planning", kind)
+        workflow.preinsert_status("awaiting_execute_confirmation", kind)
+        assert workflow.command("e") == ("execute", None)
+
+
+def test_e_rejected_without_plan_and_new_target_replaces_old_plan():
+    workflow = OperatorWorkflow()
     assert workflow.command("e")[0] is None
-
-    workflow.status("planning_ik_branches", slot_frozen=True)
-    workflow.status("awaiting_execute_confirmation", slot_frozen=True)
-    assert workflow.state == workflow.PLAN_READY
-    assert workflow.command("e") == ("execute", None)
-    assert workflow.state == workflow.PLAN_READY
-    workflow.status("executing", slot_frozen=True)
-    assert workflow.state == workflow.PLAN_READY
-    workflow.service_result("execute", True)
-    assert workflow.state == workflow.EXECUTING
-    workflow.status("done", slot_frozen=True)
-    assert workflow.state == workflow.COMPLETE
+    workflow.state = workflow.READY_FOR_NEXT_BOOK
+    workflow.pending_plan_kind = "return_loading"
+    assert workflow.command("g") == ("plan_scan", None)
+    assert workflow.pending_plan_kind == "scan"
 
 
-def test_pending_service_prevents_double_dispatch():
+def test_failed_direct_verification_returns_to_retry_state_without_ready_plan():
     workflow = OperatorWorkflow()
+    assert workflow.command("g") == ("plan_scan", None)
+    workflow.service_result("plan_scan", True)
+    workflow.preinsert_status("verifying_direct_trajectory", "scan")
+    workflow.preinsert_status("failed", "scan")
+    assert workflow.state == workflow.START
+    assert workflow.pending_plan_kind is None
+    assert workflow.command("g") == ("plan_scan", None)
 
-    assert workflow.command("s") == ("accept_slot", None)
-    action, message = workflow.command("s")
 
-    assert action is None
-    assert "pending" in message
-
-
-def test_plan_never_enables_execute_without_plan_ready_status():
+def test_h_rejected_before_native_episode_complete():
     workflow = OperatorWorkflow()
-    workflow.status("slot_frozen", slot_frozen=True)
-    workflow.command("p")
-    workflow.service_result("plan", True)
-
-    assert workflow.plan_ready is False
-    assert workflow.command("e")[0] is None
+    for state in (workflow.START, workflow.POLICY_RUNNING, workflow.PREINSERT_READY):
+        workflow.state = state
+        assert workflow.command("h")[0] is None
 
 
-def test_s_p_without_e_never_enters_execution_states():
-    workflow = OperatorWorkflow()
-    workflow.command("s")
-    workflow.service_result("accept_slot", True)
-    workflow.command("p")
-    workflow.service_result("plan", True)
-
-    observed = [workflow.state]
-    for phase in ("executing", "planning_ik_branches",
-                  "awaiting_execute_confirmation", "done"):
-        workflow.status(phase, slot_frozen=True)
-        observed.append(workflow.state)
-
-    assert observed == [
-        workflow.PLANNING,
-        workflow.PLANNING,
-        workflow.PLANNING,
-        workflow.PLAN_READY,
-        workflow.PLAN_READY,
-    ]
-    assert workflow.execution_request_accepted is False
+def test_console_logger_uses_fixed_severity_call_sites():
+    logger = SimpleNamespace(info=Mock(), error=Mock())
+    log_service_response(logger, True, "ok")
+    log_service_response(logger, False, "bad")
+    logger.info.assert_called_once_with("ok")
+    logger.error.assert_called_once_with("bad")
 
 
-def test_stale_status_cannot_unlock_or_create_execution_state():
-    workflow = OperatorWorkflow()
-
-    for phase in ("awaiting_execute_confirmation", "executing", "done"):
-        workflow.status(phase, slot_frozen=False)
-    assert workflow.state == workflow.SCAN
-    assert workflow.command("e")[0] is None
-
-    workflow.command("s")
-    workflow.service_result("accept_slot", True)
-    workflow.command("p")
-    workflow.status("awaiting_execute_confirmation", slot_frozen=True)
-    assert workflow.state == workflow.PLANNING
-    assert workflow.command("e")[0] is None
-    workflow.service_result("plan", True)
-    workflow.status("awaiting_execute_confirmation", slot_frozen=True)
-    assert workflow.state == workflow.PLANNING
-
-
-def test_new_plan_invalidates_previous_execute_authorization():
-    workflow = OperatorWorkflow()
-    workflow.command("s")
-    workflow.service_result("accept_slot", True)
-    workflow.command("p")
-    workflow.service_result("plan", True)
-    workflow.status("planning_ik_branches", slot_frozen=True)
-    workflow.status("awaiting_execute_confirmation", slot_frozen=True)
-    assert workflow.plan_ready
-
-    workflow.command("p")
-
-    assert workflow.state == workflow.PLANNING
-    assert workflow.plan_ready is False
-    assert workflow.execution_request_accepted is False
-    workflow.status("done", slot_frozen=True)
-    assert workflow.state == workflow.PLANNING
-
-
-def test_service_mapping_is_strictly_plan_then_execute():
-    assert SERVICES["plan"] == "/bookshelf_simple/plan_preinsert"
+def test_service_mapping_has_one_generic_reviewed_execute_service():
+    assert SERVICES["plan_scan"] == "/bookshelf_simple/plan_scan"
+    assert SERVICES["plan_loading"] == "/bookshelf_simple/plan_loading"
+    assert SERVICES["plan_preinsert"] == "/bookshelf_simple/plan_preinsert"
+    assert SERVICES["plan_return"] == "/bookshelf_simple/plan_return_loading"
     assert SERVICES["execute"] == "/bookshelf_simple/execute_preinsert"
-    assert SERVICES["accept_slot"] == "/bookshelf_simple/accept_slot"
-    assert "/bookshelf_simple/plan_and_execute_preinsert" not in SERVICES.values()
-
-
-def test_no_reset_is_invented():
-    action, message = OperatorWorkflow().command("r")
-
-    assert action is None
-    assert "No safe reset service" in message
-
-
-def test_console_uses_tty_thread_queue_and_async_service_calls():
-    source = (
-        PACKAGE
-        / "bookshelf_simple_experiment_ros"
-        / "operator_console_node.py"
-    ).read_text(encoding="utf-8")
-
-    assert 'os.open("/dev/tty"' in source
-    assert "threading.Thread" in source
-    assert "queue.Queue()" in source
-    assert ".call_async(" in source
-    assert "input(" not in source
-
-
-def test_top_level_launch_reuses_existing_bringups_and_one_rviz_owner():
-    launch = (
-        PACKAGE / "launch" / "real_experiment_operator.launch.py"
-    ).read_text(encoding="utf-8")
-
-    assert "physical_hardware_bringup.launch.py" in launch
-    assert "real_preinsert_workflow.launch.py" in launch
-    assert '"robot_ip", default_value="192.168.1.209"' in launch
-    assert '"show_rviz": "false"' in launch
-    assert '"show_rviz": LaunchConfiguration("show_rviz")' in launch
-    assert 'executable="real_experiment_operator"' in launch
+    assert SERVICES["finish_return"] == "/bookshelf_simple/finish_return"

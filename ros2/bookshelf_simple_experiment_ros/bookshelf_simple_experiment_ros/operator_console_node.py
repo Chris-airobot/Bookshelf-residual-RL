@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive, non-blocking console for the reviewed real preinsert workflow."""
-
-from __future__ import annotations
+"""Interactive state-gated console for the complete Bookshelf experiment."""
 
 import json
 import os
@@ -13,152 +11,239 @@ import tty
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import String
 from std_srvs.srv import Trigger
 
 
 SERVICES = {
+    "plan_scan": "/bookshelf_simple/plan_scan",
     "accept_slot": "/bookshelf_simple/accept_slot",
-    "plan": "/bookshelf_simple/plan_preinsert",
+    "plan_loading": "/bookshelf_simple/plan_loading",
+    "open": "/bookshelf_simple/open_gripper",
+    "close": "/bookshelf_simple/close_gripper",
+    "plan_preinsert": "/bookshelf_simple/plan_preinsert",
     "execute": "/bookshelf_simple/execute_preinsert",
+    "start_policy": "/bookshelf_simple/start_policy",
+    "plan_return": "/bookshelf_simple/plan_return_loading",
+    "finish_return": "/bookshelf_simple/finish_return",
 }
 
 
-class OperatorWorkflow:
-    """Small ROS-independent safety state machine for keyboard commands."""
+def log_service_response(logger, success, message):
+    if success:
+        logger.info(str(message))
+    else:
+        logger.error(str(message))
 
+
+class OperatorWorkflow:
+    START = "start"
+    PLANNING_SCAN = "planning_scan"
+    SCAN_PLAN_READY = "scan_trajectory_ready"
+    EXECUTING_SCAN = "executing_scan"
     SCAN = "scan"
     SLOT_ACCEPTED = "slot_accepted"
-    PLANNING = "planning"
-    PLAN_READY = "plan_ready"
-    EXECUTING = "executing"
-    COMPLETE = "complete"
+    PLANNING_LOADING = "planning_loading"
+    LOADING_PLAN_READY = "loading_trajectory_ready"
+    EXECUTING_LOADING = "executing_loading"
+    LOADING_HOLD = "loading_hold"
+    OPENING_FOR_LOAD = "opening_for_load"
+    WAITING_FOR_BOOK = "waiting_for_book"
+    CLOSING_BOOK = "closing_book"
+    BOOK_HELD = "book_held"
+    PLANNING_PREINSERT = "planning_preinsert"
+    PREINSERT_PLAN_READY = "preinsert_plan_ready"
+    EXECUTING_PREINSERT = "executing_preinsert"
+    PREINSERT_READY = "preinsert_ready"
+    POLICY_RUNNING = "policy_running"
+    PUSH_COMPLETE_WAITING_RETURN = "push_complete_waiting_return"
+    PLANNING_RETURN = "planning_return"
+    RETURN_PLAN_READY = "return_trajectory_ready"
+    EXECUTING_RETURN = "executing_return"
+    OPENING_AFTER_RETURN = "opening_after_return"
+    RETURN_FAILED_WAITING = "return_failed_waiting"
+    READY_FOR_NEXT_BOOK = "ready_for_next_book"
+
+    PLAN_COMMANDS = {
+        "g": ("plan_scan", (START, READY_FOR_NEXT_BOOK), PLANNING_SCAN, "scan"),
+        "l": ("plan_loading", (SLOT_ACCEPTED,), PLANNING_LOADING, "loading"),
+        "p": ("plan_preinsert", (BOOK_HELD,), PLANNING_PREINSERT, "preinsert"),
+        "h": (
+            "plan_return",
+            (PUSH_COMPLETE_WAITING_RETURN,),
+            PLANNING_RETURN,
+            "return_loading",
+        ),
+    }
+    READY_BY_KIND = {
+        "scan": SCAN_PLAN_READY,
+        "loading": LOADING_PLAN_READY,
+        "preinsert": PREINSERT_PLAN_READY,
+        "return_loading": RETURN_PLAN_READY,
+    }
+    EXECUTING_BY_KIND = {
+        "scan": EXECUTING_SCAN,
+        "loading": EXECUTING_LOADING,
+        "preinsert": EXECUTING_PREINSERT,
+        "return_loading": EXECUTING_RETURN,
+    }
 
     def __init__(self):
-        self.state = self.SCAN
-        self.slot_accepted = False
-        self.plan_ready = False
+        self.state = self.START
         self.pending = None
-        self.plan_cycle_active = False
+        self.pending_plan_kind = None
         self.plan_request_accepted = False
         self.planning_status_seen = False
+        self.plan_ready_seen = False
         self.execution_request_accepted = False
-        self.execution_status_seen = False
+        self.execution_done_seen = False
+        self.plan_origin_state = None
 
     def command(self, key):
         key = str(key).lower()
         if key == "q":
             return "quit", None
-        if key == "r":
-            return None, "No safe reset service exists; R is disabled."
         if self.pending is not None:
-            return None, f"Waiting for the pending {self.pending} service response."
-        if key == "s":
-            if self.state != self.SCAN:
-                return None, "S is available only while selecting the scan slot."
-            self.pending = "accept_slot"
-            return "accept_slot", None
-        if key == "p":
-            if self.state not in (self.SLOT_ACCEPTED, self.PLAN_READY):
-                return None, "P requires an accepted slot and loading preparation."
-            self.pending = "plan"
-            self.plan_ready = False
-            self.plan_cycle_active = True
+            return None, f"Waiting for pending {self.pending} response."
+        if key in self.PLAN_COMMANDS:
+            action, allowed, state, kind = self.PLAN_COMMANDS[key]
+            if self.state not in allowed:
+                return None, f"{key.upper()} is unavailable in {self.state}."
+            self.pending_plan_kind = kind
+            self.plan_origin_state = self.state
             self.plan_request_accepted = False
             self.planning_status_seen = False
+            self.plan_ready_seen = False
             self.execution_request_accepted = False
-            self.execution_status_seen = False
-            self.state = self.PLANNING
-            return "plan", None
+            self.execution_done_seen = False
+            self.state = state
+            self.pending = action
+            return action, None
+        simple = {
+            "s": (self.SCAN, "accept_slot"),
+            "o": (self.LOADING_HOLD, "open"),
+            "c": (self.WAITING_FOR_BOOK, "close"),
+            "i": (self.PREINSERT_READY, "start_policy"),
+        }
         if key == "e":
-            if (
-                self.state != self.PLAN_READY
-                or not self.plan_ready
-                or not self.plan_cycle_active
-                or not self.plan_request_accepted
-            ):
-                return None, "E is locked until a successful reviewed plan is ready."
+            if self.state not in self.READY_BY_KIND.values() or not self.pending_plan_kind:
+                return None, "E requires a valid reviewed trajectory."
             self.pending = "execute"
-            self.plan_ready = False
-            self.execution_request_accepted = False
-            self.execution_status_seen = False
             return "execute", None
-        return None, "Unknown key. Use S, P, E, or Q."
+        if key not in simple:
+            return None, "Unknown key. Use G, S, L, O, C, P, E, I, H, or Q."
+        required, action = simple[key]
+        if self.state != required:
+            return None, f"{key.upper()} is unavailable in {self.state}."
+        self.pending = action
+        return action, None
 
     def service_result(self, action, success):
         if self.pending == action:
             self.pending = None
-        if action == "accept_slot":
-            if success:
-                self.slot_accepted = True
-                self.state = self.SLOT_ACCEPTED
-            else:
-                self.state = self.SCAN
-        elif action == "plan":
+        if action in ("plan_scan", "plan_loading", "plan_preinsert", "plan_return"):
             self.plan_request_accepted = bool(success)
             if not success:
-                self.plan_cycle_active = False
-                self.plan_ready = False
-                self.state = self.SLOT_ACCEPTED if self.slot_accepted else self.SCAN
-        elif action == "execute":
+                fallback = {
+                    "plan_scan": self.plan_origin_state or self.START,
+                    "plan_loading": self.SLOT_ACCEPTED,
+                    "plan_preinsert": self.BOOK_HELD,
+                    "plan_return": self.PUSH_COMPLETE_WAITING_RETURN,
+                }
+                self.state = fallback[action]
+                self.pending_plan_kind = None
+                self.plan_origin_state = None
+            elif self.plan_ready_seen:
+                self.state = self.READY_BY_KIND[self.pending_plan_kind]
+            return
+        if action == "execute":
             self.execution_request_accepted = bool(success)
             if success:
-                self.state = self.EXECUTING
+                if self.execution_done_seen:
+                    return self._complete_execution(self.pending_plan_kind)
+                self.state = self.EXECUTING_BY_KIND[self.pending_plan_kind]
             else:
-                self.plan_ready = True
-                self.state = self.PLAN_READY
+                self.state = self.READY_BY_KIND[self.pending_plan_kind]
+            return
+        transitions = {
+            "accept_slot": (self.SLOT_ACCEPTED, self.SCAN),
+            "open": (self.OPENING_FOR_LOAD, self.LOADING_HOLD),
+            "close": (self.CLOSING_BOOK, self.WAITING_FOR_BOOK),
+            "start_policy": (self.POLICY_RUNNING, self.PREINSERT_READY),
+            "finish_return": (self.OPENING_AFTER_RETURN, self.RETURN_FAILED_WAITING),
+        }
+        if action in transitions:
+            self.state = transitions[action][0 if success else 1]
 
-    def status(self, phase, slot_frozen=False):
-        self.slot_accepted = self.slot_accepted or bool(slot_frozen)
-        if phase == "slot_frozen":
-            self.slot_accepted = True
-            self.state = self.SLOT_ACCEPTED
-        elif phase in (
-            "attaching_book",
-            "requesting_ik",
-            "requesting_ik_branches",
+    def preinsert_status(self, phase, plan_kind=None):
+        kind = plan_kind or self.pending_plan_kind
+        if phase in (
             "planning",
             "planning_ik_branches",
-        ) and self.plan_cycle_active and self.state == self.PLANNING:
-            self.plan_ready = False
-            if self.plan_request_accepted:
-                self.planning_status_seen = True
-            self.state = self.PLANNING
+            "verifying_direct_trajectory",
+        ) and kind:
+            self.planning_status_seen = True
         elif (
             phase == "awaiting_execute_confirmation"
-            and self.plan_cycle_active
-            and self.plan_request_accepted
             and self.planning_status_seen
-            and self.state == self.PLANNING
+            and kind in self.READY_BY_KIND
         ):
-            self.plan_ready = True
-            self.state = self.PLAN_READY
-        elif phase == "executing" and (
-            self.pending == "execute" or self.execution_request_accepted
-        ):
-            self.execution_status_seen = True
+            self.plan_ready_seen = True
+            self.pending_plan_kind = kind
+            if self.plan_request_accepted:
+                self.state = self.READY_BY_KIND[kind]
+        elif phase == "done" and kind:
+            self.execution_done_seen = True
             if self.execution_request_accepted:
-                self.plan_ready = False
-                self.state = self.EXECUTING
-        elif (
-            phase == "done"
-            and self.execution_request_accepted
-            and self.execution_status_seen
-            and self.state == self.EXECUTING
-        ):
-            self.plan_ready = False
-            self.state = self.COMPLETE
+                return self._complete_execution(kind)
         elif phase in ("failed", "rejected"):
-            self.plan_ready = False
-            self.state = self.SLOT_ACCEPTED if self.slot_accepted else self.SCAN
-        elif phase in ("awaiting_plan_confirmation", "slot_candidate_ready"):
-            self.state = self.SLOT_ACCEPTED if self.slot_accepted else self.SCAN
+            if kind in self.READY_BY_KIND:
+                self.state = self._retry_state(kind)
+                self.pending_plan_kind = None
+                self.plan_origin_state = None
+        return None
+
+    def _retry_state(self, kind):
+        if kind == "scan":
+            return self.plan_origin_state or self.START
+        return {
+            "loading": self.SLOT_ACCEPTED,
+            "preinsert": self.BOOK_HELD,
+            "return_loading": self.PUSH_COMPLETE_WAITING_RETURN,
+        }[kind]
+
+    def _complete_execution(self, kind):
+        self.execution_request_accepted = False
+        self.execution_done_seen = False
+        self.pending_plan_kind = None
+        self.plan_origin_state = None
+        if kind == "scan":
+            self.state = self.SCAN
+        elif kind == "loading":
+            self.state = self.LOADING_HOLD
+        elif kind == "preinsert":
+            self.state = self.PREINSERT_READY
+        else:
+            self.state = self.OPENING_AFTER_RETURN
+            return "finish_return"
+        return None
+
+    def operator_action_status(self, action, success):
+        if action == "open":
+            self.state = self.WAITING_FOR_BOOK if success else self.LOADING_HOLD
+        elif action == "close":
+            self.state = self.BOOK_HELD if success else self.WAITING_FOR_BOOK
+        elif action in ("return_open", "return_failed") and not success:
+            self.state = self.RETURN_FAILED_WAITING
+        elif action == "ready" and success:
+            self.state = self.READY_FOR_NEXT_BOOK
+
+    def policy_status(self, phase):
+        if phase == "episode_complete":
+            self.state = self.PUSH_COMPLETE_WAITING_RETURN
 
 
 class TtyKeyboardReader:
-    """Read individual keys without ever blocking the ROS executor."""
-
     def __init__(self, output_queue):
         self.output_queue = output_queue
         self.stop_event = threading.Event()
@@ -169,8 +254,6 @@ class TtyKeyboardReader:
 
     def stop(self):
         self.stop_event.set()
-        if self.thread.is_alive() and threading.current_thread() is not self.thread:
-            self.thread.join(timeout=1.0)
 
     def _run(self):
         descriptor = None
@@ -181,44 +264,17 @@ class TtyKeyboardReader:
             tty.setcbreak(descriptor)
             while not self.stop_event.is_set():
                 ready, _, _ = select.select([descriptor], [], [], 0.25)
-                if not ready:
-                    continue
-                data = os.read(descriptor, 32).decode(errors="ignore")
-                for character in data:
-                    if character.strip():
-                        self.output_queue.put(("key", character.lower()))
+                if ready:
+                    for character in os.read(descriptor, 32).decode(errors="ignore"):
+                        if character.strip():
+                            self.output_queue.put(("key", character.lower()))
         except Exception as error:
-            self.output_queue.put(("error", f"keyboard unavailable: {error}"))
+            self.output_queue.put(("error", str(error)))
         finally:
             if descriptor is not None and original is not None:
                 termios.tcsetattr(descriptor, termios.TCSADRAIN, original)
             if descriptor is not None:
                 os.close(descriptor)
-
-
-SCREENS = {
-    OperatorWorkflow.SCAN: (
-        "[SCAN]\nMove robot using RViz.\nPress S when the slot looks correct."
-    ),
-    OperatorWorkflow.SLOT_ACCEPTED: (
-        "[SLOT ACCEPTED]\nFrozen slot saved. Inspect it in RViz.\n"
-        "Move robot to the loading posture, place and close the book manually.\n"
-        "Press P when ready."
-    ),
-    OperatorWorkflow.PLANNING: (
-        "[PLANNING]\nRunning singularity-aware IK search..."
-    ),
-    OperatorWorkflow.PLAN_READY: (
-        "[PLAN READY]\nInspect the trajectory in RViz.\n"
-        "Press E to execute, or P to replan."
-    ),
-    OperatorWorkflow.EXECUTING: (
-        "[EXECUTING]\nPreinsert motion in progress..."
-    ),
-    OperatorWorkflow.COMPLETE: (
-        "[PREINSERT COMPLETE]\nReady for the existing policy stage."
-    ),
-}
 
 
 class RealExperimentOperator(Node):
@@ -227,95 +283,101 @@ class RealExperimentOperator(Node):
         self.workflow = OperatorWorkflow()
         self.events = queue.Queue()
         self.service_clients = {
-            action: self.create_client(Trigger, service)
-            for action, service in SERVICES.items()
+            action: self.create_client(Trigger, service) for action, service in SERVICES.items()
         }
-        status_qos = QoSProfile(
-            depth=1,
-            # Operator authorization is based only on live transitions from
-            # this console session, never replayed retained execution status.
-            durability=DurabilityPolicy.VOLATILE,
-            reliability=ReliabilityPolicy.RELIABLE,
-        )
+        self.create_subscription(String, "/bookshelf_simple/status", self._preinsert, 10)
+        self.create_subscription(String, "/bookshelf_simple/policy/status", self._policy, 10)
         self.create_subscription(
-            String, "/bookshelf_simple/status", self._status_callback, status_qos
+            String, "/bookshelf_simple/operator_action_status", self._operator_action, 10
         )
         self.keyboard = TtyKeyboardReader(self.events)
         self.keyboard.start()
         self.create_timer(0.05, self._drain_keyboard)
-        self._last_screen = None
-        self._render(force=True)
+        self._render()
 
-    def _render(self, force=False):
-        if not force and self.workflow.state == self._last_screen:
-            return
-        self._last_screen = self.workflow.state
-        print("\nBOOKSHELF REAL EXPERIMENT\n", flush=True)
-        print(SCREENS[self.workflow.state], flush=True)
-        print("Keys: S=freeze slot  P=plan  E=execute reviewed plan  Q=quit console", flush=True)
+    def _render(self):
+        print(f"\nBOOKSHELF EXPERIMENT [{self.workflow.state}]", flush=True)
+        print(
+            "Keys: G=scan S=freeze L=loading O=open C=close P=plan "
+            "E=execute I=policy H=return Q=quit", flush=True,
+        )
 
     def _drain_keyboard(self):
-        while True:
-            try:
-                event, value = self.events.get_nowait()
-            except queue.Empty:
-                return
+        while not self.events.empty():
+            event, value = self.events.get_nowait()
             if event == "error":
                 self.get_logger().error(value)
             else:
                 self._handle_key(value)
 
-    def _handle_key(self, key):
-        action, message = self.workflow.command(key)
-        if message:
-            self.get_logger().warning(message)
-            return
-        if action == "quit":
-            print("Operator console exiting; other launched nodes remain running.", flush=True)
-            self.keyboard.stop()
-            rclpy.shutdown()
-            return
+    def _call(self, action):
         client = self.service_clients[action]
         if not client.service_is_ready():
             self.workflow.service_result(action, False)
             self.get_logger().error(f"Service is not ready: {SERVICES[action]}")
-            self._render(force=True)
+            self._render()
             return
-        self._render()
         future = client.call_async(Trigger.Request())
-        future.add_done_callback(
-            lambda completed, action=action: self._service_response(action, completed)
-        )
+        future.add_done_callback(lambda done, action=action: self._service_response(action, done))
+
+    def _handle_key(self, key):
+        action, message = self.workflow.command(key)
+        if message:
+            self.get_logger().warning(message)
+        elif action == "quit":
+            self.keyboard.stop()
+            rclpy.shutdown()
+        else:
+            self._call(action)
 
     def _service_response(self, action, future):
         try:
             response = future.result()
-            success = bool(response.success)
-            message = str(response.message)
+            success, message = bool(response.success), str(response.message)
         except Exception as error:
-            success = False
-            message = str(error)
-        self.workflow.service_result(action, success)
-        level = self.get_logger().info if success else self.get_logger().error
-        level(f"{action}: {'accepted' if success else 'failed'} - {message}")
-        self._render(force=not success or action == "accept_slot")
-
-    def _status_callback(self, message):
-        try:
-            status = json.loads(message.data)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            self.get_logger().warning("Ignored malformed /bookshelf_simple/status message")
-            return
-        previous = self.workflow.state
-        self.workflow.status(
-            str(status.get("phase", "")), bool(status.get("slot_frozen", False))
+            success, message = False, str(error)
+        followup = self.workflow.service_result(action, success)
+        log_service_response(
+            self.get_logger(), success,
+            f"{action}: {'accepted' if success else 'failed'} - {message}",
         )
-        if status.get("reason") and status.get("phase") in ("failed", "rejected"):
-            self.get_logger().error(str(status["reason"]))
-        self._render(force=self.workflow.state != previous)
+        self._render()
+        if followup:
+            self.workflow.pending = followup
+            self._call(followup)
 
-    def close(self):
-        self.keyboard.stop()
+    @staticmethod
+    def _decode(message):
+        try:
+            return json.loads(message.data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _preinsert(self, message):
+        status = self._decode(message)
+        if status is None:
+            return
+        followup = self.workflow.preinsert_status(
+            str(status.get("phase", "")), status.get("plan_kind")
+        )
+        self._render()
+        if followup:
+            self.workflow.pending = followup
+            self._call(followup)
+
+    def _policy(self, message):
+        status = self._decode(message)
+        if status:
+            self.workflow.policy_status(str(status.get("phase", "")))
+            self._render()
+
+    def _operator_action(self, message):
+        status = self._decode(message)
+        if status:
+            self.workflow.operator_action_status(
+                str(status.get("action", "")), bool(status.get("success", False))
+            )
+            self._render()
 
 
 def main(args=None):
@@ -326,7 +388,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.close()
+        node.keyboard.stop()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

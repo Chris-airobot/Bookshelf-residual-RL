@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 
 from action_msgs.msg import GoalStatus
-from control_msgs.action import GripperCommand
+from control_msgs.action import FollowJointTrajectory, GripperCommand
 from geometry_msgs.msg import Pose, PoseStamped, TransformStamped, TwistStamped
 import numpy as np
 import rclpy
@@ -54,6 +54,12 @@ from .residual_policy_math import (
     compute_policy_nominal_delta,
     release_requested_for_mode,
     scale_residual_action,
+)
+from .execution_gate import hardware_commands_allowed
+from .operator_action_node import (
+    GRIPPER_COMMAND,
+    GRIPPER_TRAJECTORY,
+    make_gripper_goal,
 )
 
 
@@ -252,11 +258,26 @@ class SimplePolicyControlNode(Node):
     def __init__(self):
         super().__init__("simple_policy_control")
         self._declare_parameters()
-        self.execute = bool(self.get_parameter("execute").value)
+        self.shadow_full_sequence = bool(
+            self.get_parameter("shadow_full_sequence").value
+        )
+        self.requested_execution = bool(self.get_parameter("execute").value)
+        self.execute = hardware_commands_allowed(
+            self.requested_execution, self.shadow_full_sequence
+        )
         self.rollout = bool(self.get_parameter("rollout").value)
+        self.wait_for_start = bool(self.get_parameter("wait_for_start").value)
+        self.started = not self.wait_for_start
         self.max_steps = int(self.get_parameter("max_steps").value)
         if self.max_steps <= 0:
             raise ValueError("max_steps must be positive")
+        self.gripper_action_type = str(
+            self.get_parameter("gripper_action_type").value
+        )
+        if self.gripper_action_type not in (GRIPPER_COMMAND, GRIPPER_TRAJECTORY):
+            raise ValueError(
+                f"unsupported gripper_action_type: {self.gripper_action_type!r}"
+            )
         push_x_uncertainty_m = float(
             self.get_parameter("push_x_uncertainty_m").value
         )
@@ -273,7 +294,7 @@ class SimplePolicyControlNode(Node):
         self.latest_joint_state = None
         self.latest_joint_state_ns = None
         self.latest_servo_status = None
-        self.phase = "waiting_for_live_state"
+        self.phase = "waiting_for_live_state" if self.started else "waiting_for_start"
         self.record = None
         self.target = None
         self.target_eef = None
@@ -312,6 +333,8 @@ class SimplePolicyControlNode(Node):
         self.gripper_goal_kind = None
         self.gripper_retry_start_ns = None
         self.gripper_next_attempt_ns = 0
+        self.shadow_sequence = []
+        self.shadow_next_transition_ns = None
 
         run_dir_value = str(self.get_parameter("run_dir").value).strip()
         if not run_dir_value:
@@ -362,6 +385,9 @@ class SimplePolicyControlNode(Node):
         self.status_publisher = self.create_publisher(
             String, "/bookshelf_simple/policy/status", latched
         )
+        self.create_service(
+            Trigger, "/bookshelf_simple/start_policy", self._start_policy_callback
+        )
 
         self.servo_start_client = None
         self.twist_publisher = None
@@ -383,7 +409,9 @@ class SimplePolicyControlNode(Node):
             )
             self.gripper_client = ActionClient(
                 self,
-                GripperCommand,
+                GripperCommand
+                if self.gripper_action_type == GRIPPER_COMMAND
+                else FollowJointTrajectory,
                 str(self.get_parameter("gripper_action").value),
             )
 
@@ -396,7 +424,7 @@ class SimplePolicyControlNode(Node):
                 1.0 / float(self.get_parameter("policy_rate_hz").value),
                 self._continuous_policy_tick,
             )
-        self._publish_status("waiting_for_live_state")
+        self._publish_status(self.phase)
         self.get_logger().warning(
             f"INSERT {'ROLLOUT' if self.rollout else 'ONE POLICY STEP'}; "
             f"execute={self.execute}; max_steps={self.max_steps}; "
@@ -417,6 +445,8 @@ class SimplePolicyControlNode(Node):
         )
         self.declare_parameter("run_dir", "")
         self.declare_parameter("execute", False)
+        self.declare_parameter("shadow_full_sequence", False)
+        self.declare_parameter("wait_for_start", False)
         self.declare_parameter("rollout", False)
         self.declare_parameter("max_steps", 150)
         self.declare_parameter("command_scale", 0.10)
@@ -429,6 +459,7 @@ class SimplePolicyControlNode(Node):
             "gripper_action",
             "/xarm_gripper/gripper_action",
         )
+        self.declare_parameter("gripper_action_type", GRIPPER_COMMAND)
         self.declare_parameter("gripper_open_position", 0.0)
         self.declare_parameter("gripper_closed_position", 0.85)
         self.declare_parameter("gripper_max_effort", 0.0)
@@ -511,7 +542,11 @@ class SimplePolicyControlNode(Node):
         return names, named_joint_positions(self.latest_joint_state, names)
 
     def _timer_callback(self):
-        if self.phase == "waiting_for_live_state":
+        if not getattr(self, "started", True):
+            return
+        if self.phase == "shadow_sequence":
+            self._shadow_sequence_tick()
+        elif self.phase == "waiting_for_live_state":
             self._try_calculate()
         elif self.phase == "waiting_for_servo":
             self._try_start_servo()
@@ -657,6 +692,12 @@ class SimplePolicyControlNode(Node):
             or rear_to_mouth > self.maximum_rear_to_mouth_m
         ):
             self.maximum_rear_to_mouth_m = rear_to_mouth
+        if self.shadow_full_sequence:
+            self.record["servo_result"] = "shadow_full_sequence_no_motion"
+            self.record["shadow_full_sequence"] = True
+            self._write_record("complete")
+            self._start_shadow_sequence(transform_base_eef, transform_base_tcp)
+            return
         if self._stop_rollout_for_release(
             release_requested, transform_base_eef, transform_base_tcp
         ):
@@ -718,6 +759,7 @@ class SimplePolicyControlNode(Node):
             release_action=float(self.record["ppo_residual_action"][5]),
             policy_step=int(self.record["step_index"]),
         )
+        self.get_logger().warning("POLICY RELEASE REQUESTED")
         self._log_phase_event(
             "release_started", transform_base_eef, transform_base_tcp
         )
@@ -749,12 +791,11 @@ class SimplePolicyControlNode(Node):
         position_parameter = (
             "gripper_open_position" if kind == "open" else "gripper_closed_position"
         )
-        goal = GripperCommand.Goal()
-        goal.command.position = float(
-            self.get_parameter(position_parameter).value
-        )
-        goal.command.max_effort = float(
-            self.get_parameter("gripper_max_effort").value
+        goal = make_gripper_goal(
+            self.gripper_action_type,
+            self.get_parameter(position_parameter).value,
+            self.get_parameter("gripper_max_effort").value,
+            self.get_parameter("gripper_move_duration_s").value,
         )
         self.gripper_goal_pending = True
         self.gripper_goal_kind = str(kind)
@@ -805,6 +846,10 @@ class SimplePolicyControlNode(Node):
             self._log_phase_event(
                 "release_complete", transform_base_eef, transform_base_tcp
             )
+            self.get_logger().warning("GRIPPER RELEASE COMPLETE")
+            self._publish_status(
+                "release_complete", "best-effort book scene update requested"
+            )
             self.phase = "retreat"
             self.phase_start_ns = self._now_ns()
             self.retreat_start_xyz = transform_base_eef[:3, 3].copy()
@@ -812,6 +857,7 @@ class SimplePolicyControlNode(Node):
             self._log_phase_event(
                 "retreat_started", transform_base_eef, transform_base_tcp
             )
+            self.get_logger().warning("RETREAT STARTED")
             self._publish_status("retreat_started")
             return
         if kind == "close_empty":
@@ -1549,10 +1595,180 @@ class SimplePolicyControlNode(Node):
             stream.write(json.dumps(payload, sort_keys=True) + "\n")
 
     def _publish_status(self, phase, reason=None):
-        payload = {"phase": phase, "execute": self.execute, "run_dir": str(self.run_dir)}
+        payload = {
+            "phase": phase,
+            "execute": self.execute,
+            "requested_execution": self.requested_execution,
+            "shadow_full_sequence": self.shadow_full_sequence,
+            "run_dir": str(self.run_dir),
+        }
         if reason is not None:
             payload["reason"] = str(reason)
         self.status_publisher.publish(String(data=json.dumps(payload, sort_keys=True)))
+
+    def _start_policy_callback(self, _request, response):
+        if self.started:
+            if self.phase not in ("holding_visualization", "shadow_complete"):
+                response.success = False
+                response.message = "policy sequence has already started"
+                return response
+            self._reset_completed_episode()
+        self.started = True
+        self.phase = "waiting_for_live_state"
+        if self.shadow_full_sequence:
+            self.get_logger().warning("SHADOW: would start PPO insertion")
+            self._publish_status("shadow_policy_start", "SHADOW: would start PPO insertion")
+        else:
+            self._publish_status("waiting_for_live_state", "operator authorized PPO insertion")
+        response.success = True
+        response.message = (
+            "SHADOW: PPO control-flow rehearsal started"
+            if self.shadow_full_sequence
+            else "PPO insertion rollout started"
+        )
+        return response
+
+    def _reset_completed_episode(self):
+        """Re-arm only volatile rollout state after a completed episode."""
+
+        self.execution_guard = OneShotExecutionGuard()
+        self.record = None
+        self.target = None
+        self.target_eef = None
+        self.execution_start_ns = None
+        self.finish_after_ns = None
+        self.visualization_hold_deadline_ns = None
+        self.nonzero_command_count = 0
+        self.continuous_servo_command_count = 0
+        self.first_servo_command_ns = None
+        self.last_servo_command_ns = None
+        self.first_policy_update_ns = None
+        self.last_policy_update_ns = None
+        self.rollout_start_ns = None
+        self.observed_servo_statuses = set()
+        self.maximum_rear_to_mouth_m = None
+        self.step_index = 0
+        self.total_steps = 0
+        self.rollout_final_logged = False
+        self.released_book_transform = None
+        self.push_book_transform = None
+        self.phase_start_ns = None
+        self.retreat_start_xyz = None
+        self.retreat_distance_m = 0.0
+        self.push_start_xyz = None
+        self.push_book_origin = None
+        self.push_geometric_contact_distance_m = None
+        self.push_contact_distance_m = None
+        self.book_contact_gap_m = None
+        self.push_distance_m = 0.0
+        self.book_push_distance_m = 0.0
+        self.push_policy_index = 0
+        self.gripper_goal_pending = False
+        self.gripper_goal_kind = None
+        self.gripper_retry_start_ns = None
+        self.gripper_next_attempt_ns = 0
+        self.shadow_sequence = []
+        self.shadow_next_transition_ns = None
+
+    def _start_shadow_sequence(self, transform_base_eef, transform_base_tcp):
+        """Advance control flow without fabricating robot motion or TF changes."""
+
+        transform_base_book = transform_base_eef @ self.geometry.transform_eef_book
+        retreat_target_xyz = (
+            transform_base_eef[:3, 3]
+            + self.retreat_direction
+            * float(self.get_parameter("retreat_distance_m").value)
+        )
+        insertion_direction = -self.retreat_direction
+        contact_gap = oriented_box_contact_gap(
+            transform_base_tcp[:3, 3],
+            transform_base_book,
+            self.geometry.book_size,
+            insertion_direction,
+        )
+        transform_slot_base = invert_transform(self.geometry.transform_base_slot)
+        transform_base_policy_tool = (
+            transform_base_eef @ self.geometry.transform_eef_policy_tool
+        )
+        push_raw, push_observation = compute_policy_observation(
+            transform_slot_base @ transform_base_book,
+            transform_slot_base @ transform_base_policy_tool,
+            book_size=self.geometry.book_size,
+            slot_depth=self.geometry.slot_depth_m,
+            mode_observation=1.0,
+            gripper_open=0.0,
+            scales=self.geometry.observation_scales,
+        )
+        push_normalized, push_actor_mean, push_action = self.actor.predict(
+            push_observation
+        )
+        push_nominal = compute_push_nominal_delta(
+            push_raw, NominalPushConfig(book_size=self.geometry.book_size)
+        )
+        push_residual = scale_residual_action(push_action)
+        push_final = combine_motion_delta(push_nominal, push_residual)
+        self._log_phase_event(
+            "shadow_insert_intent",
+            transform_base_eef,
+            transform_base_tcp,
+            intended_target_tcp=self.record["target_tcp_pose"],
+            note="stationary live state; no physical state update fabricated",
+        )
+        self._append_payload({
+            "event": "shadow_post_insert_intent",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "physical_state_fabricated": False,
+            "release_open_intended": True,
+            "retreat_target_xyz": retreat_target_xyz.tolist(),
+            "retreat_distance_m": float(
+                self.get_parameter("retreat_distance_m").value
+            ),
+            "empty_gripper_close_intended": True,
+            "push_contact_gap_m_from_stationary_state": float(contact_gap),
+            "requested_book_push_distance_m": float(
+                self.get_parameter("push_book_distance_m").value
+            ),
+            "push_raw_observation": push_raw.tolist(),
+            "push_policy_observation": push_observation.tolist(),
+            "push_vecnormalize_observation": push_normalized.tolist(),
+            "push_ppo_actor_mean": push_actor_mean.tolist(),
+            "push_ppo_residual_action": push_action.tolist(),
+            "push_nominal_delta": push_nominal.tolist(),
+            "push_scaled_residual_delta": push_residual.tolist(),
+            "push_final_delta": push_final.tolist(),
+            "note": "all post-INSERT targets use stationary live state",
+        })
+        self.shadow_sequence = [
+            ("release_started", "SHADOW: would release/open gripper"),
+            ("retreat_started", "SHADOW: would retreat"),
+            ("retreat_complete", "SHADOW: would close empty gripper"),
+            ("push_started", "SHADOW: would push"),
+            ("episode_complete", "SHADOW: push complete; waiting for H"),
+        ]
+        self.phase = "shadow_sequence"
+        self.shadow_next_transition_ns = self._now_ns() + int(0.25e9)
+        self._publish_status(
+            "shadow_insert", "SHADOW: intended INSERT target calculated; no motion sent"
+        )
+
+    def _shadow_sequence_tick(self):
+        if self._now_ns() < self.shadow_next_transition_ns:
+            return
+        phase, message = self.shadow_sequence.pop(0)
+        self.get_logger().warning(message)
+        self._append_payload({
+            "event": f"shadow_{phase}",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "phase": phase,
+            "message": message,
+            "physical_state_fabricated": False,
+        })
+        self._publish_status(phase, message)
+        if self.shadow_sequence:
+            self.phase = "shadow_sequence"
+            self.shadow_next_transition_ns = self._now_ns() + int(0.25e9)
+        else:
+            self.phase = "shadow_complete"
 
 
 def main(args=None):

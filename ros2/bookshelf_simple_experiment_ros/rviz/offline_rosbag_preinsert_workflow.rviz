@@ -32,6 +32,11 @@ Visualization Manager:
       Move Group Namespace: ""
       Name: MotionPlanning
       Planning Group: xarm7
+      Planning Request:
+        Interactive Marker Size: 0
+        Query Goal State: false
+        Query Start State: false
+        Show Workspace: false
       Planning Scene Topic: monitored_planning_scene
       Robot Description: robot_description
     - Class: rviz_default_plugins/MarkerArray
@@ -48,6 +53,8 @@ Visualization Manager:
       Enabled: true
       Name: Target TCP
       Shape: Axes
+      Axes Length: 0.08
+      Axes Radius: 0.008
       Topic:
         Depth: 10
         Durability Policy: Transient Local
