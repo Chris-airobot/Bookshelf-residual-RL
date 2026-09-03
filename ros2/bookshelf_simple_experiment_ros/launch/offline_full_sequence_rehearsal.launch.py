@@ -97,9 +97,30 @@ def generate_launch_description():
             "fake xArm7/MoveIt/gripper, reviewed preinsert and PPO sequence. "
             "No physical hardware is started."
         )),
+        LogInfo(msg=(
+            "DRY-RUN ONLY: publishing a rigid mock link_eef -> "
+            "target_book_center observation so the production per-grasp "
+            "calibration path collects and freezes its normal samples."
+        )),
         preview,
         servo,
         policy,
+        Node(
+            package="tf2_ros",
+            executable="static_transform_publisher",
+            name="dry_run_mock_held_book_tf",
+            arguments=[
+                "0.006189808263520789",
+                "0.004397635899244547",
+                "0.18076520526773382",
+                "0.7170947434170492",
+                "0.01281329455160485",
+                "0.6961397093730864",
+                "0.03162994594249451",
+                "link_eef",
+                "target_book_center",
+            ],
+        ),
         Node(
             package="bookshelf_simple_experiment_ros",
             executable="operator_actions",

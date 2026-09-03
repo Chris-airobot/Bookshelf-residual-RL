@@ -93,3 +93,16 @@ def test_offline_rehearsal_executes_fake_interfaces_not_shadow():
     assert '"execute": "true"' in launch
     assert '"shadow_full_sequence": "false"' in launch
     assert '"command_scale": "1.0"' in launch
+
+
+def test_offline_rehearsal_feeds_production_per_grasp_tf_path_only():
+    offline = (
+        PACKAGE / "launch" / "offline_full_sequence_rehearsal.launch.py"
+    ).read_text()
+    real = (PACKAGE / "launch" / "real_experiment_operator.launch.py").read_text()
+
+    assert 'name="dry_run_mock_held_book_tf"' in offline
+    assert '"link_eef"' in offline
+    assert '"target_book_center"' in offline
+    assert "per_grasp_eef_book" not in offline
+    assert "dry_run_mock_held_book_tf" not in real

@@ -47,6 +47,41 @@ ros2 bag record -a \
 
 Start recording before the experiment. Stop it with `Ctrl+C` after the trial.
 
+## Local Alienware dry run
+
+**FAKE HARDWARE ONLY — NEVER USE THIS LAUNCH FOR THE REAL ROBOT.**
+
+Terminal 1:
+
+```bash
+cd ~/Chris/bookshelf-unified
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+scripts/ros2/build_xarm_experiment.sh
+source ~/Chris/bookshelf-unified/.ros2_ws/install/local_setup.bash
+ros2 launch bookshelf_simple_experiment_ros \
+  offline_full_sequence_rehearsal.launch.py
+```
+
+Terminal 2 (optional log capture):
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+source ~/Chris/bookshelf-unified/.ros2_ws/install/local_setup.bash
+mkdir -p ~/BookshelfFiles/experiment_logs/local_dry_runs
+ros2 bag record -a -x '.*(compressed|theora).*' \
+  -o ~/BookshelfFiles/experiment_logs/local_dry_runs/dry_run_$(date +%Y%m%d_%H%M%S)
+```
+
+Practice this sequence:
+
+```text
+G → E → S → L → E → O → C
+CHECK: PER-GRASP EEF->BOOK FROZEN
+P → E → I → H → E
+```
+
 ## Operator sequence
 
 Use this exact sequence:
