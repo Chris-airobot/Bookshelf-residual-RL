@@ -135,7 +135,7 @@ def generate_launch_description():
         DeclareLaunchArgument("wait_for_start", default_value="false"),
         DeclareLaunchArgument("rollout", default_value="false"),
         DeclareLaunchArgument("max_steps", default_value="150"),
-        DeclareLaunchArgument("command_scale", default_value="0.10"),
+        DeclareLaunchArgument("command_scale", default_value="1.0"),
         DeclareLaunchArgument("record_bag", default_value="false"),
         DeclareLaunchArgument("visualization_hold_s", default_value="60.0"),
         DeclareLaunchArgument(

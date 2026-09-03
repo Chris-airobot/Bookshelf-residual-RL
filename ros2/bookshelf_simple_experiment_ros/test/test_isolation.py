@@ -143,7 +143,7 @@ def test_real_launch_has_frozen_slot_and_two_operator_confirmations():
     assert "/bookshelf_simple/accept_slot" in launch
     assert "/bookshelf_simple/plan_preinsert" in launch
     assert "/bookshelf_simple/execute_preinsert" in launch
-    assert "robot_ip" not in launch
+    assert '"physical_hardware_bringup.launch.py"' not in launch
     assert "xarm_moveit_config" not in launch
 
 
@@ -179,18 +179,34 @@ def test_experiment_rviz_uses_compact_target_tcp_and_hides_moveit_goal_ring():
         assert "Query Goal State: false" in rviz
 
 
-def test_real_operator_owns_one_rviz_using_real_preinsert_config():
+def test_real_operator_gives_sole_rviz_to_physical_bringup():
     operator_launch = (
         PACKAGE / "launch" / "real_experiment_operator.launch.py"
     ).read_text()
     preinsert_launch = (
         PACKAGE / "launch" / "real_preinsert_workflow.launch.py"
     ).read_text()
+    rviz_launch = (
+        PACKAGE / "launch" / "real_preinsert_rviz.launch.py"
+    ).read_text()
     assert '"real_preinsert_workflow.launch.py"' in operator_launch
-    assert '"show_rviz": "false"' in operator_launch
-    assert '"show_rviz": LaunchConfiguration("show_rviz")' in operator_launch
-    assert '"real_preinsert_workflow.rviz"' in preinsert_launch
-    assert 'executable="rviz2"' in preinsert_launch
+    assert operator_launch.count('"show_rviz": "false"') == 1
+    assert operator_launch.count(
+        '"show_rviz": LaunchConfiguration("show_rviz")'
+    ) == 1
+    assert '"real_preinsert_rviz.launch.py"' in preinsert_launch
+    assert '"real_preinsert_workflow.rviz"' in rviz_launch
+    assert 'executable="rviz2"' in rviz_launch
+
+
+def test_real_operator_loads_reviewed_table_only_scene():
+    operator_launch = (
+        PACKAGE / "launch" / "real_experiment_operator.launch.py"
+    ).read_text()
+    assert 'FindPackageShare("bookshelf_guarded_control_ros")' in operator_launch
+    assert '"bookshelf_scene_manager.launch.py"' in operator_launch
+    assert '"scene_config": LaunchConfiguration("approved_config")' in operator_launch
+    assert '"table_only": "true"' in operator_launch
 
 
 def test_operator_pose_helper_is_read_only_and_names_both_snapshots():

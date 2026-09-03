@@ -61,6 +61,10 @@ from .operator_action_node import (
     GRIPPER_TRAJECTORY,
     make_gripper_goal,
 )
+from .per_grasp_calibration import (
+    select_eef_book_transform,
+    semantic_held_gripper_observation,
+)
 
 
 @dataclass(frozen=True)
@@ -289,6 +293,8 @@ class SimplePolicyControlNode(Node):
         self.geometry = load_reviewed_policy_geometry(
             self.get_parameter("approved_config").value
         )
+        self.per_grasp_eef_book = None
+        self.per_grasp_diagnostics = None
         self.actor = NumpyActorBundle(self.get_parameter("actor_path").value)
         self.execution_guard = OneShotExecutionGuard()
         self.latest_joint_state = None
@@ -356,6 +362,18 @@ class SimplePolicyControlNode(Node):
             depth=1,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self.create_subscription(
+            PoseStamped,
+            "/bookshelf_simple/per_grasp_eef_book",
+            self._per_grasp_callback,
+            latched,
+        )
+        self.create_subscription(
+            String,
+            "/bookshelf_simple/per_grasp_status",
+            self._per_grasp_status_callback,
+            latched,
         )
         self.debug_publishers = {
             "raw_observation": self.create_publisher(Float32MultiArray, "/bookshelf_simple/policy/raw_observation", 10),
@@ -462,6 +480,7 @@ class SimplePolicyControlNode(Node):
         self.declare_parameter("gripper_action_type", GRIPPER_COMMAND)
         self.declare_parameter("gripper_open_position", 0.0)
         self.declare_parameter("gripper_closed_position", 0.85)
+        self.declare_parameter("policy_held_gripper_open", 0.009838026859259968)
         self.declare_parameter("gripper_max_effort", 0.0)
         self.declare_parameter("gripper_move_duration_s", 0.6)
         self.declare_parameter("gripper_goal_retry_timeout_s", 15.0)
@@ -487,7 +506,7 @@ class SimplePolicyControlNode(Node):
         self.declare_parameter("visualization_hold_s", 60.0)
         self.declare_parameter("retreat_distance_m", 0.09)
         self.declare_parameter("retreat_speed_m_s", 0.05)
-        self.declare_parameter("retreat_timeout_s", 6.0)
+        self.declare_parameter("retreat_timeout_s", 15.0)
         self.declare_parameter("push_book_distance_m", 0.03)
         self.declare_parameter("push_x_uncertainty_m", 0.005)
         self.declare_parameter("push_timeout_s", 90.0)
@@ -499,6 +518,57 @@ class SimplePolicyControlNode(Node):
     def _joint_state_callback(self, message):
         self.latest_joint_state = message
         self.latest_joint_state_ns = self._now_ns()
+
+    def _per_grasp_callback(self, message):
+        if not self.per_grasp_diagnostics or self.per_grasp_diagnostics.get(
+            "source"
+        ) != "per_grasp":
+            return
+        pose = message.pose
+        try:
+            self.per_grasp_eef_book = validated_transform(make_transform(
+                [pose.position.x, pose.position.y, pose.position.z],
+                [pose.orientation.x, pose.orientation.y,
+                 pose.orientation.z, pose.orientation.w],
+            ))
+        except ValueError as error:
+            self.get_logger().warning(
+                f"Ignoring invalid per-grasp EEF->book transform: {error}"
+            )
+            return
+        self.get_logger().info("Using frozen per-grasp EEF->book transform")
+
+    def _per_grasp_status_callback(self, message):
+        try:
+            self.per_grasp_diagnostics = json.loads(message.data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            self.per_grasp_diagnostics = {"source": "invalid_status"}
+        if self.per_grasp_diagnostics.get("source") != "per_grasp":
+            self.per_grasp_eef_book = None
+            return
+        try:
+            self.per_grasp_eef_book = validated_transform(
+                np.asarray(
+                    self.per_grasp_diagnostics["transform_eef_book"],
+                    dtype=np.float64,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            self.per_grasp_eef_book = None
+            self.get_logger().warning(
+                "Per-grasp status did not contain a valid EEF->book transform"
+            )
+
+    def _active_eef_book_transform(self):
+        return select_eef_book_transform(
+            self.per_grasp_eef_book, self.geometry.transform_eef_book
+        )
+
+    def _policy_insert_gripper_open(self, measured_value=None):
+        return semantic_held_gripper_observation(
+            self._gripper_open() if measured_value is None else measured_value,
+            self.get_parameter("policy_held_gripper_open").value,
+        )
 
     def _servo_status_callback(self, message):
         self.latest_servo_status = int(message.data)
@@ -582,19 +652,23 @@ class SimplePolicyControlNode(Node):
             # Joint states can arrive before this node's new TF buffer is primed.
             return
         try:
-            transform_base_book = transform_base_eef @ self.geometry.transform_eef_book
+            transform_base_book = transform_base_eef @ self._active_eef_book_transform()
             transform_base_policy_tool = (
                 transform_base_eef @ self.geometry.transform_eef_policy_tool
             )
             transform_slot_base = invert_transform(self.geometry.transform_base_slot)
             transform_slot_book = transform_slot_base @ transform_base_book
+            measured_gripper_open = self._gripper_open()
+            policy_gripper_open = self._policy_insert_gripper_open(
+                measured_gripper_open
+            )
             raw, observation = compute_policy_observation(
                 transform_slot_book,
                 transform_slot_base @ transform_base_policy_tool,
                 book_size=self.geometry.book_size,
                 slot_depth=self.geometry.slot_depth_m,
                 mode_observation=0.0,
-                gripper_open=self._gripper_open(),
+                gripper_open=policy_gripper_open,
                 scales=self.geometry.observation_scales,
             )
             normalized, actor_mean, action = self.actor.predict(observation)
@@ -644,6 +718,13 @@ class SimplePolicyControlNode(Node):
             "T_base_tcp": _transform_record(transform_base_tcp),
             "T_base_book": _transform_record(transform_base_book),
             "T_slot_book": _transform_record(transform_slot_book),
+            "eef_book_transform_source": (
+                "per_grasp" if self.per_grasp_eef_book is not None else "fixed_fallback"
+            ),
+            "T_eef_book_used": _transform_record(self._active_eef_book_transform()),
+            "per_grasp_diagnostics": self.per_grasp_diagnostics,
+            "measured_gripper_open": measured_gripper_open,
+            "policy_gripper_open": policy_gripper_open,
             "arm_joint_names": joint_names,
             "arm_joint_positions_rad": joint_positions,
             "raw_observation": raw.tolist(),
@@ -744,13 +825,13 @@ class SimplePolicyControlNode(Node):
         self.record["after_T_slot_book"] = _transform_record(
             invert_transform(self.geometry.transform_base_slot)
             @ transform_base_eef
-            @ self.geometry.transform_eef_book
+            @ self._active_eef_book_transform()
         )
         self.record["servo_result"] = "release_requested_no_motion"
         self.record["servo_nonzero_command_count"] = 0
         self._write_record("complete")
         self.released_book_transform = (
-            transform_base_eef @ self.geometry.transform_eef_book
+            transform_base_eef @ self._active_eef_book_transform()
         )
         self._log_phase_event(
             "release_requested",
@@ -1319,10 +1400,10 @@ class SimplePolicyControlNode(Node):
             self.record["after_T_slot_book"] = _transform_record(
                 invert_transform(self.geometry.transform_base_slot)
                 @ after_eef
-                @ self.geometry.transform_eef_book
+                @ self._active_eef_book_transform()
             )
             self._publish_visualization(
-                after_eef @ self.geometry.transform_eef_book,
+                after_eef @ self._active_eef_book_transform(),
                 after_tcp,
                 after_eef @ self.geometry.transform_eef_policy_tool,
             )
@@ -1431,7 +1512,7 @@ class SimplePolicyControlNode(Node):
                     if self.released_book_transform is not None
                     else (
                         _transform_record(
-                            transform_base_eef @ self.geometry.transform_eef_book
+                            transform_base_eef @ self._active_eef_book_transform()
                         )
                         if transform_base_eef is not None
                         else None
@@ -1494,7 +1575,7 @@ class SimplePolicyControlNode(Node):
             payload["final_book_pose_slot"] = _transform_record(
                 invert_transform(self.geometry.transform_base_slot)
                 @ transform_base_eef
-                @ self.geometry.transform_eef_book
+                @ self._active_eef_book_transform()
             )
         self._append_payload(payload)
         status_phase = "failed" if reason == "error" else "rollout_complete"
@@ -1615,6 +1696,11 @@ class SimplePolicyControlNode(Node):
             self._reset_completed_episode()
         self.started = True
         self.phase = "waiting_for_live_state"
+        if self.per_grasp_eef_book is None:
+            self.get_logger().warning(
+                "PER-GRASP EEF->BOOK unavailable; policy will use the explicit "
+                "fixed-transform fallback"
+            )
         if self.shadow_full_sequence:
             self.get_logger().warning("SHADOW: would start PPO insertion")
             self._publish_status("shadow_policy_start", "SHADOW: would start PPO insertion")
@@ -1673,7 +1759,7 @@ class SimplePolicyControlNode(Node):
     def _start_shadow_sequence(self, transform_base_eef, transform_base_tcp):
         """Advance control flow without fabricating robot motion or TF changes."""
 
-        transform_base_book = transform_base_eef @ self.geometry.transform_eef_book
+        transform_base_book = transform_base_eef @ self._active_eef_book_transform()
         retreat_target_xyz = (
             transform_base_eef[:3, 3]
             + self.retreat_direction

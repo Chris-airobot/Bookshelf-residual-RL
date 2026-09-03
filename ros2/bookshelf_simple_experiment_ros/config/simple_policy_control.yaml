@@ -35,6 +35,8 @@ simple_policy_control:
     gripper_action: /xarm_gripper/gripper_action
     gripper_open_position: 0.0
     gripper_closed_position: 0.85
+    # July simulation held/closed semantic used only by the INSERT observation.
+    policy_held_gripper_open: 0.009838026859259968
     gripper_max_effort: 0.0
     gripper_move_duration_s: 0.6
     gripper_goal_retry_timeout_s: 15.0
@@ -42,7 +44,7 @@ simple_policy_control:
 
     retreat_distance_m: 0.09
     retreat_speed_m_s: 0.05
-    retreat_timeout_s: 6.0
+    retreat_timeout_s: 15.0
     push_book_distance_m: 0.03
     push_x_uncertainty_m: 0.005
     push_timeout_s: 90.0

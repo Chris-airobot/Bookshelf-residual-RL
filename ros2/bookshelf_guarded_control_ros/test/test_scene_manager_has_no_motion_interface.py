@@ -32,6 +32,14 @@ def test_launch_exposes_one_physical_configuration_argument():
         "held_book_size_xyz",
     ):
         assert hardware_argument not in source
+    assert 'DeclareLaunchArgument("table_only", default_value="false")' in source
+
+
+def test_table_only_mode_reuses_reviewed_table_without_slot_or_book():
+    source = NODE.read_text(encoding="utf-8")
+    assert 'self.declare_parameter("table_only", False)' in source
+    assert '"TABLE-ONLY mode: applying only the reviewed worktable box."' in source
+    assert 'str(self.get_parameter("table_object_id").value)' in source
 
 
 def test_repository_physical_scene_config_is_fail_closed():

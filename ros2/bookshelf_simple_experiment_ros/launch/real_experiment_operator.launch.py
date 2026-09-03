@@ -18,8 +18,8 @@ def generate_launch_description():
         ])),
         launch_arguments={
             "robot_ip": LaunchConfiguration("robot_ip"),
-            # The preinsert workflow below owns the sole RViz instance.
-            "show_rviz": "false",
+            # The physical xArm/MoveIt bringup owns the sole RViz instance.
+            "show_rviz": LaunchConfiguration("show_rviz"),
         }.items(),
     )
     preinsert = IncludeLaunchDescription(
@@ -29,7 +29,8 @@ def generate_launch_description():
             "real_preinsert_workflow.launch.py",
         ])),
         launch_arguments={
-            "show_rviz": LaunchConfiguration("show_rviz"),
+            "robot_ip": LaunchConfiguration("robot_ip"),
+            "show_rviz": "false",
             "frozen_slot_output": LaunchConfiguration("frozen_slot_output"),
             "allow_execution": LaunchConfiguration("allow_execution"),
             "shadow_full_sequence": LaunchConfiguration("shadow_full_sequence"),
@@ -53,6 +54,17 @@ def generate_launch_description():
             "max_steps": LaunchConfiguration("max_steps"),
             "record_bag": "false",
             "visualization_hold_s": "0.0",
+        }.items(),
+    )
+    table_scene = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([
+            FindPackageShare("bookshelf_guarded_control_ros"),
+            "launch",
+            "bookshelf_scene_manager.launch.py",
+        ])),
+        launch_arguments={
+            "scene_config": LaunchConfiguration("approved_config"),
+            "table_only": "true",
         }.items(),
     )
 
@@ -101,6 +113,7 @@ def generate_launch_description():
             "No motion, gripper, policy, or execution goal is sent automatically."
         )),
         physical,
+        table_scene,
         preinsert,
         policy,
         Node(

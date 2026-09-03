@@ -25,6 +25,7 @@ def _completion_harness(*, rollout=True, total_steps=1, max_steps=150):
         record={"servo_result": "target_reached", "release_requested": False},
         geometry=_geometry(),
         _publish_visualization=Mock(),
+        _active_eef_book_transform=lambda: np.eye(4),
         _arm_joint_positions=Mock(
             return_value=([f"joint{index}" for index in range(1, 8)], [0.0] * 7)
         ),
@@ -79,6 +80,7 @@ def test_rollout_stops_before_motion_when_release_is_requested():
         gripper_retry_start_ns=1,
         gripper_next_attempt_ns=1,
         get_logger=lambda: SimpleNamespace(warning=Mock()),
+        _active_eef_book_transform=lambda: np.eye(4),
     )
     stopped = SimplePolicyControlNode._stop_rollout_for_release(
         harness, True, np.eye(4), np.eye(4)

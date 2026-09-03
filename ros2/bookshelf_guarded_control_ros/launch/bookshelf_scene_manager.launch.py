@@ -4,6 +4,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, LogInfo
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -25,6 +26,7 @@ def generate_launch_description():
                     "and scene-handoff settings."
                 ),
             ),
+            DeclareLaunchArgument("table_only", default_value="false"),
             LogInfo(
                 msg=(
                     "Starting planning-scene-only bookshelf manager. It has no "
@@ -38,7 +40,12 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     LaunchConfiguration("scene_config"),
-                    {"scene_config_path": LaunchConfiguration("scene_config")},
+                    {
+                        "scene_config_path": LaunchConfiguration("scene_config"),
+                        "table_only": ParameterValue(
+                            LaunchConfiguration("table_only"), value_type=bool
+                        ),
+                    },
                 ],
             ),
         ]

@@ -1,8 +1,8 @@
 """Real camera-to-preinsert workflow; expects xArm MoveIt already running."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo
-from launch.conditions import IfCondition
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, LogInfo
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -12,9 +12,6 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     package_share = FindPackageShare("bookshelf_simple_experiment_ros")
     config = PathJoinSubstitution([package_share, "config", "simple_preinsert.yaml"])
-    rviz_config = PathJoinSubstitution([
-        package_share, "rviz", "real_preinsert_workflow.rviz"
-    ])
     image_topic = LaunchConfiguration("image_topic")
     depth_topic = LaunchConfiguration("depth_topic")
     camera_info_topic = LaunchConfiguration("camera_info_topic")
@@ -36,6 +33,7 @@ def generate_launch_description():
             default_value="/tmp/bookshelf_simple_frozen_slot.yaml",
         ),
         DeclareLaunchArgument("show_rviz", default_value="true"),
+        DeclareLaunchArgument("robot_ip", default_value="192.168.1.209"),
         DeclareLaunchArgument("allow_execution", default_value="true"),
         DeclareLaunchArgument("shadow_full_sequence", default_value="false"),
         DeclareLaunchArgument("scan_joint_state_path", default_value=PathJoinSubstitution([
@@ -82,12 +80,13 @@ def generate_launch_description():
                 "loading_joint_state_path": LaunchConfiguration("loading_joint_state_path"),
             }],
         ),
-        Node(
-            package="rviz2",
-            executable="rviz2",
-            name="bookshelf_simple_real_preinsert_rviz",
-            output="screen",
-            arguments=["-d", rviz_config],
-            condition=IfCondition(show_rviz),
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(PathJoinSubstitution([
+                package_share, "launch", "real_preinsert_rviz.launch.py",
+            ])),
+            launch_arguments={
+                "robot_ip": LaunchConfiguration("robot_ip"),
+                "show_rviz": show_rviz,
+            }.items(),
         ),
     ])

@@ -64,6 +64,7 @@ from .moveit_requests import (
 )
 from .execution_gate import hardware_commands_allowed
 from .joint_pose import JOINT_NAMES, load_joint_pose
+from .per_grasp_calibration import robust_average_transforms
 
 
 def _pose_to_transform(pose) -> np.ndarray:
@@ -247,6 +248,10 @@ class SimplePreinsertNode(Node):
         self.direct_check = None
         self.book_detach_pending = False
         self.book_scene_transition_state = "idle"
+        self.per_grasp_samples = []
+        self.per_grasp_capture_active = False
+        self.frozen_eef_book = None
+        self.per_grasp_diagnostics = None
         self.scan_positions = load_joint_pose(
             self.get_parameter("scan_joint_state_path").value
         )
@@ -280,6 +285,12 @@ class SimplePreinsertNode(Node):
         self.status_publisher = self.create_publisher(
             String, "/bookshelf_simple/status", latched
         )
+        self.per_grasp_publisher = self.create_publisher(
+            PoseStamped, "/bookshelf_simple/per_grasp_eef_book", latched
+        )
+        self.per_grasp_status_publisher = self.create_publisher(
+            String, "/bookshelf_simple/per_grasp_status", latched
+        )
 
         self.create_subscription(
             PoseStamped, "/slot_detector/slot_pose", self._slot_pose_callback, 10
@@ -300,6 +311,12 @@ class SimplePreinsertNode(Node):
             String,
             "/bookshelf_simple/policy/status",
             self._policy_status_callback,
+            10,
+        )
+        self.create_subscription(
+            String,
+            "/bookshelf_simple/operator_action_status",
+            self._operator_action_status_callback,
             10,
         )
         self.create_service(
@@ -385,6 +402,13 @@ class SimplePreinsertNode(Node):
             0.7170947434170492, 0.01281329455160485,
             0.6961397093730864, 0.03162994594249451,
         ])
+        self.declare_parameter("book_marker_frame", "target_book_center")
+        self.declare_parameter("per_grasp_min_samples", 20)
+        self.declare_parameter("per_grasp_target_samples", 30)
+        self.declare_parameter("per_grasp_translation_outlier_m", 0.005)
+        self.declare_parameter(
+            "per_grasp_orientation_outlier_rad", math.radians(5.0)
+        )
         self.declare_parameter("book_size_xyz", [0.156, 0.034, 0.236])
         self.declare_parameter("preinsert_standoff_m", 0.030)
         self.declare_parameter("preinsert_vertical_offset_m", 0.006)
@@ -464,6 +488,100 @@ class SimplePreinsertNode(Node):
             self._publish_status("book_scene_transition_verified")
             return
         self._begin_release_detach()
+
+    def _operator_action_status_callback(self, message):
+        try:
+            payload = json.loads(message.data)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return
+        if payload.get("action") != "close" or not bool(payload.get("success")):
+            return
+        self.per_grasp_samples = []
+        self.frozen_eef_book = None
+        self.per_grasp_diagnostics = None
+        self.per_grasp_capture_active = True
+        self.per_grasp_status_publisher.publish(String(data=json.dumps({
+            "source": "collecting", "sample_count": 0,
+        }, sort_keys=True)))
+        self.get_logger().info(
+            "Book grasp complete; collecting stable EEF-to-book marker samples"
+        )
+
+    def _fixed_eef_book(self):
+        return make_transform(
+            self.get_parameter("eef_book_translation_xyz").value,
+            self.get_parameter("eef_book_quaternion_xyzw").value,
+        )
+
+    def _active_eef_book(self):
+        return (
+            self.frozen_eef_book
+            if self.frozen_eef_book is not None
+            else self._fixed_eef_book()
+        )
+
+    def _collect_per_grasp_sample(self):
+        if not self.per_grasp_capture_active:
+            return
+        try:
+            base_eef = self._lookup(self.base_frame, self.eef_frame)
+            base_book = self._lookup(
+                self.base_frame, str(self.get_parameter("book_marker_frame").value)
+            )
+        except (tf2_ros.TransformException, ValueError):
+            return
+        self.per_grasp_samples.append(invert_transform(base_eef) @ base_book)
+        if len(self.per_grasp_samples) >= int(
+            self.get_parameter("per_grasp_target_samples").value
+        ):
+            self._freeze_per_grasp_transform()
+
+    def _freeze_per_grasp_transform(self):
+        if self.frozen_eef_book is not None:
+            return True
+        minimum = int(self.get_parameter("per_grasp_min_samples").value)
+        if len(self.per_grasp_samples) < minimum:
+            return False
+        try:
+            transform, diagnostics = robust_average_transforms(
+                self.per_grasp_samples,
+                self.get_parameter("per_grasp_translation_outlier_m").value,
+                self.get_parameter("per_grasp_orientation_outlier_rad").value,
+            )
+        except ValueError as error:
+            self.get_logger().warning(f"Per-grasp calibration invalid: {error}")
+            return False
+        if int(diagnostics["accepted_count"]) < minimum:
+            self.get_logger().warning(
+                "Per-grasp calibration rejected too many samples: "
+                f"{diagnostics['accepted_count']}/{minimum} required"
+            )
+            return False
+        self.frozen_eef_book = transform
+        self.per_grasp_diagnostics = diagnostics
+        self.per_grasp_capture_active = False
+        message = PoseStamped()
+        message.header.frame_id = self.eef_frame
+        message.header.stamp = self.get_clock().now().to_msg()
+        message.pose = _transform_to_pose(transform)
+        self.per_grasp_publisher.publish(message)
+        report = {
+            "source": "per_grasp",
+            "transform_eef_book": transform.tolist(),
+            **diagnostics,
+        }
+        self.per_grasp_status_publisher.publish(
+            String(data=json.dumps(report, sort_keys=True))
+        )
+        self.get_logger().info(
+            "PER-GRASP EEF->BOOK FROZEN: "
+            f"accepted={diagnostics['accepted_count']} "
+            f"rejected={diagnostics['rejected_count']} "
+            f"translation_rms_mm={diagnostics['translation_rms_m'] * 1000.0:.3f} "
+            f"orientation_rms_deg={math.degrees(diagnostics['orientation_rms_rad']):.3f} "
+            f"{_compact_pose(transform)}"
+        )
+        return True
 
     def _planning_scene_request(self):
         request = GetPlanningScene.Request()
@@ -619,6 +737,7 @@ class SimplePreinsertNode(Node):
         )
 
     def _update_target(self):
+        self._collect_per_grasp_sample()
         if self.frozen_slot is None:
             candidate = self._live_slot_candidate()
             if candidate is None:
@@ -637,10 +756,7 @@ class SimplePreinsertNode(Node):
             base_eef = self._lookup(self.base_frame, self.eef_frame)
             base_tcp = self._lookup(self.base_frame, self.tcp_frame)
             eef_tcp = invert_transform(base_eef) @ base_tcp
-            eef_book = make_transform(
-                self.get_parameter("eef_book_translation_xyz").value,
-                self.get_parameter("eef_book_quaternion_xyzw").value,
-            )
+            eef_book = self._active_eef_book()
             book_size = self.get_parameter("book_size_xyz").value
             target = compute_preinsert_target(
                 base_slot,
@@ -1126,6 +1242,29 @@ class SimplePreinsertNode(Node):
         return None
 
     def _plan_trigger_callback(self, _request, response):
+        newly_frozen = (
+            self.frozen_eef_book is None and self._freeze_per_grasp_transform()
+        )
+        if newly_frozen:
+            # Refresh the Cartesian target with the just-frozen grasp transform.
+            self._update_target()
+        if self.frozen_eef_book is None:
+            self.per_grasp_capture_active = False
+            report = {
+                "source": "fixed_fallback",
+                "sample_count": len(self.per_grasp_samples),
+                "required_count": int(
+                    self.get_parameter("per_grasp_min_samples").value
+                ),
+                "transform_eef_book": self._fixed_eef_book().tolist(),
+            }
+            self.per_grasp_status_publisher.publish(
+                String(data=json.dumps(report, sort_keys=True))
+            )
+            self.get_logger().warning(
+                "PER-GRASP EEF->BOOK unavailable at plan request; explicitly "
+                f"using fixed fallback ({len(self.per_grasp_samples)} valid samples)"
+            )
         error = self._target_error()
         if error:
             response.success = False
@@ -1252,10 +1391,7 @@ class SimplePreinsertNode(Node):
         collision.header.frame_id = self.eef_frame
         collision.id = "bookshelf_simple_held_book"
         collision.primitives = [primitive]
-        collision.primitive_poses = [_transform_to_pose(make_transform(
-            self.get_parameter("eef_book_translation_xyz").value,
-            self.get_parameter("eef_book_quaternion_xyzw").value,
-        ))]
+        collision.primitive_poses = [_transform_to_pose(self._active_eef_book())]
         collision.operation = CollisionObject.ADD
         attached = AttachedCollisionObject()
         attached.link_name = self.eef_frame

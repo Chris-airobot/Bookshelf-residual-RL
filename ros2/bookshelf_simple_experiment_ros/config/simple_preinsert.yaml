@@ -27,6 +27,11 @@ simple_preinsert:
       - 0.01281329455160485
       - 0.6961397093730864
       - 0.03162994594249451
+    book_marker_frame: target_book_center
+    per_grasp_min_samples: 20
+    per_grasp_target_samples: 30
+    per_grasp_translation_outlier_m: 0.005
+    per_grasp_orientation_outlier_rad: 0.08726646259971647
     book_size_xyz: [0.156, 0.034, 0.236]
     preinsert_standoff_m: 0.030
     preinsert_vertical_offset_m: 0.006

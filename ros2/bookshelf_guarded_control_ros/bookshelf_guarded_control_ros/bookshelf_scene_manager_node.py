@@ -60,6 +60,7 @@ class BookshelfSceneManagerNode(Node):
         self._declare_parameters()
         self.base_frame = str(self.get_parameter("base_frame").value)
         self.tcp_frame = str(self.get_parameter("tcp_frame").value)
+        self.table_only = bool(self.get_parameter("table_only").value)
 
         self.latest_slot_pose = None
         self.latest_slot_pose_ns = None
@@ -70,7 +71,11 @@ class BookshelfSceneManagerNode(Node):
         self.current_mode = None
         self.scene_applied = False
         self.apply_pending = False
-        self.last_reason = "waiting for approved hardware measurements and slot pose"
+        self.last_reason = (
+            "waiting to apply reviewed table collision geometry"
+            if self.table_only
+            else "waiting for approved hardware measurements and slot pose"
+        )
 
         self.apply_client = self.create_client(
             ApplyPlanningScene,
@@ -121,15 +126,21 @@ class BookshelfSceneManagerNode(Node):
             "Bookshelf scene manager started without robot motion interfaces. "
             "It can only apply MoveIt collision objects."
         )
-        self.get_logger().warning(
-            "Local insertion removes the coarse bookshelf keep-out only after "
-            "an explicit service request and all configured gates pass."
-        )
+        if self.table_only:
+            self.get_logger().warning(
+                "TABLE-ONLY mode: applying only the reviewed worktable box."
+            )
+        else:
+            self.get_logger().warning(
+                "Local insertion removes the coarse bookshelf keep-out only after "
+                "an explicit service request and all configured gates pass."
+            )
 
     def _declare_parameters(self):
         self.declare_parameter("base_frame", "link_base")
         self.declare_parameter("tcp_frame", "link_tcp")
         self.declare_parameter("scene_config_path", "")
+        self.declare_parameter("table_only", False)
         self.declare_parameter("hardware_measurements_confirmed", False)
         self.declare_parameter("allow_local_insertion", False)
         self.declare_parameter("apply_planning_scene_service", "/apply_planning_scene")
@@ -233,6 +244,22 @@ class BookshelfSceneManagerNode(Node):
     def _global_input_error(self) -> str | None:
         if not bool(self.get_parameter("hardware_measurements_confirmed").value):
             return "hardware measurements are not confirmed"
+        if self.table_only:
+            if not bool(self.get_parameter("table_enabled").value):
+                return "table-only mode requires table_enabled"
+            try:
+                configured_box(
+                    frame_id=self.base_frame,
+                    size_xyz=self.get_parameter("table_box_size_xyz").value,
+                    center_xyz=self.get_parameter("table_box_center_base_xyz").value,
+                    quaternion_xyzw=self.get_parameter(
+                        "table_box_quaternion_base_xyzw"
+                    ).value,
+                    label="table_box",
+                )
+            except ValueError as exception:
+                return f"invalid table geometry: {exception}"
+            return None
         if self.latest_slot_pose is None:
             return "approved static slot pose is unavailable"
         if not self._fresh(
@@ -258,6 +285,8 @@ class BookshelfSceneManagerNode(Node):
         return None
 
     def _held_book_pose_check_error(self) -> str | None:
+        if self.table_only:
+            return None
         if not bool(self.get_parameter("require_held_book_pose_check").value):
             return None
         if self.latest_held_book_pose_check_ns is None:
@@ -272,6 +301,12 @@ class BookshelfSceneManagerNode(Node):
         return None
 
     def _set_local_insertion_callback(self, request, response):
+        if self.table_only:
+            response.success = False
+            response.message = "local insertion mode is unavailable in table-only mode"
+            self.last_reason = response.message
+            self._publish_status()
+            return response
         if not request.data:
             error = self._global_input_error()
             if error:
@@ -369,6 +404,28 @@ class BookshelfSceneManagerNode(Node):
         return True
 
     def _planning_scene(self, mode: str) -> PlanningScene:
+        table = configured_box(
+            frame_id=self.base_frame,
+            size_xyz=self.get_parameter("table_box_size_xyz").value,
+            center_xyz=self.get_parameter("table_box_center_base_xyz").value,
+            quaternion_xyzw=self.get_parameter(
+                "table_box_quaternion_base_xyzw"
+            ).value,
+            label="table_box",
+        )
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.robot_state.is_diff = True
+        if self.table_only:
+            scene.world.collision_objects.append(
+                self._collision_object(
+                    str(self.get_parameter("table_object_id").value),
+                    table,
+                    operation=CollisionObject.ADD,
+                )
+            )
+            return scene
+
         if self.latest_slot_pose is None:
             raise ValueError("slot pose is unavailable")
         transform_base_slot = _pose_to_transform(self.latest_slot_pose.pose)
@@ -386,30 +443,7 @@ class BookshelfSceneManagerNode(Node):
                 self.get_parameter("shelf_bottom_height_base_m").value
             ),
         )
-        table = configured_box(
-            frame_id=self.base_frame,
-            size_xyz=self.get_parameter("table_box_size_xyz").value,
-            center_xyz=self.get_parameter("table_box_center_base_xyz").value,
-            quaternion_xyzw=self.get_parameter(
-                "table_box_quaternion_base_xyzw"
-            ).value,
-            label="table_box",
-        )
-        held_book = configured_box(
-            frame_id=self.tcp_frame,
-            size_xyz=self.get_parameter("held_book_size_xyz").value,
-            center_xyz=self.get_parameter("held_book_center_tcp_xyz").value,
-            quaternion_xyzw=self.get_parameter(
-                "held_book_quaternion_tcp_xyzw"
-            ).value,
-            label="held_book",
-        )
-
-        scene = PlanningScene()
-        scene.is_diff = True
-        scene.robot_state.is_diff = True
-
-        shelf_object = self._collision_object(
+        scene.world.collision_objects.append(self._collision_object(
             str(self.get_parameter("shelf_object_id").value),
             shelf,
             operation=(
@@ -417,8 +451,7 @@ class BookshelfSceneManagerNode(Node):
                 if mode == GLOBAL_APPROACH
                 else CollisionObject.REMOVE
             ),
-        )
-        scene.world.collision_objects.append(shelf_object)
+        ))
         if bool(self.get_parameter("table_enabled").value):
             scene.world.collision_objects.append(
                 self._collision_object(
@@ -428,6 +461,15 @@ class BookshelfSceneManagerNode(Node):
                 )
             )
         if bool(self.get_parameter("held_book_enabled").value):
+            held_book = configured_box(
+                frame_id=self.tcp_frame,
+                size_xyz=self.get_parameter("held_book_size_xyz").value,
+                center_xyz=self.get_parameter("held_book_center_tcp_xyz").value,
+                quaternion_xyzw=self.get_parameter(
+                    "held_book_quaternion_tcp_xyzw"
+                ).value,
+                label="held_book",
+            )
             attached = AttachedCollisionObject()
             attached.link_name = self.tcp_frame
             attached.touch_links = [
@@ -479,6 +521,7 @@ class BookshelfSceneManagerNode(Node):
             "schema_version": 1,
             "generated_at": datetime.now().astimezone().isoformat(),
             "mode": mode,
+            "table_only": self.table_only,
             "scene_applied": self.scene_applied,
             "apply_pending": self.apply_pending,
             "hardware_measurements_confirmed": bool(
@@ -544,7 +587,9 @@ class BookshelfSceneManagerNode(Node):
             },
             "objects": {
                 "bookshelf_keepout": bool(
-                    self.scene_applied and mode == GLOBAL_APPROACH
+                    self.scene_applied
+                    and not self.table_only
+                    and mode == GLOBAL_APPROACH
                 ),
                 "table": bool(
                     self.scene_applied
@@ -552,6 +597,7 @@ class BookshelfSceneManagerNode(Node):
                 ),
                 "held_book": bool(
                     self.scene_applied
+                    and not self.table_only
                     and self.get_parameter("held_book_enabled").value
                 ),
             },
