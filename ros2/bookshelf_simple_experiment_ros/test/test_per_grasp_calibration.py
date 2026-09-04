@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from bookshelf_simple_experiment_ros.per_grasp_calibration import (
+    FreshMarkerSampleGate,
     robust_average_transforms,
     select_eef_book_transform,
     semantic_held_gripper_observation,
@@ -49,3 +50,63 @@ def test_semantic_gripper_mapping_preserves_measurement_only_for_diagnostics():
     )
     with pytest.raises(ValueError):
         semantic_held_gripper_observation(0.388235, 1.1)
+
+
+def test_stale_cached_transform_is_rejected_on_every_read():
+    gate = FreshMarkerSampleGate(0.25)
+    for index in range(30):
+        assert not gate.accept(8_123_000_000, 10_000_000_000 + index * 100_000_000)
+    diagnostics = gate.diagnostics(12_000_000_000)
+    assert diagnostics["unique_fresh_samples"] == 0
+    assert diagnostics["stale_samples_rejected"] == 30
+
+
+def test_repeated_fresh_timestamp_counts_only_once():
+    gate = FreshMarkerSampleGate(0.25)
+    stamp = 10_000_000_000
+    assert gate.accept(stamp, stamp + 10_000_000)
+    for index in range(29):
+        assert not gate.accept(stamp, stamp + 20_000_000 + index * 1_000_000)
+    diagnostics = gate.diagnostics(stamp + 100_000_000)
+    assert diagnostics["unique_fresh_samples"] == 1
+    assert diagnostics["duplicate_samples_rejected"] == 29
+
+
+def test_enough_fresh_unique_samples_pass_minimum():
+    gate = FreshMarkerSampleGate(0.25)
+    for index in range(20):
+        stamp = 10_000_000_000 + index * 100_000_000
+        assert gate.accept(stamp, stamp + 20_000_000)
+    gate.require_minimum(20)
+    diagnostics = gate.diagnostics(stamp + 20_000_000)
+    assert diagnostics["unique_fresh_samples"] == 20
+    assert diagnostics["minimum_marker_age_at_read_s"] == pytest.approx(0.02)
+    assert diagnostics["maximum_marker_age_at_read_s"] == pytest.approx(0.02)
+    assert diagnostics["newest_accepted_sample_age_s"] == pytest.approx(0.02)
+    assert diagnostics["oldest_accepted_sample_age_s"] == pytest.approx(1.92)
+
+
+def test_mixed_samples_count_only_fresh_unique_timestamps():
+    gate = FreshMarkerSampleGate(0.25)
+    now = 20_000_000_000
+    fresh = [now - 10_000_000, now - 20_000_000, now - 30_000_000]
+    for stamp in fresh:
+        assert gate.accept(stamp, now)
+    assert not gate.accept(fresh[0], now)
+    assert not gate.accept(now - 1_000_000_000, now)
+    gate.reject_lookup()
+    diagnostics = gate.diagnostics()
+    assert diagnostics["total_reads_attempted"] == 6
+    assert diagnostics["unique_fresh_samples"] == 3
+    assert diagnostics["duplicate_samples_rejected"] == 1
+    assert diagnostics["stale_samples_rejected"] == 1
+    assert diagnostics["lookup_samples_rejected"] == 1
+
+
+def test_insufficient_fresh_unique_samples_fail_requirement():
+    gate = FreshMarkerSampleGate(0.25)
+    for index in range(19):
+        stamp = 10_000_000_000 + index * 10_000_000
+        assert gate.accept(stamp, stamp + 5_000_000)
+    with pytest.raises(ValueError, match="19/20 required"):
+        gate.require_minimum(20)

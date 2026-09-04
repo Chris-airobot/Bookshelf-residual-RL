@@ -1,6 +1,7 @@
 simple_policy_control:
   ros__parameters:
     approved_config: /home/riot/BookshelfFiles/experiment_configs/stationary_approved_53e7fe80d56d_20260819_142355/trial_static_slot.yaml
+    frozen_slot_config: ""
     actor_path: /home/riot/BookshelfFiles/trained_models/bookshelf_residual_2026-07-08_shadow_actor.npz
     execute: false
     shadow_full_sequence: false

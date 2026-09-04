@@ -46,6 +46,7 @@ def generate_launch_description():
         ])),
         launch_arguments={
             "approved_config": LaunchConfiguration("approved_config"),
+            "frozen_slot_config": LaunchConfiguration("frozen_slot_output"),
             "actor_path": LaunchConfiguration("actor_path"),
             "execute": LaunchConfiguration("allow_execution"),
             "shadow_full_sequence": LaunchConfiguration("shadow_full_sequence"),

@@ -72,6 +72,7 @@ def _launch_setup(context):
         output="screen",
         parameters=[config, {
             "approved_config": LaunchConfiguration("approved_config"),
+            "frozen_slot_config": LaunchConfiguration("frozen_slot_config"),
             "actor_path": LaunchConfiguration("actor_path"),
             "run_dir": str(run_dir),
             "execute": ParameterValue(LaunchConfiguration("execute"), value_type=bool),
@@ -130,6 +131,7 @@ def generate_launch_description():
                 "bookshelf_residual_2026-07-08_shadow_actor.npz"
             ),
         ),
+        DeclareLaunchArgument("frozen_slot_config", default_value=""),
         DeclareLaunchArgument("execute", default_value="false"),
         DeclareLaunchArgument("shadow_full_sequence", default_value="false"),
         DeclareLaunchArgument("wait_for_start", default_value="false"),

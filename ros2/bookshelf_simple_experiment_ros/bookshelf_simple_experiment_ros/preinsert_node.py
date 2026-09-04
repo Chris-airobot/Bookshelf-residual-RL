@@ -64,7 +64,7 @@ from .moveit_requests import (
 )
 from .execution_gate import hardware_commands_allowed
 from .joint_pose import JOINT_NAMES, load_joint_pose
-from .per_grasp_calibration import robust_average_transforms
+from .per_grasp_calibration import FreshMarkerSampleGate, robust_average_transforms
 
 
 def _pose_to_transform(pose) -> np.ndarray:
@@ -250,8 +250,12 @@ class SimplePreinsertNode(Node):
         self.book_scene_transition_state = "idle"
         self.per_grasp_samples = []
         self.per_grasp_capture_active = False
+        self.per_grasp_capture_requested = False
         self.frozen_eef_book = None
         self.per_grasp_diagnostics = None
+        self.per_grasp_sample_gate = FreshMarkerSampleGate(
+            self.get_parameter("per_grasp_marker_max_age_s").value
+        )
         self.scan_positions = load_joint_pose(
             self.get_parameter("scan_joint_state_path").value
         )
@@ -405,6 +409,7 @@ class SimplePreinsertNode(Node):
         self.declare_parameter("book_marker_frame", "target_book_center")
         self.declare_parameter("per_grasp_min_samples", 20)
         self.declare_parameter("per_grasp_target_samples", 30)
+        self.declare_parameter("per_grasp_marker_max_age_s", 0.25)
         self.declare_parameter("per_grasp_translation_outlier_m", 0.005)
         self.declare_parameter(
             "per_grasp_orientation_outlier_rad", math.radians(5.0)
@@ -497,11 +502,14 @@ class SimplePreinsertNode(Node):
         if payload.get("action") != "close" or not bool(payload.get("success")):
             return
         self.per_grasp_samples = []
+        self.per_grasp_sample_gate.reset()
+        self.per_grasp_capture_requested = True
         self.frozen_eef_book = None
         self.per_grasp_diagnostics = None
         self.per_grasp_capture_active = True
         self.per_grasp_status_publisher.publish(String(data=json.dumps({
             "source": "collecting", "sample_count": 0,
+            **self.per_grasp_sample_gate.diagnostics(),
         }, sort_keys=True)))
         self.get_logger().info(
             "Book grasp complete; collecting stable EEF-to-book marker samples"
@@ -525,23 +533,60 @@ class SimplePreinsertNode(Node):
             return
         try:
             base_eef = self._lookup(self.base_frame, self.eef_frame)
-            base_book = self._lookup(
+            book_message = self._lookup_message(
                 self.base_frame, str(self.get_parameter("book_marker_frame").value)
             )
         except (tf2_ros.TransformException, ValueError):
+            self.per_grasp_sample_gate.reject_lookup()
+            self._finish_per_grasp_capture_window_if_needed()
             return
+        marker_stamp_ns = Time.from_msg(book_message.header.stamp).nanoseconds
+        if not self.per_grasp_sample_gate.accept(marker_stamp_ns, self._now_ns()):
+            self._finish_per_grasp_capture_window_if_needed()
+            return
+        base_book = _transform_message_to_matrix(book_message)
         self.per_grasp_samples.append(invert_transform(base_eef) @ base_book)
-        if len(self.per_grasp_samples) >= int(
-            self.get_parameter("per_grasp_target_samples").value
-        ):
+        self._finish_per_grasp_capture_window_if_needed()
+
+    def _finish_per_grasp_capture_window_if_needed(self):
+        target = int(self.get_parameter("per_grasp_target_samples").value)
+        if (self.per_grasp_sample_gate.accepted_count >= target
+                or self.per_grasp_sample_gate.total_reads_attempted >= target):
             self._freeze_per_grasp_transform()
+
+    def _fail_per_grasp_transform(self, reason):
+        self.frozen_eef_book = None
+        self.per_grasp_capture_active = False
+        diagnostics = {
+            "source": "calibration_failed",
+            "result": "FAIL",
+            "reason": str(reason),
+            "required_count": int(self.get_parameter("per_grasp_min_samples").value),
+            **self.per_grasp_sample_gate.diagnostics(self._now_ns()),
+        }
+        self.per_grasp_diagnostics = diagnostics
+        self.per_grasp_status_publisher.publish(
+            String(data=json.dumps(diagnostics, sort_keys=True))
+        )
+        self.get_logger().error(
+            "PER-GRASP EEF->BOOK CALIBRATION FAIL: "
+            f"{reason}; reads={diagnostics['total_reads_attempted']} "
+            f"fresh_unique={diagnostics['unique_fresh_samples']} "
+            f"duplicate={diagnostics['duplicate_samples_rejected']} "
+            f"stale={diagnostics['stale_samples_rejected']} "
+            f"accepted_age_s=[{diagnostics['newest_accepted_sample_age_s']},"
+            f"{diagnostics['oldest_accepted_sample_age_s']}]"
+        )
+        return False
 
     def _freeze_per_grasp_transform(self):
         if self.frozen_eef_book is not None:
             return True
         minimum = int(self.get_parameter("per_grasp_min_samples").value)
-        if len(self.per_grasp_samples) < minimum:
-            return False
+        try:
+            self.per_grasp_sample_gate.require_minimum(minimum)
+        except ValueError as error:
+            return self._fail_per_grasp_transform(error)
         try:
             transform, diagnostics = robust_average_transforms(
                 self.per_grasp_samples,
@@ -549,15 +594,18 @@ class SimplePreinsertNode(Node):
                 self.get_parameter("per_grasp_orientation_outlier_rad").value,
             )
         except ValueError as error:
-            self.get_logger().warning(f"Per-grasp calibration invalid: {error}")
-            return False
+            return self._fail_per_grasp_transform(f"robust averaging invalid: {error}")
         if int(diagnostics["accepted_count"]) < minimum:
-            self.get_logger().warning(
-                "Per-grasp calibration rejected too many samples: "
+            return self._fail_per_grasp_transform(
+                "robust averaging rejected too many samples: "
                 f"{diagnostics['accepted_count']}/{minimum} required"
             )
-            return False
         self.frozen_eef_book = transform
+        diagnostics = {
+            **diagnostics,
+            **self.per_grasp_sample_gate.diagnostics(self._now_ns()),
+            "result": "PASS",
+        }
         self.per_grasp_diagnostics = diagnostics
         self.per_grasp_capture_active = False
         message = PoseStamped()
@@ -575,6 +623,12 @@ class SimplePreinsertNode(Node):
         )
         self.get_logger().info(
             "PER-GRASP EEF->BOOK FROZEN: "
+            f"reads={diagnostics['total_reads_attempted']} "
+            f"fresh_unique={diagnostics['unique_fresh_samples']} "
+            f"duplicate={diagnostics['duplicate_samples_rejected']} "
+            f"stale={diagnostics['stale_samples_rejected']} "
+            f"accepted_age_s=[{diagnostics['newest_accepted_sample_age_s']:.3f},"
+            f"{diagnostics['oldest_accepted_sample_age_s']:.3f}] "
             f"accepted={diagnostics['accepted_count']} "
             f"rejected={diagnostics['rejected_count']} "
             f"translation_rms_mm={diagnostics['translation_rms_m'] * 1000.0:.3f} "
@@ -703,9 +757,11 @@ class SimplePreinsertNode(Node):
         self._publish_status("book_scene_transition_verified")
 
     def _lookup(self, parent, child):
+        return _transform_message_to_matrix(self._lookup_message(parent, child))
+
+    def _lookup_message(self, parent, child):
         timeout = Duration(seconds=float(self.get_parameter("tf_lookup_timeout_s").value))
-        message = self.tf_buffer.lookup_transform(parent, child, Time(), timeout=timeout)
-        return _transform_message_to_matrix(message)
+        return self.tf_buffer.lookup_transform(parent, child, Time(), timeout=timeout)
 
     def _live_slot_candidate(self):
         if not self._fresh(self.latest_slot_receive_ns):
@@ -1243,12 +1299,22 @@ class SimplePreinsertNode(Node):
 
     def _plan_trigger_callback(self, _request, response):
         newly_frozen = (
-            self.frozen_eef_book is None and self._freeze_per_grasp_transform()
+            self.per_grasp_capture_active
+            and self.frozen_eef_book is None
+            and self._freeze_per_grasp_transform()
         )
         if newly_frozen:
             # Refresh the Cartesian target with the just-frozen grasp transform.
             self._update_target()
         if self.frozen_eef_book is None:
+            if self.per_grasp_capture_requested:
+                reason = (
+                    self.per_grasp_diagnostics or {}
+                ).get("reason", "per-grasp calibration did not produce a transform")
+                response.success = False
+                response.message = f"per-grasp calibration failed: {reason}; press C to retry"
+                self._publish_status("rejected", reason=response.message)
+                return response
             self.per_grasp_capture_active = False
             report = {
                 "source": "fixed_fallback",

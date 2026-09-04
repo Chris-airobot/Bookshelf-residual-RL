@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One INSERT policy step or a closed-loop INSERT rollout from live xArm state."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 import json
 import math
@@ -65,6 +65,7 @@ from .per_grasp_calibration import (
     select_eef_book_transform,
     semantic_held_gripper_observation,
 )
+from .saved_slot_node import load_saved_slot
 
 
 @dataclass(frozen=True)
@@ -293,6 +294,7 @@ class SimplePolicyControlNode(Node):
         self.geometry = load_reviewed_policy_geometry(
             self.get_parameter("approved_config").value
         )
+        self.policy_slot_source = "approved_config"
         self.per_grasp_eef_book = None
         self.per_grasp_diagnostics = None
         self.actor = NumpyActorBundle(self.get_parameter("actor_path").value)
@@ -461,6 +463,7 @@ class SimplePolicyControlNode(Node):
             "/home/riot/BookshelfFiles/trained_models/"
             "bookshelf_residual_2026-07-08_shadow_actor.npz",
         )
+        self.declare_parameter("frozen_slot_config", "")
         self.declare_parameter("run_dir", "")
         self.declare_parameter("execute", False)
         self.declare_parameter("shadow_full_sequence", False)
@@ -1693,6 +1696,14 @@ class SimplePolicyControlNode(Node):
                 response.success = False
                 response.message = "policy sequence has already started"
                 return response
+        try:
+            self._activate_frozen_policy_slot()
+        except (OSError, ValueError) as error:
+            response.success = False
+            response.message = f"accepted frozen slot is unavailable or invalid: {error}"
+            self.get_logger().error(response.message)
+            return response
+        if self.started:
             self._reset_completed_episode()
         self.started = True
         self.phase = "waiting_for_live_state"
@@ -1713,6 +1724,38 @@ class SimplePolicyControlNode(Node):
             else "PPO insertion rollout started"
         )
         return response
+
+    def _activate_frozen_policy_slot(self):
+        """Snapshot the operator-accepted slot as this policy cycle's geometry."""
+
+        configured = str(self.get_parameter("frozen_slot_config").value).strip()
+        if not configured:
+            return
+        path = Path(configured).expanduser().resolve()
+        slot = load_saved_slot(path)
+        if slot.base_frame != self.base_frame:
+            raise ValueError(
+                f"frozen slot frame {slot.base_frame!r} does not match "
+                f"policy base frame {self.base_frame!r}"
+            )
+        transform_base_slot = validated_transform(make_transform(
+            slot.translation_xyz, slot.quaternion_xyzw
+        ))
+        self.geometry = replace(
+            self.geometry,
+            transform_base_slot=transform_base_slot.copy(),
+            slot_width_m=float(slot.width_m),
+        )
+        self.retreat_direction = -transform_base_slot[:3, 0].copy()
+        self.retreat_direction /= np.linalg.norm(self.retreat_direction)
+        self.policy_slot_source = f"frozen_accepted:{path}"
+        record = _transform_record(transform_base_slot)
+        self.get_logger().warning(
+            "POLICY SLOT SNAPSHOT "
+            f"source={self.policy_slot_source} "
+            f"xyz={record['translation_xyz']} "
+            f"quaternion_xyzw={record['quaternion_xyzw']}"
+        )
 
     def _reset_completed_episode(self):
         """Re-arm only volatile rollout state after a completed episode."""

@@ -7,6 +7,83 @@ import math
 import numpy as np
 
 
+class FreshMarkerSampleGate:
+    """Count only fresh, uniquely timestamped marker observations."""
+
+    def __init__(self, maximum_age_s):
+        maximum_age = float(maximum_age_s)
+        if not math.isfinite(maximum_age) or maximum_age <= 0.0:
+            raise ValueError("marker maximum age must be finite and positive")
+        self.maximum_age_s = maximum_age
+        self.reset()
+
+    def reset(self):
+        self.total_reads_attempted = 0
+        self.duplicate_samples_rejected = 0
+        self.stale_samples_rejected = 0
+        self.lookup_samples_rejected = 0
+        self._accepted_stamps_ns = set()
+        self._accepted_ages_s = []
+
+    def reject_lookup(self):
+        self.total_reads_attempted += 1
+        self.lookup_samples_rejected += 1
+
+    def accept(self, stamp_ns, now_ns):
+        """Return True only once for a nonzero marker stamp within the age limit."""
+        self.total_reads_attempted += 1
+        stamp = int(stamp_ns)
+        age_s = (int(now_ns) - stamp) * 1.0e-9
+        if (
+            stamp <= 0
+            or not math.isfinite(age_s)
+            or not 0.0 <= age_s <= self.maximum_age_s
+        ):
+            self.stale_samples_rejected += 1
+            return False
+        if stamp in self._accepted_stamps_ns:
+            self.duplicate_samples_rejected += 1
+            return False
+        self._accepted_stamps_ns.add(stamp)
+        self._accepted_ages_s.append(age_s)
+        return True
+
+    @property
+    def accepted_count(self):
+        return len(self._accepted_stamps_ns)
+
+    def require_minimum(self, minimum_samples):
+        minimum = int(minimum_samples)
+        if self.accepted_count < minimum:
+            raise ValueError(
+                "insufficient fresh unique marker samples: "
+                f"{self.accepted_count}/{minimum} required"
+            )
+
+    def diagnostics(self, now_ns=None):
+        newest_age_s = None
+        oldest_age_s = None
+        if self._accepted_stamps_ns and now_ns is not None:
+            newest_age_s = (int(now_ns) - max(self._accepted_stamps_ns)) * 1.0e-9
+            oldest_age_s = (int(now_ns) - min(self._accepted_stamps_ns)) * 1.0e-9
+        return {
+            "total_reads_attempted": int(self.total_reads_attempted),
+            "unique_fresh_samples": int(self.accepted_count),
+            "duplicate_samples_rejected": int(self.duplicate_samples_rejected),
+            "stale_samples_rejected": int(self.stale_samples_rejected),
+            "lookup_samples_rejected": int(self.lookup_samples_rejected),
+            "newest_accepted_sample_age_s": newest_age_s,
+            "oldest_accepted_sample_age_s": oldest_age_s,
+            "minimum_marker_age_at_read_s": (
+                float(min(self._accepted_ages_s)) if self._accepted_ages_s else None
+            ),
+            "maximum_marker_age_at_read_s": (
+                float(max(self._accepted_ages_s)) if self._accepted_ages_s else None
+            ),
+            "marker_max_age_s": float(self.maximum_age_s),
+        }
+
+
 def select_eef_book_transform(per_grasp, fixed):
     """Select the frozen transform, or the explicit reviewed fallback."""
     return np.asarray(fixed if per_grasp is None else per_grasp, dtype=np.float64)
