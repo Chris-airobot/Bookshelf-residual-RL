@@ -31,7 +31,7 @@ from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.utils import math as math_utils
 
 from .bookshelf_residual_env_cfg import BookshelfEnvCfg
-from .bookshelf_env_v4 import _MODE_INSERT, _MODE_PUSH, _MODE_SCRIPTED, _wrap_to_pi
+from .bookshelf_env_v4 import _MODE_INSERT, _MODE_PUSH, _MODE_SCRIPTED, _wrap_to_pi, _yaw_from_quat_wxyz
 from .bookshelf_env_v5 import BookshelfEnv as BookshelfEnvV5
 
 
@@ -228,6 +228,9 @@ class BookshelfEnv(BookshelfEnvV5):
         )
         if not math.isfinite(premature_release_penalty) or premature_release_penalty < 0.0:
             raise ValueError("premature_release_penalty must be finite and non-negative")
+        release_objective = str(getattr(self.cfg, "release_training_objective", "original"))
+        if release_objective not in ("original", "smooth_readiness"):
+            raise ValueError("release_training_objective must be 'original' or 'smooth_readiness'")
         self._raw_policy_release_request = torch.zeros(
             self.num_envs, dtype=torch.bool, device=self.device
         )
@@ -236,6 +239,98 @@ class BookshelfEnv(BookshelfEnvV5):
         )
         self._validate_reset_acceptance_configuration()
         self._cleanup_legacy_debug_visuals()
+        self._initialize_targeted_dr_buffers()
+
+    def _initialize_targeted_dr_buffers(self) -> None:
+        """Allocate episode-constant training nuisance without touching simulation state."""
+        self._policy_book_translation_bias_env = torch.zeros(
+            (self.num_envs, 3), device=self.device, dtype=torch.float32
+        )
+        self._policy_book_rpy_bias_env = torch.zeros(
+            (self.num_envs, 3), device=self.device, dtype=torch.float32
+        )
+        self._insert_gripper_observation_env = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.float32
+        )
+        self._insert_action_realization_scale_env = torch.ones(
+            self.num_envs, device=self.device, dtype=torch.float32
+        )
+        self._sample_targeted_dr(self._env_ids)
+
+    def _sample_targeted_dr(self, env_ids_t: torch.Tensor) -> None:
+        """Sample one fixed nuisance realization for each newly reset episode."""
+        count = int(env_ids_t.numel())
+        if count == 0:
+            return
+
+        dr_scale = 1.0
+        if bool(getattr(self.cfg, "enable_targeted_dr_curriculum", False)):
+            total = max(1.0, float(getattr(self.cfg, "targeted_dr_curriculum_total_steps", 1)))
+            initial = float(getattr(self.cfg, "targeted_dr_curriculum_initial_scale", 0.25))
+            if not 0.0 <= initial <= 1.0:
+                raise ValueError("targeted_dr_curriculum_initial_scale must be within [0, 1]")
+            progress = min(1.0, max(0.0, float(getattr(self, "common_step_counter", 0)) / total))
+            dr_scale = initial + (1.0 - initial) * progress
+
+        def sample_bounds(min_name: str, max_name: str, width: int) -> torch.Tensor:
+            lower = torch.as_tensor(getattr(self.cfg, min_name), device=self.device, dtype=torch.float32)
+            upper = torch.as_tensor(getattr(self.cfg, max_name), device=self.device, dtype=torch.float32)
+            if lower.shape != (width,) or upper.shape != (width,) or torch.any(lower > upper):
+                raise ValueError(f"{min_name}/{max_name} must be ordered length-{width} bounds")
+            lower = lower * dr_scale
+            upper = upper * dr_scale
+            return lower + (upper - lower) * torch.rand((count, width), device=self.device)
+
+        if bool(getattr(self.cfg, "enable_policy_book_observation_bias", False)):
+            self._policy_book_translation_bias_env[env_ids_t] = sample_bounds(
+                "policy_book_observation_translation_bias_min",
+                "policy_book_observation_translation_bias_max",
+                3,
+            )
+            self._policy_book_rpy_bias_env[env_ids_t] = sample_bounds(
+                "policy_book_observation_rpy_bias_min",
+                "policy_book_observation_rpy_bias_max",
+                3,
+            )
+        else:
+            self._policy_book_translation_bias_env[env_ids_t] = 0.0
+            self._policy_book_rpy_bias_env[env_ids_t] = 0.0
+
+        if bool(getattr(self.cfg, "enable_insert_gripper_observation_nuisance", False)):
+            lower = float(self.cfg.insert_gripper_observation_min)
+            upper = float(self.cfg.insert_gripper_observation_max)
+            if not (0.0 <= lower <= upper <= 1.0):
+                raise ValueError("INSERT gripper observation bounds must satisfy 0 <= min <= max <= 1")
+            deterministic = tuple(
+                float(value)
+                for value in getattr(self.cfg, "insert_gripper_observation_deterministic_values", ())
+            )
+            if deterministic:
+                values = torch.as_tensor(deterministic, device=self.device, dtype=torch.float32)
+                if torch.any((values < 0.0) | (values > 1.0)):
+                    raise ValueError("deterministic INSERT gripper observations must be within [0, 1]")
+                scenario_ids = self._scenario_bank_index_env[env_ids_t]
+                deterministic_ids = torch.where(scenario_ids >= 0, scenario_ids, env_ids_t)
+                self._insert_gripper_observation_env[env_ids_t] = values[deterministic_ids % len(values)]
+            else:
+                lower *= dr_scale
+                upper *= dr_scale
+                self._insert_gripper_observation_env[env_ids_t] = lower + (upper - lower) * torch.rand(
+                    count, device=self.device
+                )
+        else:
+            self._insert_gripper_observation_env[env_ids_t] = 0.0
+
+        if bool(getattr(self.cfg, "enable_insert_action_realization_dr", False)):
+            lower = float(self.cfg.insert_action_realization_scale_min)
+            upper = float(self.cfg.insert_action_realization_scale_max)
+            if not (0.0 < lower <= upper <= 1.0):
+                raise ValueError("INSERT realization scale bounds must satisfy 0 < min <= max <= 1")
+            self._insert_action_realization_scale_env[env_ids_t] = lower + (upper - lower) * torch.rand(
+                count, device=self.device
+            )
+        else:
+            self._insert_action_realization_scale_env[env_ids_t] = 1.0
 
     def _validate_reset_acceptance_configuration(self) -> None:
         if not bool(getattr(self.cfg, "enable_reset_acceptance_gate", False)):
@@ -925,6 +1020,62 @@ class BookshelfEnv(BookshelfEnvV5):
         if bool(getattr(self.cfg, "enable_constructive_grasp_reset", False)):
             self._refresh_state_after_reset_acceptance(env_ids_t)
         self._apply_reset_acceptance_gate(env_ids_t)
+        if hasattr(self, "_policy_book_translation_bias_env"):
+            self._sample_targeted_dr(env_ids_t)
+
+    def _get_observations(self) -> dict:
+        """Return the original 12-D observation, optionally with training-only nuisance."""
+        obs = super()._get_observations()
+        policy_obs = obs["policy"]
+
+        if bool(getattr(self.cfg, "enable_policy_book_observation_bias", False)):
+            estimated_pos = self._book_pos_env() + self._policy_book_translation_bias_env
+            true_quat = self.book.data.root_link_quat_w
+            roll, pitch, yaw = self._policy_book_rpy_bias_env.unbind(dim=-1)
+            bias_quat = math_utils.quat_from_euler_xyz(roll, pitch, yaw)
+            estimated_quat = math_utils.quat_mul(bias_quat, true_quat)
+
+            corners_l = self._book_corners_local.view(1, 8, 3).expand(self.num_envs, 8, 3)
+            quat_rep = estimated_quat.view(self.num_envs, 1, 4).expand(self.num_envs, 8, 4)
+            estimated_corners = math_utils.quat_apply(
+                quat_rep.reshape(-1, 4), corners_l.reshape(-1, 3)
+            ).view(self.num_envs, 8, 3) + estimated_pos.view(self.num_envs, 1, 3)
+
+            rear_to_mouth = estimated_corners[..., 0].min(dim=-1).values - float(self._geom_mouth_x)
+            front_to_back = float(self.cfg.slot_x_back) - estimated_corners[..., 0].max(dim=-1).values
+            lat_err = self._slot_center_y() - estimated_pos[:, 1]
+            z_target = self.cfg.shelf_top_z + self.cfg.shelf_thickness + 0.5 * self.cfg.book_size[1]
+            z_err = estimated_pos[:, 2] - float(z_target)
+            yaw_err = _wrap_to_pi(_yaw_from_quat_wxyz(estimated_quat))
+            tool_to_book = self._ee_tool_pos_env() - estimated_pos
+
+            policy_obs[:, 1] = torch.clamp(
+                rear_to_mouth / float(self.cfg.rear_to_mouth_obs_scale), -1.0, 1.0
+            )
+            policy_obs[:, 2] = torch.clamp(
+                front_to_back / float(self.cfg.front_to_back_obs_scale), -1.0, 1.0
+            )
+            policy_obs[:, 3] = torch.clamp(lat_err / float(self.cfg.lat_err_obs_scale), -1.0, 1.0)
+            policy_obs[:, 4] = torch.clamp(z_err / float(self.cfg.z_err_obs_scale), -1.0, 1.0)
+            policy_obs[:, 5] = torch.clamp(yaw_err / float(self.cfg.yaw_err_obs_scale), -1.0, 1.0)
+            tool_scale = float(self.cfg.tool_to_book_pos_obs_scale)
+            policy_obs[:, 6:9] = torch.clamp(tool_to_book / tool_scale, -1.0, 1.0)
+
+            spine_l = torch.zeros((self.num_envs, 3), device=self.device, dtype=torch.float32)
+            spine_l[:, 1] = 1.0
+            spine_w = math_utils.quat_apply(estimated_quat, spine_l)
+            policy_obs[:, 10] = torch.clamp(spine_w[:, 0], -1.0, 1.0)
+            policy_obs[:, 11] = torch.clamp(spine_w[:, 1], -1.0, 1.0)
+
+        if bool(getattr(self.cfg, "enable_insert_gripper_observation_nuisance", False)):
+            insert_mask = self._mode == _MODE_INSERT
+            policy_obs[:, 9] = torch.where(
+                insert_mask,
+                self._insert_gripper_observation_env,
+                policy_obs[:, 9],
+            )
+
+        return obs
 
     def _apply_debug_row_layout_y_offset(self, env_ids_t: torch.Tensor) -> None:
         """Shift a diagnostic row without changing its ten-position schema."""
@@ -2538,6 +2689,62 @@ class BookshelfEnv(BookshelfEnvV5):
         )
         self.extras["log"]["blocked_policy_release_fraction"] = premature_release.mean()
         self.extras["log"]["premature_release_penalty_mean"] = premature_penalty.mean()
+        if bool(getattr(self.cfg, "enable_targeted_dr_curriculum", False)):
+            total = max(1.0, float(self.cfg.targeted_dr_curriculum_total_steps))
+            initial = float(self.cfg.targeted_dr_curriculum_initial_scale)
+            progress = min(1.0, max(0.0, float(self.common_step_counter) / total))
+            self.extras["log"]["targeted_dr_curriculum_scale"] = initial + (1.0 - initial) * progress
+
+        if str(getattr(self.cfg, "release_training_objective", "original")) == "smooth_readiness":
+            metrics = self._step_metrics or self._compute_task_metrics()
+            mouth_x = float(self._geom_mouth_x)
+            front_x = float(self.cfg.slot_x_back) - metrics["front_to_back"]
+            rear_x = mouth_x + metrics["rear_to_mouth"]
+            depth_x = torch.clamp(front_x - rear_x, min=1.0e-4)
+            inside_fraction = torch.clamp((front_x - mouth_x) / depth_x, 0.0, 1.0)
+
+            def above(value, threshold, softness):
+                return torch.sigmoid((value - float(threshold)) / max(float(softness), 1.0e-6))
+
+            def below_abs(value, threshold, softness):
+                return torch.sigmoid((float(threshold) - torch.abs(value)) / max(float(softness), 1.0e-6))
+
+            readiness = torch.stack(
+                (
+                    above(inside_fraction, self.cfg.nominal_release_inside_fraction, self.cfg.release_depth_softness),
+                    above(metrics["front_to_back"], self.cfg.nominal_release_front_to_back_min, self.cfg.release_front_softness_m),
+                    below_abs(metrics["lat_err"], self.cfg.nominal_release_lat_thresh, self.cfg.release_lateral_softness_m),
+                    below_abs(metrics["z_err"], self.cfg.nominal_release_z_thresh, self.cfg.release_z_softness_m),
+                    below_abs(metrics["yaw_err"], self.cfg.nominal_release_yaw_thresh, self.cfg.release_yaw_softness_rad),
+                    below_abs(self._book_tilt_x(), self.cfg.nominal_release_tilt_x_thresh, self.cfg.release_tilt_softness),
+                ),
+                dim=-1,
+            ).amin(dim=-1)
+            insert = self._mode_start == _MODE_INSERT
+            requested = insert & self._raw_policy_release_request
+            withheld = insert & ~self._raw_policy_release_request
+            decision_reward = torch.zeros_like(rew)
+            decision_reward = torch.where(
+                requested,
+                float(self.cfg.release_ready_bonus) * readiness
+                - float(self.cfg.release_premature_penalty) * (1.0 - readiness),
+                decision_reward,
+            )
+            decision_reward = torch.where(
+                withheld,
+                decision_reward - float(self.cfg.release_withheld_penalty) * readiness,
+                decision_reward,
+            )
+            never_release_timeout = (
+                withheld
+                & (self._release_step_buf < 0)
+                & (self.episode_length_buf >= self.max_episode_length - 1)
+            )
+            timeout_penalty = float(self.cfg.release_never_timeout_penalty) * never_release_timeout.float()
+            rew = rew + decision_reward - timeout_penalty
+            self.extras["log"]["release_readiness_mean"] = readiness[insert].mean() if torch.any(insert) else readiness.mean() * 0.0
+            self.extras["log"]["release_decision_reward_mean"] = decision_reward.mean()
+            self.extras["log"]["never_release_timeout_penalty_mean"] = timeout_penalty.mean()
 
         weight = float(getattr(self.cfg, "residual_action_l2_weight", 0.0))
         if weight <= 0.0:
@@ -2872,6 +3079,10 @@ class BookshelfEnv(BookshelfEnvV5):
                 -float(self.cfg.final_dbase_y_rotation_limit),
                 float(self.cfg.final_dbase_y_rotation_limit),
             )
+
+        if bool(getattr(self.cfg, "enable_insert_action_realization_dr", False)):
+            insert_mask = mode == _MODE_INSERT
+            delta[insert_mask] *= self._insert_action_realization_scale_env[insert_mask].unsqueeze(-1)
 
         normal_mask = mode != _MODE_SCRIPTED
         push_mask = normal_mask & (mode == _MODE_PUSH)

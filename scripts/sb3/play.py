@@ -32,7 +32,27 @@ parser.add_argument(
     "--agent", type=str, default="sb3_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint.")
+parser.add_argument(
+    "--robot_usd_path",
+    type=str,
+    default=None,
+    help="Optional local robot USD mirror for offline HPC nodes; does not alter the robot model.",
+)
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument(
+    "--evaluation_dr_profile",
+    choices=(
+        "nominal",
+        "observation_moderate",
+        "strong_tail",
+        "physical_like",
+        "gripper_only",
+        "combined_moderate",
+        "combined_moderate_actuation",
+    ),
+    default="nominal",
+    help="Evaluation-only nuisance distribution; ground-truth physics and metrics are unchanged.",
+)
 parser.add_argument(
     "--eval_slot_clearance",
     type=float,
@@ -137,6 +157,7 @@ import os
 import random
 import time
 import math
+import csv
 from datetime import datetime
 
 import gymnasium as gym
@@ -172,6 +193,30 @@ from evaluation_scenarios import (
     sha256_file,
 )
 from post_release_pose_evaluation import PoseSample, PostReleasePoseCsv
+from targeted_dr_profiles import apply_evaluation_dr_profile
+
+
+def _constant_schedule(value: float):
+    return lambda _: float(value)
+
+
+def _as_schedule(value):
+    return value if callable(value) else _constant_schedule(float(value))
+
+
+def _checkpoint_custom_objects(observation_space, action_space, learning_rate=None, clip_range=None) -> dict:
+    """Avoid deserializing fragile Gym/NumPy objects from checkpoints across machines."""
+    custom_objects = {
+        "observation_space": observation_space,
+        "action_space": action_space,
+    }
+    if learning_rate is not None:
+        custom_objects["learning_rate"] = learning_rate
+        custom_objects["lr_schedule"] = _as_schedule(learning_rate)
+    if clip_range is not None:
+        custom_objects["clip_range"] = _as_schedule(clip_range)
+    custom_objects["clip_range_vf"] = None
+    return custom_objects
 
 
 def _scalar(value, env_idx: int | None = None, default=None):
@@ -322,6 +367,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
+    if args_cli.robot_usd_path is not None:
+        robot_usd = Path(args_cli.robot_usd_path).expanduser().resolve()
+        if not robot_usd.is_file():
+            raise FileNotFoundError(f"local robot USD not found: {robot_usd}")
+        env_cfg.robot.spawn.usd_path = str(robot_usd)
+        print(f"[ROBOT_USD] local_mirror={robot_usd}", flush=True)
+    if args_cli.evaluation_dr_profile != "nominal":
+        if task_name != "Bookshelf-Residual-Direct-v0":
+            raise ValueError("evaluation DR profiles require Bookshelf-Residual-Direct-v0")
+        resolved_dr = apply_evaluation_dr_profile(env_cfg, args_cli.evaluation_dr_profile)
+        print(f"[EVALUATION_DR] {resolved_dr}", flush=True)
     if hasattr(env_cfg, "enable_reset_acceptance_gate"):
         env_cfg.enable_reset_acceptance_gate = False
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -407,14 +463,38 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
 
     vec_norm_path = None
     if checkpoint_path is not None:
-        vec_norm_path = Path(
-            checkpoint_path.replace("/model", "/model_vecnormalize").replace(".zip", ".pkl")
+        checkpoint_file = Path(checkpoint_path)
+        vec_norm_path = checkpoint_file.with_name(
+            checkpoint_file.name.replace("model", "model_vecnormalize", 1).removesuffix(".zip") + ".pkl"
         )
 
     # normalize environment (if needed)
     if vec_norm_path is not None and vec_norm_path.exists():
         print(f"Loading saved normalization: {vec_norm_path}")
-        env = VecNormalize.load(vec_norm_path, env)
+        try:
+            env = VecNormalize.load(vec_norm_path, env)
+        except Exception as exc:
+            stats_path = vec_norm_path.with_name(f"{vec_norm_path.stem}_stats.npz")
+            if not stats_path.exists():
+                raise
+            print(f"VecNormalize pickle load failed ({type(exc).__name__}: {exc}).")
+            print(f"Loading VecNormalize stats fallback: {stats_path}")
+            stats = np.load(stats_path)
+            env = VecNormalize(
+                env,
+                training=False,
+                norm_obs=True,
+                norm_reward=False,
+                clip_obs=float(agent_cfg.get("clip_obs", 10.0)),
+                gamma=float(agent_cfg.get("gamma", 0.99)),
+            )
+            env.obs_rms.mean = stats["obs_mean"].astype(np.float64)
+            env.obs_rms.var = stats["obs_var"].astype(np.float64)
+            env.obs_rms.count = float(stats["obs_count"])
+            if "ret_mean" in stats and hasattr(env, "ret_rms"):
+                env.ret_rms.mean = stats["ret_mean"].astype(np.float64)
+                env.ret_rms.var = stats["ret_var"].astype(np.float64)
+                env.ret_rms.count = float(stats["ret_count"])
         #  do not update them at test time
         env.training = False
         # reward normalization is not needed at test time
@@ -435,7 +515,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     else:
         print(f"Loading checkpoint from: {checkpoint_path}")
         ppo_load_path = checkpoint_path[:-4] if str(checkpoint_path).endswith(".zip") else checkpoint_path
-        agent = PPO.load(ppo_load_path, env, print_system_info=True)
+        agent = PPO.load(
+            ppo_load_path,
+            env,
+            print_system_info=True,
+            custom_objects=_checkpoint_custom_objects(
+                observation_space=env.observation_space,
+                action_space=env.action_space,
+                learning_rate=agent_cfg.get("learning_rate"),
+                clip_range=agent_cfg.get("clip_range"),
+            ),
+        )
         checkpoint_agent_seed = apply_evaluation_seed_after_agent_load(agent, evaluation_seed)
         print(
             "[INFO] Reapplied evaluation seed after PPO.load: "
@@ -470,6 +560,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "vecnormalize_sha256": sha256_file(vec_norm_path),
                 "git": git_revision(_REPO_ROOT),
                 "evaluation": {
+                    "dr_profile": args_cli.evaluation_dr_profile,
                     "fixed_slot_clearance": args_cli.eval_slot_clearance,
                     "old_reset_noise": bool(args_cli.eval_old_reset_noise),
                     "reset_arm_joint_pos_noise": float(
@@ -525,6 +616,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     n_timeout = 0
     n_drop = 0
     n_episodes = 0
+    release_records = [None] * num_envs
+    previous_release_steps = [-1] * num_envs
+    robustness_rows = []
+    held_gripper_sum = [0.0] * num_envs
+    held_gripper_count = [0] * num_envs
+    held_gripper_min = [float("inf")] * num_envs
+    held_gripper_max = [float("-inf")] * num_envs
     PRINT_EVERY = 10  # print rolling stats every N completed episodes
 
     # reset environment
@@ -542,6 +640,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 actions, _ = agent.predict(obs, deterministic=True)
             # env stepping
             obs, rewards, dones, infos = env.step(actions)
+
+        current_release_steps = raw_env._release_step_buf.detach().cpu().tolist()
+        metrics_now = getattr(raw_env, "_step_metrics", {})
+        actual_gripper = raw_env._gripper_open01().detach().cpu().tolist()
+        modes_now = raw_env._mode.detach().cpu().tolist()
+        for i in range(num_envs):
+            if int(modes_now[i]) == 0 and previous_release_steps[i] < 0:
+                value = float(actual_gripper[i])
+                held_gripper_sum[i] += value
+                held_gripper_count[i] += 1
+                held_gripper_min[i] = min(held_gripper_min[i], value)
+                held_gripper_max[i] = max(held_gripper_max[i], value)
+            if previous_release_steps[i] < 0 <= int(current_release_steps[i]) and metrics_now:
+                rear = float(metrics_now["rear_to_mouth"][i].item())
+                front = float(metrics_now["front_to_back"][i].item())
+                release_records[i] = {
+                    "release_action": float(actions[i, -1]),
+                    "rear_to_mouth_at_release_m": rear,
+                    "front_to_back_at_release_m": front,
+                    "insertion_depth_at_release_m": (
+                        float(raw_env.cfg.slot_x_back) - float(raw_env._geom_mouth_x) - front
+                    ),
+                    "premature_release": int(
+                        not bool(raw_env._nominal_release_mask(metrics_now)[i].item())
+                    ),
+                }
+            previous_release_steps[i] = int(current_release_steps[i])
 
         if post_release_pose_log is not None:
             release_steps = raw_env._release_step_buf.detach().cpu().tolist()
@@ -602,6 +727,32 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 else:
                     n_timeout += 1
                 n_episodes += 1
+                release = release_records[i]
+                robustness_rows.append(
+                    {
+                        "episode_index": n_episodes - 1,
+                        "outcome": outcome,
+                        "success": int(outcome == "success"),
+                        "post_push_success": int(outcome == "success"),
+                        "failure_to_release": int(release is None),
+                        "premature_release": "" if release is None else release["premature_release"],
+                        "release_action": "" if release is None else release["release_action"],
+                        "rear_to_mouth_at_release_m": "" if release is None else release["rear_to_mouth_at_release_m"],
+                        "front_to_back_at_release_m": "" if release is None else release["front_to_back_at_release_m"],
+                        "insertion_depth_at_release_m": "" if release is None else release["insertion_depth_at_release_m"],
+                        "held_gripper_open_mean": (
+                            "" if held_gripper_count[i] == 0 else held_gripper_sum[i] / held_gripper_count[i]
+                        ),
+                        "held_gripper_open_min": "" if held_gripper_count[i] == 0 else held_gripper_min[i],
+                        "held_gripper_open_max": "" if held_gripper_count[i] == 0 else held_gripper_max[i],
+                    }
+                )
+                release_records[i] = None
+                previous_release_steps[i] = -1
+                held_gripper_sum[i] = 0.0
+                held_gripper_count[i] = 0
+                held_gripper_min[i] = float("inf")
+                held_gripper_max[i] = float("-inf")
                 if trace is not None:
                     trace_row.update(
                         {
@@ -650,6 +801,12 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if trace is not None:
         summary_path = trace.write()
         print(f"[INFO] Scenario trace summary: {summary_path}")
+        robustness_path = trace.output_dir / "policy_robustness_metrics.csv"
+        with robustness_path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(robustness_rows[0]) if robustness_rows else ["episode_index"])
+            writer.writeheader()
+            writer.writerows(robustness_rows)
+        print(f"[INFO] Policy robustness metrics: {robustness_path}")
 
     if post_release_pose_log is not None:
         post_release_pose_log.close()

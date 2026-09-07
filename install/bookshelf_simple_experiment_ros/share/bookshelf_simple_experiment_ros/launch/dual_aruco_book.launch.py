@@ -1,0 +1,1 @@
+/home/riot/Chris/bookshelf-unified/build/bookshelf_simple_experiment_ros/launch/dual_aruco_book.launch.py

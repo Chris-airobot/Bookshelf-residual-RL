@@ -30,6 +30,15 @@ def _ignored_generator_ctor(*_args, **_kwargs):
     return _IgnoredRandomGenerator()
 
 
+class _CompatibleUnpickler(pickle.Unpickler):
+    """Ignore training-only RNG constructors unavailable on deployment hosts."""
+
+    def find_class(self, module, name):
+        if module == "sitecustomize" and name == "_compat_bit_generator_ctor":
+            return _ignored_bit_generator_ctor
+        return super().find_class(module, name)
+
+
 def _load_vecnormalize(path: Path):
     """Load stats while tolerating NumPy 2.x RNG pickles under NumPy 1.x."""
 
@@ -49,7 +58,7 @@ def _load_vecnormalize(path: Path):
     random_pickle.__bit_generator_ctor = _ignored_bit_generator_ctor
     try:
         with path.open("rb") as stream:
-            return pickle.load(stream)
+            return _CompatibleUnpickler(stream).load()
     finally:
         random_pickle.__generator_ctor = original_generator_ctor
         random_pickle.__bit_generator_ctor = original_bit_generator_ctor

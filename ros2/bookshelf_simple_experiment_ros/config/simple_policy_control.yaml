@@ -46,7 +46,16 @@ simple_policy_control:
     retreat_distance_m: 0.09
     retreat_speed_m_s: 0.05
     retreat_timeout_s: 15.0
+    # Legacy shadow diagnostic only; never defines successful physical seating.
     push_book_distance_m: 0.03
     push_x_uncertainty_m: 0.005
     push_timeout_s: 90.0
     contact_tolerance_m: 0.001
+    # Failure guard on cumulative measured TCP path, including approach to contact.
+    push_max_tcp_travel_m: 0.10
+    # Independent post-release book geometry is required for July success gates.
+    push_book_frame: target_book_center
+    push_book_max_age_s: 0.25
+    # A stale marker always holds zero motion. Resume only after bounded reacquisition.
+    push_recovery_grace_s: 1.0
+    push_recovery_fresh_samples: 3

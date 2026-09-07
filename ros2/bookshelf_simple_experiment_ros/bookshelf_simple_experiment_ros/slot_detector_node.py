@@ -246,7 +246,7 @@ class RgbdSlotDetector(Node):
         self._publish_detection(filtered, self.latest_rgb_message)
         debug = self._make_debug_image(self.latest_rgb, filtered)
         self._publish_debug(debug, self.latest_rgb_message)
-        self._log_status(
+        self.get_logger().debug(
             f"width={filtered.slot_width * 1000.0:.1f} mm, "
             f"confidence={filtered.confidence:.2f}, "
             f"pixels=({filtered.left_pixel}, {filtered.right_pixel})"

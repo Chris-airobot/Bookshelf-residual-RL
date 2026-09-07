@@ -35,6 +35,13 @@ parser.add_argument(
     "--agent", type=str, default="sb3_cfg_entry_point", help="Name of the RL agent configuration entry point."
 )
 parser.add_argument("--seed", type=int, default=None, help="Seed used for the environment")
+parser.add_argument("--run_name", type=str, default=None, help="Explicit log-directory name (defaults to a timestamp).")
+parser.add_argument(
+    "--robot_usd_path",
+    type=str,
+    default=None,
+    help="Optional local robot USD mirror for offline HPC nodes; does not alter the robot model.",
+)
 parser.add_argument("--log_interval", type=int, default=100_000, help="Log data every n timesteps.")
 parser.add_argument(
     "--checkpoint",
@@ -56,6 +63,36 @@ parser.add_argument(
     help="Train at one fixed slot clearance and disable residual curricula/release assist.",
 )
 parser.add_argument("--max_iterations", type=int, default=None, help="RL Policy training iterations.")
+parser.add_argument(
+    "--targeted_dr_profile",
+    choices=("disabled", "obs_moderate", "combined_moderate", "strong_tail", "combined_moderate_actuation", "obs_moderate_curriculum", "obs_gripper_no_grasp"),
+    default="disabled",
+    help="Training-only sim-to-real nuisance profile for the July six-action residual task.",
+)
+parser.add_argument(
+    "--release_training_objective",
+    choices=("original", "smooth_readiness"),
+    default="original",
+    help="Training-only release reward formulation; release transition semantics are unchanged.",
+)
+parser.add_argument(
+    "--targeted_dr_curriculum_steps",
+    type=int,
+    default=30_000_000,
+    help="Aggregate environment steps for the targeted-DR curriculum to reach full strength.",
+)
+parser.add_argument(
+    "--training_checkpoint_interval_steps",
+    type=int,
+    default=0,
+    help="Save paired fresh-training PPO/VecNormalize snapshots at this aggregate-step interval.",
+)
+parser.add_argument(
+    "--finetune_checkpoint_interval_steps",
+    type=int,
+    default=0,
+    help="Save paired PPO/VecNormalize fine-tuning snapshots at this many additional environment steps.",
+)
 parser.add_argument(
     "--disable_reset_acceptance_gate",
     action="store_true",
@@ -151,6 +188,7 @@ signal.signal(signal.SIGINT, cleanup_pbar)
 """Rest everything follows."""
 
 import logging
+import math
 import os
 import random
 import time
@@ -178,6 +216,7 @@ from isaaclab_rl.sb3 import Sb3VecEnvWrapper, process_sb3_cfg
 import isaaclab_tasks  # noqa: F401
 from episode_metrics import EpisodeMetricsCsvCallback
 from experiment_spec import build_experiment_spec
+from targeted_dr_profiles import apply_targeted_dr_profile
 from isaaclab_tasks.utils.hydra import hydra_task_config
 from mlflow_utils import (
     MlflowSb3MetricsCallback,
@@ -335,6 +374,42 @@ class VecNormalizeCheckpointCallback(BaseCallback):
         return True
 
 
+class MilestoneCheckpointCallback(BaseCallback):
+    """Save paired model/normalization snapshots at requested step milestones."""
+
+    def __init__(self, interval_steps: int, save_path: str, total_additional_steps: int, name_tag: str, save_terminal_milestone: bool = True, verbose: int = 0):
+        super().__init__(verbose=verbose)
+        self.interval_steps = int(interval_steps)
+        self.save_path = Path(save_path)
+        self.total_additional_steps = int(total_additional_steps)
+        self.name_tag = str(name_tag)
+        self.save_terminal_milestone = bool(save_terminal_milestone)
+        self.start_timesteps = 0
+        self.next_milestone = self.interval_steps
+
+    def _on_training_start(self) -> None:
+        self.start_timesteps = int(self.model.num_timesteps)
+
+    def _on_step(self) -> bool:
+        additional_steps = int(self.model.num_timesteps) - self.start_timesteps
+        while self.next_milestone > 0 and additional_steps >= self.next_milestone:
+            if self.next_milestone >= self.total_additional_steps and not self.save_terminal_milestone:
+                self.next_milestone = 0
+                break
+            milestone = min(self.next_milestone, self.total_additional_steps)
+            self.save_path.mkdir(parents=True, exist_ok=True)
+            model_path = self.save_path / f"model_{self.name_tag}_{milestone}_steps"
+            vec_path = self.save_path / f"model_vecnormalize_{self.name_tag}_{milestone}_steps.pkl"
+            self.model.save(str(model_path))
+            if not isinstance(self.training_env, VecNormalize):
+                raise RuntimeError("fine-tuning milestones require the resumed VecNormalize environment")
+            self.training_env.save(str(vec_path))
+            if self.verbose > 0:
+                print(f"[MILESTONE_CHECKPOINT] model={model_path}.zip vecnormalize={vec_path}", flush=True)
+            self.next_milestone += self.interval_steps
+        return True
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: dict):
     """Train with stable-baselines agent."""
@@ -367,6 +442,26 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # set the environment seed
     # note: certain randomizations occur in the environment initialization so we set the seed here
     env_cfg.seed = agent_cfg["seed"]
+    if args_cli.robot_usd_path is not None:
+        robot_usd = Path(args_cli.robot_usd_path).expanduser().resolve()
+        if not robot_usd.is_file():
+            raise FileNotFoundError(f"local robot USD not found: {robot_usd}")
+        env_cfg.robot.spawn.usd_path = str(robot_usd)
+        print(f"[ROBOT_USD] local_mirror={robot_usd}", flush=True)
+    if args_cli.targeted_dr_profile != "disabled":
+        if args_cli.task != "Bookshelf-Residual-Direct-v0":
+            raise ValueError("targeted DR profiles require the July-compatible Bookshelf-Residual-Direct-v0 task")
+        resolved_dr = apply_targeted_dr_profile(env_cfg, args_cli.targeted_dr_profile)
+        if bool(getattr(env_cfg, "enable_targeted_dr_curriculum", False)):
+            if args_cli.targeted_dr_curriculum_steps <= 0:
+                raise ValueError("--targeted_dr_curriculum_steps must be positive")
+            env_cfg.targeted_dr_curriculum_total_steps = math.ceil(
+                args_cli.targeted_dr_curriculum_steps / env_cfg.scene.num_envs
+            )
+        print(f"[TARGETED_DR] {json.dumps(resolved_dr, sort_keys=True)}", flush=True)
+    if hasattr(env_cfg, "release_training_objective"):
+        env_cfg.release_training_objective = args_cli.release_training_objective
+        print(f"[RELEASE_TRAINING_OBJECTIVE] mode={env_cfg.release_training_objective}", flush=True)
     if args_cli.task == "Bookshelf-XArm7-Residual-Direct-v0":
         standoff_mm = float(args_cli.xarm_training_standoff_mm)
         if not np.isfinite(standoff_mm) or standoff_mm < 0.0:
@@ -436,7 +531,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.slot_lateral_clearance_max = float(args_cli.fixed_clearance)
 
     # directory for logging into
-    run_info = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_info = args_cli.run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    if Path(run_info).name != run_info or run_info in ("", ".", ".."):
+        raise ValueError("--run_name must be one safe path component")
     log_root_path = os.path.abspath(os.path.join("logs", "sb3", args_cli.task))
     print(f"[INFO] Logging experiment in directory: {log_root_path}")
     # The Ray Tune workflow extracts experiment name using the logging line below, hence,
@@ -587,6 +684,8 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 clip_range=agent_cfg.get("clip_range"),
             ),
         )
+        agent.seed = agent_cfg["seed"]
+        agent.set_random_seed(agent_cfg["seed"])
         agent.verbose = 1
     else:
         # Intentionally do not load old VecNormalize.pkl when warm-starting:
@@ -612,12 +711,40 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         log_dir=log_dir,
         log_every_timesteps=args_cli.log_interval,
     )
-    callbacks = [
-        checkpoint_callback,
-        vecnormalize_checkpoint_callback,
-        episode_metrics_callback,
-        LogEveryNTimesteps(n_steps=args_cli.log_interval),
-    ]
+    callbacks = [episode_metrics_callback, LogEveryNTimesteps(n_steps=args_cli.log_interval)]
+    checkpoint_interval = int(args_cli.finetune_checkpoint_interval_steps)
+    if checkpoint_interval < 0:
+        raise ValueError("--finetune_checkpoint_interval_steps must be non-negative")
+    if checkpoint_interval:
+        if not args_cli.resume:
+            raise ValueError("fine-tuning milestone checkpoints require --resume")
+        callbacks.append(
+            MilestoneCheckpointCallback(
+                interval_steps=checkpoint_interval,
+                save_path=log_dir,
+                total_additional_steps=int(n_timesteps),
+                name_tag="finetune",
+                verbose=1,
+            )
+        )
+    training_checkpoint_interval = int(args_cli.training_checkpoint_interval_steps)
+    if training_checkpoint_interval < 0:
+        raise ValueError("--training_checkpoint_interval_steps must be non-negative")
+    if training_checkpoint_interval:
+        if args_cli.resume:
+            raise ValueError("fresh-training milestone checkpoints cannot be used with --resume")
+        callbacks.append(
+            MilestoneCheckpointCallback(
+                interval_steps=training_checkpoint_interval,
+                save_path=log_dir,
+                total_additional_steps=int(n_timesteps),
+                name_tag="fresh",
+                save_terminal_milestone=False,
+                verbose=1,
+            )
+        )
+    if not checkpoint_interval and not training_checkpoint_interval:
+        callbacks[0:0] = [checkpoint_callback, vecnormalize_checkpoint_callback]
     if mlflow_active:
         callbacks.append(MlflowSb3MetricsCallback(log_every_n_calls=args_cli.mlflow_log_every_n_calls))
 

@@ -68,6 +68,40 @@ def test_two_complete_cycles_accept_second_slot_freeze():
     )
 
 
+def test_push_abort_requires_reviewed_return_before_new_scan():
+    w = OperatorWorkflow()
+    w.state = w.POLICY_RUNNING
+    w.policy_status("failed")
+    assert w.command("h")[0] is None  # Generic INSERT failure is not a PUSH abort.
+    w.policy_status("push_aborted")
+    assert w.state == w.PUSH_ABORT_WAITING_RETURN
+    assert w.command("g")[0] is None
+    assert w.command("e")[0] is None
+    assert _plan_and_execute(w, "h", "plan_return", "return_loading", w.OPENING_AFTER_RETURN) == "finish_return"
+    w.service_result("finish_return", True)
+    assert w.command("g")[0] is None
+    w.operator_action_status("ready", True)
+    _plan_and_execute(w, "g", "plan_scan", "scan", w.SCAN)
+    assert w.command("s") == ("accept_slot", None)
+
+
+def test_push_abort_survives_delayed_start_response_and_return_plan_failure():
+    w = OperatorWorkflow()
+    w.state = w.PREINSERT_READY
+    w.command("i")
+    w.policy_status("push_aborted")
+    w.service_result("start_policy", True)
+    assert w.state == w.PUSH_ABORT_WAITING_RETURN
+    w.command("h")
+    w.service_result("plan_return", False)
+    assert w.state == w.PUSH_ABORT_WAITING_RETURN
+    w.command("h")
+    w.service_result("plan_return", True)
+    w.preinsert_status("failed", "return_loading")
+    assert w.state == w.PUSH_ABORT_WAITING_RETURN
+    assert w.command("h") == ("plan_return", None)
+
+
 def test_arm_keys_plan_and_only_e_executes():
     cases = (
         (OperatorWorkflow.START, "g", "plan_scan", "scan"),

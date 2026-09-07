@@ -66,6 +66,7 @@ from .per_grasp_calibration import (
     semantic_held_gripper_observation,
 )
 from .saved_slot_node import load_saved_slot
+from .push_completion import PushCompletion, seating_metrics
 
 
 @dataclass(frozen=True)
@@ -337,6 +338,17 @@ class SimplePolicyControlNode(Node):
         self.push_distance_m = 0.0
         self.book_push_distance_m = 0.0
         self.push_policy_index = 0
+        self.push_completion = None
+        self.push_metrics = None
+        self.push_start_tcp_xyz = None
+        self.push_previous_tcp_xyz = None
+        self.push_tcp_path_m = 0.0
+        self.push_tcp_progress_m = 0.0
+        self.push_wait_start_ns = None
+        self.push_recovery_last_stamp_ns = None
+        self.push_recovery_fresh_samples = 0
+        self.push_wait_reason = None
+        self.latest_servo_status_ns = None
         self.gripper_goal_pending = False
         self.gripper_goal_kind = None
         self.gripper_retry_start_ns = None
@@ -514,6 +526,13 @@ class SimplePolicyControlNode(Node):
         self.declare_parameter("push_x_uncertainty_m", 0.005)
         self.declare_parameter("push_timeout_s", 90.0)
         self.declare_parameter("contact_tolerance_m", 0.001)
+        # Travel is a failure guard, never the success criterion. The legacy
+        # push_book_distance_m remains readable for old configs/shadow reports.
+        self.declare_parameter("push_max_tcp_travel_m", 0.10)
+        self.declare_parameter("push_book_frame", "target_book_center")
+        self.declare_parameter("push_book_max_age_s", 0.25)
+        self.declare_parameter("push_recovery_grace_s", 1.0)
+        self.declare_parameter("push_recovery_fresh_samples", 3)
 
     def _now_ns(self):
         return self.get_clock().now().nanoseconds
@@ -575,6 +594,7 @@ class SimplePolicyControlNode(Node):
 
     def _servo_status_callback(self, message):
         self.latest_servo_status = int(message.data)
+        self.latest_servo_status_ns = self._now_ns()
 
     def _lookup(self, source_frame):
         message = self.tf_buffer.lookup_transform(
@@ -635,6 +655,8 @@ class SimplePolicyControlNode(Node):
             self._try_send_gripper_goal("close_empty")
         elif self.phase == "push":
             self._push_servo_tick()
+        elif self.phase == "push_waiting_for_fresh_state":
+            self._push_waiting_for_fresh_state_tick()
         elif self.phase == "settling" and self._now_ns() >= self.finish_after_ns:
             self._complete_execution()
         elif (
@@ -960,8 +982,14 @@ class SimplePolicyControlNode(Node):
             self.book_push_distance_m = 0.0
             self.target = None
             self.target_eef = None
+            try:
+                self._start_push_tracking(transform_base_tcp)
+            except Exception as error:
+                self._halt_and_fail(f"PUSH initialization failed: {error}")
+                return
             self._log_phase_event(
-                "push_started", transform_base_eef, transform_base_tcp
+                "push_started", transform_base_eef, transform_base_tcp,
+                **self._push_diagnostics(),
             )
             self._publish_status("push_started")
 
@@ -1086,6 +1114,7 @@ class SimplePolicyControlNode(Node):
                     self.target.transform_base_tcp_target
                 ),
                 "servo_status": self.latest_servo_status,
+                **self._push_diagnostics(),
             }
         )
         self.push_policy_index += 1
@@ -1102,14 +1131,128 @@ class SimplePolicyControlNode(Node):
             transform_base_policy_tool,
         )
 
+    def _start_push_tracking(self, transform_base_tcp):
+        recovery_grace_s = float(
+            self.get_parameter("push_recovery_grace_s").value
+        )
+        recovery_samples = int(
+            self.get_parameter("push_recovery_fresh_samples").value
+        )
+        if not math.isfinite(recovery_grace_s) or recovery_grace_s <= 0.0:
+            raise ValueError("PUSH recovery grace must be finite and positive")
+        if recovery_samples < 2:
+            raise ValueError("PUSH recovery requires at least two fresh unique samples")
+        self.push_completion = PushCompletion(
+            float(self.get_parameter("push_max_tcp_travel_m").value),
+            float(self.get_parameter("push_timeout_s").value),
+            float(self.get_parameter("push_book_max_age_s").value),
+        )
+        self.push_start_tcp_xyz = transform_base_tcp[:3, 3].copy()
+        self.push_previous_tcp_xyz = self.push_start_tcp_xyz.copy()
+        self.push_tcp_path_m = 0.0
+        self.push_tcp_progress_m = 0.0
+        self.push_metrics = seating_metrics(
+            invert_transform(self.geometry.transform_base_slot) @ self.push_book_origin,
+            self.geometry.book_size, self.geometry.slot_depth_m, self.geometry.slot_width_m,
+        )
+        self.push_measurement_stamp_ns = None
+        self.push_wait_start_ns = None
+        self.push_recovery_last_stamp_ns = None
+        self.push_recovery_fresh_samples = 0
+        self.push_wait_reason = None
+
+    def _push_diagnostics(self):
+        return {
+            "push_success_criterion": "JULY_GEOMETRY_4_UNIQUE_SAMPLES",
+            "push_seating_metrics": self.push_metrics,
+            "push_seating_source": (
+                "fresh_book_tf_recovery_candidate_not_success_evidence"
+                if self.phase == "push_waiting_for_fresh_state"
+                and getattr(self, "push_recovery_fresh_samples", 0) > 0
+                else
+                "last_fresh_book_tf_before_wait_not_current"
+                if self.phase == "push_waiting_for_fresh_state"
+                and getattr(self, "push_measurement_stamp_ns", None)
+                else "fresh_book_tf" if getattr(self, "push_measurement_stamp_ns", None)
+                else "release_pose_initial_estimate_not_success_evidence"
+            ),
+            "push_measurement_stamp_ns": getattr(self, "push_measurement_stamp_ns", None),
+            "push_tcp_progress_m": self.push_tcp_progress_m,
+            "push_tcp_path_m": self.push_tcp_path_m,
+            "push_success_samples": self.push_completion.success_samples,
+            "push_max_tcp_travel_m": self.push_completion.maximum_travel_m,
+            "push_wait_reason": getattr(self, "push_wait_reason", None),
+            "push_recovery_fresh_samples": getattr(
+                self, "push_recovery_fresh_samples", 0
+            ),
+        }
+
+    def _push_fresh_transform(self, frame, maximum_age_s):
+        # PUSH-only observer: do not change INSERT/calibration TF semantics.
+        message = self.tf_buffer.lookup_transform(
+            self.base_frame, frame, Time(),
+            timeout=Duration(seconds=float(self.get_parameter("tf_lookup_timeout_s").value)),
+        )
+        stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+        age_s = (self._now_ns() - stamp_ns) * 1.0e-9
+        if stamp_ns <= 0 or not 0.0 <= age_s <= maximum_age_s:
+            raise ValueError(f"PUSH {frame} TF stale/future/unstamped: age={age_s:.3f}s")
+        return _transform_message_to_matrix(message), stamp_ns
+
     def _push_servo_tick(self):
+        # Check timeout BEFORE lookups: missing state must not bypass it.
+        elapsed_s = (self._now_ns() - self.phase_start_ns) * 1.0e-9
+        reason = self.push_completion.limit_reason(elapsed_s, self.push_tcp_path_m)
+        if reason:
+            self._halt_and_fail(f"PUSH stopped: {reason}", push_reason=reason)
+            return
         if self._post_servo_status_is_fatal():
             return
         try:
-            transform_base_eef = self._lookup(self.eef_frame)
-            transform_base_tcp = self._lookup(self.tcp_frame)
-        except Exception:
-            self._publish_twist(np.zeros(6))
+            error = self._live_input_error()
+            if error:
+                raise ValueError(error)
+            max_age = float(self.get_parameter("live_state_max_age_s").value)
+            status_stamp = self.latest_servo_status_ns
+            if (status_stamp is None
+                    or not 0.0 <= (self._now_ns() - status_stamp) * 1.0e-9 <= max_age):
+                raise ValueError("PUSH Servo status is missing/stale")
+            transform_base_eef, _ = self._push_fresh_transform(self.eef_frame, max_age)
+            transform_base_tcp, _ = self._push_fresh_transform(self.tcp_frame, max_age)
+            self.push_tcp_path_m += float(np.linalg.norm(
+                transform_base_tcp[:3, 3] - self.push_previous_tcp_xyz
+            ))
+            self.push_previous_tcp_xyz = transform_base_tcp[:3, 3].copy()
+            self.push_tcp_progress_m = retreat_progress(
+                self.push_start_tcp_xyz, transform_base_tcp[:3, 3], -self.retreat_direction,
+            )
+            reason = self.push_completion.limit_reason(elapsed_s, self.push_tcp_path_m)
+            if reason:
+                self._halt_and_fail(f"PUSH stopped: {reason}", push_reason=reason)
+                return
+        except Exception as error:
+            if "stale/future/unstamped" in str(error):
+                self._begin_push_fresh_state_wait(error)
+                return
+            self._halt_and_fail(f"PUSH state unavailable/unsafe: {error}")
+            return
+        try:
+            measured_book, stamp_ns = self._push_fresh_transform(
+                str(self.get_parameter("push_book_frame").value),
+                self.push_completion.marker_max_age_s,
+            )
+        except Exception as error:
+            self._begin_push_fresh_state_wait(error)
+            return
+        try:
+            self.push_metrics = seating_metrics(
+                invert_transform(self.geometry.transform_base_slot) @ measured_book,
+                self.geometry.book_size, self.geometry.slot_depth_m, self.geometry.slot_width_m,
+            )
+            success = self.push_completion.observe(self.push_metrics, stamp_ns, self._now_ns())
+            self.push_measurement_stamp_ns = stamp_ns
+        except Exception as error:
+            self._halt_and_fail(f"PUSH state unavailable/unsafe: {error}")
             return
         insertion_direction = -self.retreat_direction
         self.push_distance_m = max(
@@ -1132,21 +1275,22 @@ class SimplePolicyControlNode(Node):
                 0.0, self.push_distance_m + self.book_contact_gap_m
             )
             self.push_contact_distance_m = self.push_geometric_contact_distance_m
-        requested = float(self.get_parameter("push_book_distance_m").value)
         if self.push_contact_distance_m is None:
             self.book_push_distance_m = 0.0
         else:
             self.book_push_distance_m = simulated_book_push_distance(
                 self.push_distance_m,
                 self.push_contact_distance_m,
-                requested,
+                # Preserve the existing PUSH actor's geometric book estimate,
+                # but remove the 30 mm cap. This is NOT success evidence.
+                self.push_completion.maximum_travel_m,
             )
         self.push_book_transform = self.push_book_origin.copy()
         self.push_book_transform[:3, 3] += (
             insertion_direction * self.book_push_distance_m
         )
         self._publish_post_visualization(transform_base_eef, transform_base_tcp)
-        if self.book_push_distance_m >= requested:
+        if success:
             self._publish_twist(np.zeros(6))
             self._log_phase_event(
                 "push_complete",
@@ -1162,13 +1306,15 @@ class SimplePolicyControlNode(Node):
                 ),
                 contact_source="release_geometry_no_contact_sensor",
                 book_push_distance_m=self.book_push_distance_m,
-                requested_book_push_distance_m=requested,
+                completion_reason="SUCCESS_CRITERION",
+                **self._push_diagnostics(),
             )
             self._complete_episode(transform_base_eef, transform_base_tcp)
             return
-        elapsed_s = (self._now_ns() - self.phase_start_ns) * 1.0e-9
-        if elapsed_s > float(self.get_parameter("push_timeout_s").value):
-            self._halt_and_fail("policy PUSH timed out")
+        if self.push_metrics["success_geometry"]:
+            # Hold at the seating band while collecting independent samples;
+            # don't keep advancing through it during the confirmation window.
+            self._publish_twist(np.zeros(6))
             return
         if self.target_eef is None:
             self._publish_twist(np.zeros(6))
@@ -1187,6 +1333,137 @@ class SimplePolicyControlNode(Node):
             self._halt_and_fail(f"PUSH Servo command calculation failed: {error}")
             return
         self._publish_twist(twist)
+
+    def _begin_push_fresh_state_wait(self, error):
+        self._publish_twist(np.zeros(6))
+        self.phase = "push_waiting_for_fresh_state"
+        self.push_wait_start_ns = self._now_ns()
+        self.push_recovery_last_stamp_ns = None
+        self.push_recovery_fresh_samples = 0
+        self.push_wait_reason = str(error)
+        self.target_eef = None
+        self._log_phase_event(
+            "push_waiting_for_fresh_state",
+            reason=self.push_wait_reason,
+            recovery_grace_s=float(
+                self.get_parameter("push_recovery_grace_s").value
+            ),
+            fresh_samples_required=int(
+                self.get_parameter("push_recovery_fresh_samples").value
+            ),
+            **self._push_diagnostics(),
+        )
+        self._publish_status(
+            "push_waiting_for_fresh_state",
+            f"PUSH_WAITING_FOR_FRESH_STATE: {self.push_wait_reason}; motion held at zero",
+        )
+        self.get_logger().warning(
+            f"PUSH_WAITING_FOR_FRESH_STATE: {self.push_wait_reason}; motion held at zero"
+        )
+
+    def _push_waiting_for_fresh_state_tick(self):
+        # The grace period permits observation only. It never permits stale-state motion.
+        self._publish_twist(np.zeros(6))
+        now_ns = self._now_ns()
+        elapsed_s = (now_ns - self.phase_start_ns) * 1.0e-9
+        reason = self.push_completion.limit_reason(elapsed_s, self.push_tcp_path_m)
+        if reason:
+            self._halt_and_fail(f"PUSH stopped while awaiting fresh state: {reason}", push_reason=reason)
+            return
+        wait_s = (now_ns - self.push_wait_start_ns) * 1.0e-9
+        grace_s = float(self.get_parameter("push_recovery_grace_s").value)
+        if wait_s >= grace_s:
+            self._halt_and_fail(
+                f"PUSH fresh-state recovery exceeded {grace_s:.3f}s grace",
+                push_reason="SAFETY_STOP",
+            )
+            return
+        if self._post_servo_status_is_fatal():
+            return
+        try:
+            error = self._live_input_error()
+            if error:
+                raise ValueError(error)
+            max_age = float(self.get_parameter("live_state_max_age_s").value)
+            status_stamp = self.latest_servo_status_ns
+            if (status_stamp is None
+                    or not 0.0 <= (now_ns - status_stamp) * 1.0e-9 <= max_age):
+                raise ValueError("PUSH Servo status is missing/stale")
+            transform_base_eef, _ = self._push_fresh_transform(self.eef_frame, max_age)
+            transform_base_tcp, _ = self._push_fresh_transform(self.tcp_frame, max_age)
+            self.push_tcp_path_m += float(np.linalg.norm(
+                transform_base_tcp[:3, 3] - self.push_previous_tcp_xyz
+            ))
+            self.push_previous_tcp_xyz = transform_base_tcp[:3, 3].copy()
+            self.push_tcp_progress_m = retreat_progress(
+                self.push_start_tcp_xyz, transform_base_tcp[:3, 3], -self.retreat_direction,
+            )
+            reason = self.push_completion.limit_reason(elapsed_s, self.push_tcp_path_m)
+            if reason:
+                self._halt_and_fail(
+                    f"PUSH stopped while awaiting fresh state: {reason}", push_reason=reason
+                )
+                return
+        except Exception as error:
+            self._halt_and_fail(f"PUSH state unavailable/unsafe while waiting: {error}")
+            return
+        try:
+            measured_book, stamp_ns = self._push_fresh_transform(
+                str(self.get_parameter("push_book_frame").value),
+                self.push_completion.marker_max_age_s,
+            )
+        except Exception:
+            # Any failure of this isolated independent observer remains recoverable.
+            self.push_recovery_last_stamp_ns = None
+            self.push_recovery_fresh_samples = 0
+            return
+        try:
+            metrics = seating_metrics(
+                invert_transform(self.geometry.transform_base_slot) @ measured_book,
+                self.geometry.book_size, self.geometry.slot_depth_m, self.geometry.slot_width_m,
+            )
+            if metrics["depth_overshoot"]:
+                raise ValueError("PUSH book has passed July's safe seating band")
+        except Exception as error:
+            self._halt_and_fail(f"PUSH state unavailable/unsafe while waiting: {error}")
+            return
+        previously_accepted_stamp_ns = self.push_completion.last_stamp_ns
+        if previously_accepted_stamp_ns is not None and stamp_ns < previously_accepted_stamp_ns:
+            self._halt_and_fail("PUSH recovered book TF predates last accepted timestamp")
+            return
+        if (self.push_recovery_last_stamp_ns is not None
+                and stamp_ns < self.push_recovery_last_stamp_ns):
+            self._halt_and_fail("PUSH recovered book TF timestamp regressed")
+            return
+        if (stamp_ns != self.push_recovery_last_stamp_ns
+                and stamp_ns != previously_accepted_stamp_ns):
+            self.push_recovery_last_stamp_ns = stamp_ns
+            self.push_recovery_fresh_samples += 1
+            self.push_metrics = metrics
+            self.push_measurement_stamp_ns = stamp_ns
+        required = int(self.get_parameter("push_recovery_fresh_samples").value)
+        if self.push_recovery_fresh_samples < required:
+            return
+        # Start the success hold over after reacquisition. Recovery samples prove
+        # stream continuity only; they can never establish seating success.
+        self.push_completion.last_stamp_ns = None
+        self.push_completion.success_samples = 0
+        self.phase = "push"
+        self._log_phase_event(
+            "push_fresh_state_recovered",
+            transform_base_eef,
+            transform_base_tcp,
+            recovery_duration_s=wait_s,
+            recovered_unique_samples=self.push_recovery_fresh_samples,
+            **self._push_diagnostics(),
+        )
+        self._publish_status(
+            "push", f"fresh book state recovered after {wait_s:.3f}s; PUSH resuming"
+        )
+        self.get_logger().info(
+            f"PUSH fresh state recovered after {wait_s:.3f}s from "
+            f"{self.push_recovery_fresh_samples} unique measurements"
+        )
 
     def _publish_post_visualization(self, transform_base_eef, transform_base_tcp):
         if self.push_book_transform is None or self.target is None:
@@ -1211,7 +1488,7 @@ class SimplePolicyControlNode(Node):
             payload["T_base_tcp"] = _transform_record(transform_base_tcp)
         book_transform = (
             self.push_book_transform
-            if self.phase in ("push", "episode_complete")
+            if self.phase in ("push", "push_waiting_for_fresh_state", "episode_complete")
             and self.push_book_transform is not None
             else self.released_book_transform
         )
@@ -1447,10 +1724,21 @@ class SimplePolicyControlNode(Node):
         self.phase = "waiting_for_live_state"
         self._publish_status("waiting_for_live_state", f"step_index={self.step_index}")
 
-    def _halt_and_fail(self, reason):
+    def _halt_and_fail(self, reason, *, push_reason="SAFETY_STOP"):
+        push_aborted = self.phase in ("push", "push_waiting_for_fresh_state")
         if self.twist_publisher is not None:
             self._publish_twist(np.zeros(6))
+        if push_aborted:
+            self._log_phase_event(
+                "push_stopped", completion_reason=push_reason, error=str(reason),
+                **(self._push_diagnostics() if self.push_completion is not None else {}),
+            )
         self._fail(reason)
+        if push_aborted:
+            # Publish only after motion has stopped and the rollout is terminal.
+            # Generic INSERT failures must not authorize a released-book return.
+            self._publish_status("push_aborted", f"{push_reason}: {reason}")
+            self.get_logger().error(f"PUSH ABORT: {reason}. RETURN AVAILABLE: H then E.")
 
     def _fail(self, reason):
         if self.record is None:
@@ -1792,6 +2080,17 @@ class SimplePolicyControlNode(Node):
         self.push_distance_m = 0.0
         self.book_push_distance_m = 0.0
         self.push_policy_index = 0
+        self.push_completion = None
+        self.push_metrics = None
+        self.push_start_tcp_xyz = None
+        self.push_previous_tcp_xyz = None
+        self.push_tcp_path_m = 0.0
+        self.push_tcp_progress_m = 0.0
+        self.push_measurement_stamp_ns = None
+        self.push_wait_start_ns = None
+        self.push_recovery_last_stamp_ns = None
+        self.push_recovery_fresh_samples = 0
+        self.push_wait_reason = None
         self.gripper_goal_pending = False
         self.gripper_goal_kind = None
         self.gripper_retry_start_ns = None
@@ -1854,9 +2153,10 @@ class SimplePolicyControlNode(Node):
             ),
             "empty_gripper_close_intended": True,
             "push_contact_gap_m_from_stationary_state": float(contact_gap),
-            "requested_book_push_distance_m": float(
+            "legacy_book_push_distance_m_not_success": float(
                 self.get_parameter("push_book_distance_m").value
             ),
+            "push_success_criterion": "JULY_GEOMETRY_4_UNIQUE_SAMPLES",
             "push_raw_observation": push_raw.tolist(),
             "push_policy_observation": push_observation.tolist(),
             "push_vecnormalize_observation": push_normalized.tolist(),

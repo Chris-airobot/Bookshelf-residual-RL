@@ -57,6 +57,7 @@ class OperatorWorkflow:
     PREINSERT_READY = "preinsert_ready"
     POLICY_RUNNING = "policy_running"
     PUSH_COMPLETE_WAITING_RETURN = "push_complete_waiting_return"
+    PUSH_ABORT_WAITING_RETURN = "push_abort_waiting_return"
     PLANNING_RETURN = "planning_return"
     RETURN_PLAN_READY = "return_trajectory_ready"
     EXECUTING_RETURN = "executing_return"
@@ -70,7 +71,7 @@ class OperatorWorkflow:
         "p": ("plan_preinsert", (BOOK_HELD,), PLANNING_PREINSERT, "preinsert"),
         "h": (
             "plan_return",
-            (PUSH_COMPLETE_WAITING_RETURN,),
+            (PUSH_COMPLETE_WAITING_RETURN, PUSH_ABORT_WAITING_RETURN),
             PLANNING_RETURN,
             "return_loading",
         ),
@@ -148,7 +149,7 @@ class OperatorWorkflow:
                     "plan_scan": self.plan_origin_state or self.START,
                     "plan_loading": self.SLOT_ACCEPTED,
                     "plan_preinsert": self.BOOK_HELD,
-                    "plan_return": self.PUSH_COMPLETE_WAITING_RETURN,
+                    "plan_return": self.plan_origin_state or self.PUSH_COMPLETE_WAITING_RETURN,
                 }
                 self.state = fallback[action]
                 self.pending_plan_kind = None
@@ -173,6 +174,10 @@ class OperatorWorkflow:
             "finish_return": (self.OPENING_AFTER_RETURN, self.RETURN_FAILED_WAITING),
         }
         if action in transitions:
+            if action == "start_policy" and self.state in (
+                self.PUSH_ABORT_WAITING_RETURN, self.PUSH_COMPLETE_WAITING_RETURN
+            ):
+                return  # A terminal status can arrive before the service response.
             self.state = transitions[action][0 if success else 1]
 
     def preinsert_status(self, phase, plan_kind=None):
@@ -209,7 +214,7 @@ class OperatorWorkflow:
         return {
             "loading": self.SLOT_ACCEPTED,
             "preinsert": self.BOOK_HELD,
-            "return_loading": self.PUSH_COMPLETE_WAITING_RETURN,
+            "return_loading": self.plan_origin_state or self.PUSH_COMPLETE_WAITING_RETURN,
         }[kind]
 
     def _complete_execution(self, kind):
@@ -241,6 +246,10 @@ class OperatorWorkflow:
     def policy_status(self, phase):
         if phase == "episode_complete":
             self.state = self.PUSH_COMPLETE_WAITING_RETURN
+        elif phase == "push_aborted" and self.state in (
+            self.POLICY_RUNNING, self.PREINSERT_READY
+        ):
+            self.state = self.PUSH_ABORT_WAITING_RETURN
 
 
 class TtyKeyboardReader:
@@ -369,6 +378,11 @@ class RealExperimentOperator(Node):
         status = self._decode(message)
         if status:
             self.workflow.policy_status(str(status.get("phase", "")))
+            if status.get("phase") == "push_aborted":
+                self.get_logger().error(
+                    f"PUSH ABORT: {status.get('reason', 'unsafe PUSH state')}. "
+                    "RETURN AVAILABLE: H plans return; review, then E executes."
+                )
             self._render()
 
     def _operator_action(self, message):
@@ -377,6 +391,8 @@ class RealExperimentOperator(Node):
             self.workflow.operator_action_status(
                 str(status.get("action", "")), bool(status.get("success", False))
             )
+            if status.get("action") == "ready" and status.get("success"):
+                self.get_logger().info("READY_FOR_NEW_SCAN: G plans scan; E executes; S freezes slot.")
             self._render()
 
 

@@ -1,0 +1,9 @@
+source;share/bookshelf_simple_experiment_ros/hook/pythonpath.ps1
+source;share/bookshelf_simple_experiment_ros/hook/pythonpath.dsv
+source;share/bookshelf_simple_experiment_ros/hook/pythonpath.sh
+source;share/bookshelf_simple_experiment_ros/hook/ament_prefix_path.ps1
+source;share/bookshelf_simple_experiment_ros/hook/ament_prefix_path.dsv
+source;share/bookshelf_simple_experiment_ros/hook/ament_prefix_path.sh
+source;../../build/bookshelf_simple_experiment_ros/share/bookshelf_simple_experiment_ros/hook/pythonpath_develop.ps1
+source;../../build/bookshelf_simple_experiment_ros/share/bookshelf_simple_experiment_ros/hook/pythonpath_develop.dsv
+source;../../build/bookshelf_simple_experiment_ros/share/bookshelf_simple_experiment_ros/hook/pythonpath_develop.sh

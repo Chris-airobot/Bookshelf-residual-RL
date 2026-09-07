@@ -182,6 +182,50 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     policy_release_guard_mode = "none"
     premature_release_penalty = 0.5
 
+    # Optional training-only release-decision shaping.  This never gates the
+    # release transition: it only scores the policy's decision against smooth
+    # ground-truth insertion/alignment readiness.
+    release_training_objective = "original"
+    release_ready_bonus = 2.0
+    release_premature_penalty = 2.0
+    release_withheld_penalty = 0.02
+    release_never_timeout_penalty = 20.0
+    release_depth_softness = 0.08
+    release_front_softness_m = 0.010
+    release_lateral_softness_m = 0.004
+    release_z_softness_m = 0.006
+    release_yaw_softness_rad = math.radians(3.0)
+    release_tilt_softness = 0.04
+
+    # Training-only policy-input nuisance.  These values describe a fixed
+    # per-episode error in the estimated book pose seen by PPO; simulation
+    # state, contacts, rewards, and success checks continue to use ground truth.
+    enable_policy_book_observation_bias = False
+    policy_book_observation_translation_bias_min = (0.0, 0.0, 0.0)
+    policy_book_observation_translation_bias_max = (0.0, 0.0, 0.0)
+    policy_book_observation_rpy_bias_min = (0.0, 0.0, 0.0)
+    policy_book_observation_rpy_bias_max = (0.0, 0.0, 0.0)
+
+    # Training-only nuisance for the held-book INSERT observation.  Scripted
+    # release and PUSH retain the physical gripper observation.
+    enable_insert_gripper_observation_nuisance = False
+    insert_gripper_observation_min = 0.0
+    insert_gripper_observation_max = 0.0
+    insert_gripper_observation_deterministic_values = ()
+
+    # F2-only schedule: scale observation/gripper nuisance from a mild fraction
+    # to its configured final bounds.  The counter is simulator steps, not the
+    # aggregate number of vectorized environment transitions.
+    enable_targeted_dr_curriculum = False
+    targeted_dr_curriculum_initial_scale = 0.25
+    targeted_dr_curriculum_total_steps = 1
+
+    # Optional episode-constant realization scale for INSERT Cartesian deltas.
+    # A value of one preserves the original controller exactly.
+    enable_insert_action_realization_dr = False
+    insert_action_realization_scale_min = 1.0
+    insert_action_realization_scale_max = 1.0
+
     # PPO outputs residual corrections, not full motion commands.  Keep these
     # smaller than v5 full-action scales so the nominal controller remains the
     # leading insertion/push intent.

@@ -185,6 +185,8 @@ def test_open_then_retreat_then_empty_close_then_push_phase_order():
         _publish_status=Mock(),
         _halt_and_fail=Mock(),
         get_logger=lambda: SimpleNamespace(warning=Mock()),
+        _start_push_tracking=Mock(),
+        _push_diagnostics=lambda: {},
     )
     result = SimpleNamespace(
         status=GoalStatus.STATUS_SUCCEEDED,
@@ -217,47 +219,3 @@ def test_open_then_retreat_then_empty_close_then_push_phase_order():
         "empty_gripper_closed",
         "push_started",
     ]
-
-
-def test_push_uses_thirty_mm_from_geometric_contact_without_uncertainty_offset():
-    release_pose = np.eye(4)
-    release_pose[0, 3] = 0.168  # Near face is X=0.09 for a 156 mm-deep book.
-    current = np.eye(4)
-    current[0, 3] = 0.121
-    harness = SimpleNamespace(
-        _post_servo_status_is_fatal=lambda: False,
-        _lookup=Mock(side_effect=[current, current]),
-        eef_frame="link_eef",
-        tcp_frame="link_tcp",
-        retreat_direction=np.array([-1.0, 0.0, 0.0]),
-        push_start_xyz=np.zeros(3),
-        push_book_origin=release_pose.copy(),
-        push_book_transform=release_pose.copy(),
-        released_book_transform=release_pose.copy(),
-        push_geometric_contact_distance_m=None,
-        push_contact_distance_m=None,
-        book_contact_gap_m=None,
-        push_distance_m=0.0,
-        book_push_distance_m=0.0,
-        geometry=SimpleNamespace(book_size=(0.156, 0.034, 0.236)),
-        get_parameter=lambda name: SimpleNamespace(
-            value={
-                "contact_tolerance_m": 0.001,
-                "push_book_distance_m": 0.03,
-                "push_x_uncertainty_m": 0.005,
-            }[name]
-        ),
-        _publish_post_visualization=Mock(),
-        _publish_twist=Mock(),
-        _log_phase_event=Mock(),
-        _complete_episode=Mock(),
-    )
-
-    SimplePolicyControlNode._push_servo_tick(harness)
-
-    assert harness.push_geometric_contact_distance_m == pytest.approx(0.09)
-    assert harness.push_contact_distance_m == pytest.approx(0.09)
-    assert harness.book_push_distance_m == pytest.approx(0.03)
-    np.testing.assert_array_equal(harness.released_book_transform, release_pose)
-    assert harness.push_book_transform[0, 3] == pytest.approx(0.198)
-    harness._complete_episode.assert_called_once()

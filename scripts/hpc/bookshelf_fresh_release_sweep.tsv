@@ -1,0 +1,5 @@
+F0	obs_moderate	original	42
+F1	obs_moderate	smooth_readiness	42
+F2	obs_moderate_curriculum	smooth_readiness	42
+F3	obs_gripper_no_grasp	smooth_readiness	42
+F4	combined_moderate	smooth_readiness	42
