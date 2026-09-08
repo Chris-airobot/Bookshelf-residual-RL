@@ -163,11 +163,16 @@ def test_july_variant_mutates_nothing():
 def test_mode_map():
     """Verify MODE mapping for scratch vs finetune variants."""
     assert MODE['sc_lat4'] == 'scratch'
-    assert len(VARIANTS) == 8
     finetune_variants = [k for k, v in MODE.items() if v == 'finetune']
     assert len(finetune_variants) == 7
-    for name in VARIANTS:
-        if name == 'sc_lat4':
-            assert MODE[name] == 'scratch'
-        else:
-            assert MODE[name] == 'finetune'
+    batch1_finetune = (
+        'july',
+        'lat4',
+        'lat4_yaw075',
+        'quad_match',
+        'wall05',
+        'wall_depth',
+        'lat4_sat001',
+    )
+    for name in batch1_finetune:
+        assert MODE[name] == 'finetune'

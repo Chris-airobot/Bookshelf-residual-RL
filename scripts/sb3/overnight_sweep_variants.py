@@ -12,9 +12,23 @@ VARIANTS = (
     'wall_depth',
     'lat4_sat001',
     'sc_lat4',
+    'sc_lat4_yaw075',
+    'sc_wall05',
+    'sc_quad_match',
+    'sc_lat2_softwall_dr',
+    'sc_wall05_ramp',
+    'sc_lat4_sat001',
 )
 
-SCRATCH_VARIANTS = ('sc_lat4',)
+SCRATCH_VARIANTS = (
+    'sc_lat4',
+    'sc_lat4_yaw075',
+    'sc_wall05',
+    'sc_quad_match',
+    'sc_lat2_softwall_dr',
+    'sc_wall05_ramp',
+    'sc_lat4_sat001',
+)
 
 MODE = {
     name: ('scratch' if name in SCRATCH_VARIANTS else 'finetune')
@@ -56,6 +70,40 @@ def apply_overnight_variant(env_cfg, variant: str) -> dict[str, object]:
         env_cfg.insert_action_saturation_penalty_enable = True
         env_cfg.insert_action_saturation_coef = 0.001
         env_cfg.insert_variant_ramp_transitions = 2_000_000
+    elif variant == 'sc_lat4_yaw075':
+        env_cfg.insert_lat_penalty_scale = 4.0
+        env_cfg.insert_yaw_penalty_scale = 0.75
+    elif variant == 'sc_wall05':
+        env_cfg.insert_wall_margin_penalty_enable = True
+        env_cfg.insert_wall_margin_penalty_scale_per_m = 20.0
+        env_cfg.insert_wall_margin_m = 0.0005
+        env_cfg.insert_variant_ramp_transitions = 0
+    elif variant == 'sc_quad_match':
+        env_cfg.insert_lat_penalty_scale = 0.0
+        env_cfg.insert_lat_penalty_quadratic = True
+        env_cfg.insert_lat_quadratic_coef_per_m2 = 2000.0
+    elif variant == 'sc_lat2_softwall_dr':
+        env_cfg.insert_lat_penalty_scale = 2.0
+        env_cfg.insert_yaw_penalty_scale = 0.5
+        env_cfg.insert_wall_margin_penalty_enable = True
+        env_cfg.insert_wall_margin_penalty_scale_per_m = 10.0
+        env_cfg.insert_wall_margin_m = 0.0005
+        env_cfg.insert_wall_margin_depth_gate_enable = True
+        env_cfg.insert_wall_depth_gate_range_m = 0.08
+        env_cfg.insert_wall_depth_gate_floor = 0.25
+        env_cfg.insert_variant_ramp_transitions = 0
+        env_cfg.slot_lateral_clearance_min = 0.0030
+        env_cfg.slot_lateral_clearance_max = 0.0045
+    elif variant == 'sc_wall05_ramp':
+        env_cfg.insert_wall_margin_penalty_enable = True
+        env_cfg.insert_wall_margin_penalty_scale_per_m = 20.0
+        env_cfg.insert_wall_margin_m = 0.0005
+        env_cfg.insert_variant_ramp_transitions = 5_000_000
+    elif variant == 'sc_lat4_sat001':
+        env_cfg.insert_lat_penalty_scale = 4.0
+        env_cfg.insert_action_saturation_penalty_enable = True
+        env_cfg.insert_action_saturation_coef = 0.001
+        env_cfg.insert_variant_ramp_transitions = 0
 
     return {
         'variant': variant,
@@ -98,5 +146,11 @@ def apply_overnight_variant(env_cfg, variant: str) -> dict[str, object]:
         ),
         'insert_variant_ramp_transitions': int(
             getattr(env_cfg, 'insert_variant_ramp_transitions', 0)
+        ),
+        'slot_lateral_clearance_min': float(
+            getattr(env_cfg, 'slot_lateral_clearance_min', 0.0030)
+        ),
+        'slot_lateral_clearance_max': float(
+            getattr(env_cfg, 'slot_lateral_clearance_max', 0.0030)
         ),
     }

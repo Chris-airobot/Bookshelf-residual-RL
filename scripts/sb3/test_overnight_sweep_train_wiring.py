@@ -121,6 +121,180 @@ def test_finetune_checkpoint_milestones():
     )
 
 
+def test_scratch_checkpoint_milestones():
+    """Verify --scratch_checkpoint_milestones parsing, wiring, and guards."""
+    tree = _get_train_tree()
+
+    # Arg definition exists
+    found_arg = False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'add_argument'
+        ):
+            if any(
+                isinstance(a, ast.Constant)
+                and a.value == '--scratch_checkpoint_milestones'
+                for a in node.args
+            ):
+                found_arg = True
+    assert found_arg, '--scratch_checkpoint_milestones argument missing'
+
+    # Wired to MilestoneCheckpointCallback with name_tag='fresh'
+    # and milestones=
+    found_fresh_cb = False
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and getattr(node.func, 'id', None) == 'MilestoneCheckpointCallback'
+        ):
+            has_fresh = any(
+                kw.arg == 'name_tag'
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value == 'fresh'
+                for kw in node.keywords
+            )
+            has_milestones = any(
+                kw.arg == 'milestones'
+                and isinstance(kw.value, ast.Name)
+                and kw.value.id == 'scratch_milestones'
+                for kw in node.keywords
+            )
+            if has_fresh and has_milestones:
+                found_fresh_cb = True
+    assert found_fresh_cb, (
+        'MilestoneCheckpointCallback(name_tag="fresh", milestones=...) missing'
+    )
+
+    # Wiring if branch specifically tests scratch_milestones is not None
+    found_wiring_if = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            test_names = {
+                n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)
+            }
+            body_names = {
+                n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+            }
+            if (
+                'scratch_milestones' in test_names
+                and 'MilestoneCheckpointCallback' in body_names
+            ):
+                cmp_nodes = [
+                    n for n in ast.walk(node.test)
+                    if isinstance(n, ast.Compare)
+                ]
+                has_is_not_none = any(
+                    isinstance(c.left, ast.Name)
+                    and c.left.id == 'scratch_milestones'
+                    and len(c.ops) == 1
+                    and isinstance(c.ops[0], ast.IsNot)
+                    and len(c.comparators) == 1
+                    and isinstance(c.comparators[0], ast.Constant)
+                    and c.comparators[0].value is None
+                    for c in cmp_nodes
+                )
+                if has_is_not_none:
+                    found_wiring_if = True
+    assert found_wiring_if, (
+        'Wiring branch must test scratch_milestones is not None'
+    )
+
+    # Incompatible with resume and mutually exclusive with interval & finetune
+    error_msgs = []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == 'error'
+        ):
+            for a in node.args:
+                if isinstance(a, ast.Constant):
+                    error_msgs.append(a.value)
+
+    assert any(
+        '--scratch_checkpoint_milestones is incompatible with --resume' in m
+        for m in error_msgs
+    )
+    assert any(
+        '--scratch_checkpoint_milestones and '
+        '--training_checkpoint_interval_steps are mutually exclusive' in m
+        for m in error_msgs
+    )
+    assert any(
+        '--scratch_checkpoint_milestones and '
+        '--finetune_checkpoint_milestones are mutually exclusive' in m
+        for m in error_msgs
+    )
+    assert any(
+        '--finetune_checkpoint_milestones requires --resume' in m
+        for m in error_msgs
+    )
+
+    # Plain checkpoint callback guard structurally asserts is None
+    guard_node = None
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.BoolOp)
+            and isinstance(node.test.op, ast.And)
+        ):
+            test_names = {
+                n.id for n in ast.walk(node.test) if isinstance(n, ast.Name)
+            }
+            if {
+                'checkpoint_interval',
+                'training_checkpoint_interval',
+                'finetune_milestones',
+                'scratch_milestones',
+            }.issubset(test_names):
+                body_names = {
+                    n.id for n in ast.walk(node) if isinstance(n, ast.Name)
+                }
+                if (
+                    'checkpoint_callback' in body_names
+                    or 'vecnormalize_checkpoint_callback' in body_names
+                ):
+                    guard_node = node
+                    break
+    assert guard_node is not None, (
+        'Plain checkpoint callback guard ast.If not found'
+    )
+
+    cmp_nodes = [
+        n for n in ast.walk(guard_node.test) if isinstance(n, ast.Compare)
+    ]
+
+    scratch_is_none = any(
+        isinstance(c.left, ast.Name)
+        and c.left.id == 'scratch_milestones'
+        and len(c.ops) == 1
+        and isinstance(c.ops[0], ast.Is)
+        and len(c.comparators) == 1
+        and isinstance(c.comparators[0], ast.Constant)
+        and c.comparators[0].value is None
+        for c in cmp_nodes
+    )
+    assert scratch_is_none, (
+        'Guard must structurally assert scratch_milestones is None'
+    )
+
+    finetune_is_none = any(
+        isinstance(c.left, ast.Name)
+        and c.left.id == 'finetune_milestones'
+        and len(c.ops) == 1
+        and isinstance(c.ops[0], ast.Is)
+        and len(c.comparators) == 1
+        and isinstance(c.comparators[0], ast.Constant)
+        and c.comparators[0].value is None
+        for c in cmp_nodes
+    )
+    assert finetune_is_none, (
+        'Guard must structurally assert finetune_milestones is None'
+    )
+
+
 def test_milestone_callback_structure():
     """Verify MilestoneCheckpointCallback structure."""
     tree = _get_train_tree()

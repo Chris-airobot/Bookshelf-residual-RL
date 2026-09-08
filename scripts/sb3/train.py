@@ -106,6 +106,12 @@ parser.add_argument(
     help="Comma-separated list of additional environment steps at which to save paired fine-tuning snapshots.",
 )
 parser.add_argument(
+    "--scratch_checkpoint_milestones",
+    type=str,
+    default=None,
+    help="Comma-separated aggregate-transition milestones for paired scratch snapshots (name_tag=fresh).",
+)
+parser.add_argument(
     "--overnight_variant",
     choices=VARIANTS + ("disabled",),
     default="disabled",
@@ -182,6 +188,22 @@ if (
 ):
     parser.error(
         "--finetune_checkpoint_milestones and --finetune_checkpoint_interval_steps are mutually exclusive"
+    )
+if args_cli.scratch_checkpoint_milestones is not None and args_cli.resume:
+    parser.error("--scratch_checkpoint_milestones is incompatible with --resume")
+if (
+    args_cli.scratch_checkpoint_milestones is not None
+    and args_cli.training_checkpoint_interval_steps > 0
+):
+    parser.error(
+        "--scratch_checkpoint_milestones and --training_checkpoint_interval_steps are mutually exclusive"
+    )
+if (
+    args_cli.scratch_checkpoint_milestones is not None
+    and args_cli.finetune_checkpoint_milestones is not None
+):
+    parser.error(
+        "--scratch_checkpoint_milestones and --finetune_checkpoint_milestones are mutually exclusive"
     )
 # always enable cameras to record video
 if args_cli.video:
@@ -523,6 +545,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if any(m <= 0 for m in finetune_milestones):
             raise ValueError(
                 "--finetune_checkpoint_milestones must contain positive step counts"
+            )
+
+    scratch_milestones = None
+    if args_cli.scratch_checkpoint_milestones is not None:
+        try:
+            scratch_milestones = [
+                int(x.strip())
+                for x in args_cli.scratch_checkpoint_milestones.split(",")
+                if x.strip()
+            ]
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid integer in --scratch_checkpoint_milestones: {err}"
+            ) from err
+        if not scratch_milestones:
+            raise ValueError("--scratch_checkpoint_milestones cannot be empty")
+        if any(m <= 0 for m in scratch_milestones):
+            raise ValueError(
+                "--scratch_checkpoint_milestones must contain positive step counts"
             )
 
     # set the environment seed
@@ -886,7 +927,24 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 verbose=1,
             )
         )
-    if not checkpoint_interval and not training_checkpoint_interval and finetune_milestones is None:
+    if scratch_milestones is not None:
+        if args_cli.resume:
+            raise ValueError("scratch milestone checkpoints cannot be used with --resume")
+        callbacks.append(
+            MilestoneCheckpointCallback(
+                save_path=log_dir,
+                total_additional_steps=int(n_timesteps),
+                name_tag="fresh",
+                milestones=scratch_milestones,
+                verbose=1,
+            )
+        )
+    if (
+        not checkpoint_interval
+        and not training_checkpoint_interval
+        and finetune_milestones is None
+        and scratch_milestones is None
+    ):
         callbacks[0:0] = [checkpoint_callback, vecnormalize_checkpoint_callback]
     if mlflow_active:
         callbacks.append(MlflowSb3MetricsCallback(log_every_n_calls=args_cli.mlflow_log_every_n_calls))
