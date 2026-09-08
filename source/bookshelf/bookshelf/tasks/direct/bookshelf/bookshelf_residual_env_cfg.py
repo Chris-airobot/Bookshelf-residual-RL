@@ -287,3 +287,32 @@ class BookshelfEnvCfg(BookshelfEnvCfgV5):
     final_dyaw_limit = math.radians(0.8)
     final_dpitch_limit = math.radians(0.6)
     final_dbase_y_rotation_limit = math.radians(0.6)
+
+    # --- Overnight sweep: INSERT-only variants (inert by default) ---
+    # Quadratic INSERT lateral penalty (J4). Caller sets
+    # insert_lat_penalty_scale = 0.0 to remove linear v4 lateral term.
+    insert_lat_penalty_quadratic = False
+    # J4 target: 2000.0 (penalty = coef * lat_err_m**2)
+    insert_lat_quadratic_coef_per_m2 = 0.0
+
+    # INSERT-only corner/extent wall-margin penalty (J2, J7 base).
+    # wall = scale * relu(lat_extent - (inner_half_env - margin))
+    insert_wall_margin_penalty_enable = False
+    insert_wall_margin_penalty_scale_per_m = 0.0  # J2/J7 target: 20.0 (1/m)
+    insert_wall_margin_m = 0.0  # J2/J7 target: 0.0005 (0.5 mm)
+    # Depth gate (J7 only): multiply wall penalty by g(d),
+    # d = mouth_x - front_x (leading edge).
+    # g(d) = 0.25 + 0.75 * clip(1 - d / range, 0, 1)
+    insert_wall_margin_depth_gate_enable = False
+    insert_wall_depth_gate_range_m = 0.08
+    insert_wall_depth_gate_floor = 0.25
+
+    # INSERT-only saturation penalty on PRE-CLAMP sampled motion actions (J6).
+    # sat = coef * mean_5_dims( relu(|a_raw| - 1)**2 ) (release EXCLUDED)
+    insert_action_saturation_penalty_enable = False
+    insert_action_saturation_coef = 0.0  # J6 target: 0.001
+
+    # Transition ramp for NEW wall (J2/J7) and saturation (J6) terms.
+    # ramp_frac = clip( (steps * num_envs) / ramp_transitions, 0, 1 )
+    # 0 disables ramping (multiplier is always 1.0).
+    insert_variant_ramp_transitions = 0  # J2/J6/J7 target: 2_000_000

@@ -16,12 +16,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+from collections.abc import Sequence
+
 # Ensure the bookshelf package is importable regardless of install state.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _BOOKSHELF_SRC = _REPO_ROOT / "source" / "bookshelf"
 if str(_BOOKSHELF_SRC) not in sys.path:
     sys.path.insert(0, str(_BOOKSHELF_SRC))
+_SB3_DIR = Path(__file__).resolve().parent
+if str(_SB3_DIR) not in sys.path:
+    sys.path.insert(0, str(_SB3_DIR))
 
+from overnight_sweep_variants import VARIANTS, apply_overnight_variant
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
@@ -94,6 +100,18 @@ parser.add_argument(
     help="Save paired PPO/VecNormalize fine-tuning snapshots at this many additional environment steps.",
 )
 parser.add_argument(
+    "--finetune_checkpoint_milestones",
+    type=str,
+    default=None,
+    help="Comma-separated list of additional environment steps at which to save paired fine-tuning snapshots.",
+)
+parser.add_argument(
+    "--overnight_variant",
+    choices=VARIANTS + ("disabled",),
+    default="disabled",
+    help="Overnight RL sweep variant to apply to Bookshelf-Residual-Direct-v0.",
+)
+parser.add_argument(
     "--disable_reset_acceptance_gate",
     action="store_true",
     default=False,
@@ -156,6 +174,15 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.resume and args_cli.checkpoint is None:
     parser.error("--resume requires --checkpoint")
+if args_cli.finetune_checkpoint_milestones is not None and not args_cli.resume:
+    parser.error("--finetune_checkpoint_milestones requires --resume")
+if (
+    args_cli.finetune_checkpoint_milestones is not None
+    and args_cli.finetune_checkpoint_interval_steps > 0
+):
+    parser.error(
+        "--finetune_checkpoint_milestones and --finetune_checkpoint_interval_steps are mutually exclusive"
+    )
 # always enable cameras to record video
 if args_cli.video:
     args_cli.enable_cameras = True
@@ -377,7 +404,16 @@ class VecNormalizeCheckpointCallback(BaseCallback):
 class MilestoneCheckpointCallback(BaseCallback):
     """Save paired model/normalization snapshots at requested step milestones."""
 
-    def __init__(self, interval_steps: int, save_path: str, total_additional_steps: int, name_tag: str, save_terminal_milestone: bool = True, verbose: int = 0):
+    def __init__(
+        self,
+        interval_steps: int = 0,
+        save_path: str = "",
+        total_additional_steps: int = 0,
+        name_tag: str = "",
+        save_terminal_milestone: bool = True,
+        milestones: Sequence[int] | None = None,
+        verbose: int = 0,
+    ):
         super().__init__(verbose=verbose)
         self.interval_steps = int(interval_steps)
         self.save_path = Path(save_path)
@@ -385,13 +421,44 @@ class MilestoneCheckpointCallback(BaseCallback):
         self.name_tag = str(name_tag)
         self.save_terminal_milestone = bool(save_terminal_milestone)
         self.start_timesteps = 0
-        self.next_milestone = self.interval_steps
+        if milestones is not None:
+            self.milestones = sorted({int(m) for m in milestones if int(m) > 0})
+            self._milestone_idx = 0
+            self.next_milestone = 0
+            self._effective_milestones: list[int] = []
+        else:
+            self.milestones = None
+            self.next_milestone = self.interval_steps
+            self._effective_milestones = []
 
     def _on_training_start(self) -> None:
         self.start_timesteps = int(self.model.num_timesteps)
+        if self.milestones is not None:
+            self._effective_milestones = sorted(
+                {min(int(m), self.total_additional_steps) for m in self.milestones}
+            )
+            self._milestone_idx = 0
 
     def _on_step(self) -> bool:
         additional_steps = int(self.model.num_timesteps) - self.start_timesteps
+        if self.milestones is not None:
+            while (
+                self._milestone_idx < len(self._effective_milestones)
+                and additional_steps >= self._effective_milestones[self._milestone_idx]
+            ):
+                milestone = self._effective_milestones[self._milestone_idx]
+                self._milestone_idx += 1
+                self.save_path.mkdir(parents=True, exist_ok=True)
+                model_path = self.save_path / f"model_{self.name_tag}_{milestone}_steps"
+                vec_path = self.save_path / f"model_vecnormalize_{self.name_tag}_{milestone}_steps.pkl"
+                self.model.save(str(model_path))
+                if not isinstance(self.training_env, VecNormalize):
+                    raise RuntimeError("fine-tuning milestones require the resumed VecNormalize environment")
+                self.training_env.save(str(vec_path))
+                if self.verbose > 0:
+                    print(f"[MILESTONE_CHECKPOINT] model={model_path}.zip vecnormalize={vec_path}", flush=True)
+            return True
+
         while self.next_milestone > 0 and additional_steps >= self.next_milestone:
             if self.next_milestone >= self.total_additional_steps and not self.save_terminal_milestone:
                 self.next_milestone = 0
@@ -437,6 +504,25 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         if args_cli.checkpoint is not None or args_cli.resume:
             raise ValueError(
                 "--initial_release_action_mean is only supported for a fresh PPO policy"
+            )
+
+    finetune_milestones = None
+    if args_cli.finetune_checkpoint_milestones is not None:
+        try:
+            finetune_milestones = [
+                int(x.strip())
+                for x in args_cli.finetune_checkpoint_milestones.split(",")
+                if x.strip()
+            ]
+        except ValueError as err:
+            raise ValueError(
+                f"Invalid integer in --finetune_checkpoint_milestones: {err}"
+            ) from err
+        if not finetune_milestones:
+            raise ValueError("--finetune_checkpoint_milestones cannot be empty")
+        if any(m <= 0 for m in finetune_milestones):
+            raise ValueError(
+                "--finetune_checkpoint_milestones must contain positive step counts"
             )
 
     # set the environment seed
@@ -530,6 +616,20 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         env_cfg.slot_lateral_clearance_min = float(args_cli.fixed_clearance)
         env_cfg.slot_lateral_clearance_max = float(args_cli.fixed_clearance)
 
+    resolved_overnight_variant = None
+    if args_cli.overnight_variant != "disabled":
+        if args_cli.task != "Bookshelf-Residual-Direct-v0":
+            raise ValueError(
+                "overnight variants require the Bookshelf-Residual-Direct-v0 task"
+            )
+        resolved_overnight_variant = apply_overnight_variant(
+            env_cfg, args_cli.overnight_variant
+        )
+        print(
+            f"[OVERNIGHT_VARIANT] {json.dumps(resolved_overnight_variant, sort_keys=True)}",
+            flush=True,
+        )
+
     # directory for logging into
     run_info = args_cli.run_name or datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     if Path(run_info).name != run_info or run_info in ("", ".", ".."):
@@ -543,6 +643,10 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # dump the configuration into log-directory
     dump_yaml(os.path.join(log_dir, "params", "env.yaml"), env_cfg)
     dump_yaml(os.path.join(log_dir, "params", "agent.yaml"), agent_cfg)
+    if resolved_overnight_variant is not None:
+        (Path(log_dir) / "params" / "overnight_variant.json").write_text(
+            json.dumps(resolved_overnight_variant, indent=2, sort_keys=True)
+        )
 
     # save command used to run the script
     command = " ".join(sys.orig_argv)
@@ -687,6 +791,33 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
         agent.seed = agent_cfg["seed"]
         agent.set_random_seed(agent_cfg["seed"])
         agent.verbose = 1
+
+        # --- enforce intended fine-tune hyperparameters on the resumed model ---
+        loaded = {
+            'n_epochs': agent.n_epochs,
+            'ent_coef': agent.ent_coef,
+            'batch_size': agent.batch_size,
+        }
+        if 'n_epochs' in agent_cfg:
+            agent.n_epochs = int(agent_cfg['n_epochs'])
+        if 'ent_coef' in agent_cfg:
+            agent.ent_coef = float(agent_cfg['ent_coef'])
+        # LR + clip already handled via custom_objects; re-assert schedules defensively:
+        if agent_cfg.get('learning_rate') is not None:
+            agent.lr_schedule = _as_schedule(agent_cfg['learning_rate'])
+            agent.learning_rate = agent_cfg['learning_rate']
+        if agent_cfg.get('clip_range') is not None:
+            agent.clip_range = _as_schedule(agent_cfg['clip_range'])
+        # NOTE: do NOT change batch_size on resume (keep July pickle value) unless agent_cfg explicitly differs.
+        print(
+            '[RESUME_HYPERPARAMS] '
+            f'effective n_epochs={agent.n_epochs} ent_coef={agent.ent_coef} '
+            f'batch_size={agent.batch_size} '
+            f'lr={float(agent.lr_schedule(1.0)):.2e} '
+            f'clip_range={float(agent.clip_range(1.0)):.3f} | '
+            f'loaded_from_pickle={loaded}',
+            flush=True,
+        )
     else:
         # Intentionally do not load old VecNormalize.pkl when warm-starting:
         # reward distribution often shifts across curriculum experiments.
@@ -715,7 +846,19 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     checkpoint_interval = int(args_cli.finetune_checkpoint_interval_steps)
     if checkpoint_interval < 0:
         raise ValueError("--finetune_checkpoint_interval_steps must be non-negative")
-    if checkpoint_interval:
+    if finetune_milestones is not None:
+        if not args_cli.resume:
+            raise ValueError("fine-tuning milestone checkpoints require --resume")
+        callbacks.append(
+            MilestoneCheckpointCallback(
+                save_path=log_dir,
+                total_additional_steps=int(n_timesteps),
+                name_tag="finetune",
+                milestones=finetune_milestones,
+                verbose=1,
+            )
+        )
+    elif checkpoint_interval:
         if not args_cli.resume:
             raise ValueError("fine-tuning milestone checkpoints require --resume")
         callbacks.append(
@@ -743,7 +886,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 verbose=1,
             )
         )
-    if not checkpoint_interval and not training_checkpoint_interval:
+    if not checkpoint_interval and not training_checkpoint_interval and finetune_milestones is None:
         callbacks[0:0] = [checkpoint_callback, vecnormalize_checkpoint_callback]
     if mlflow_active:
         callbacks.append(MlflowSb3MetricsCallback(log_every_n_calls=args_cli.mlflow_log_every_n_calls))

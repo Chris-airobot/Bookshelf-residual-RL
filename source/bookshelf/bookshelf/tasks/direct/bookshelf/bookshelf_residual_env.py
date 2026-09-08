@@ -33,6 +33,7 @@ from isaaclab.utils import math as math_utils
 from .bookshelf_residual_env_cfg import BookshelfEnvCfg
 from .bookshelf_env_v4 import _MODE_INSERT, _MODE_PUSH, _MODE_SCRIPTED, _wrap_to_pi, _yaw_from_quat_wxyz
 from .bookshelf_env_v5 import BookshelfEnv as BookshelfEnvV5
+from . import overnight_sweep_reward as osr
 
 
 class BookshelfEnv(BookshelfEnvV5):
@@ -93,6 +94,7 @@ class BookshelfEnv(BookshelfEnvV5):
         )
         self._debug_integrated_target_control_step = -1
         self._debug_missing_index_sequence_cursor = 0
+        self._raw_actions = None
         pose_ik_rotation_weight = getattr(
             self.cfg, "debug_pose_ik_rotation_weight", None
         )
@@ -2639,6 +2641,7 @@ class BookshelfEnv(BookshelfEnvV5):
         )
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        self._raw_actions = actions.detach().clone()
         self.actions = actions.clone().clamp(-1.0, 1.0)
         self._mode_start = self._mode.clone()
         raw_policy_release = self.actions[:, -1] > float(self.cfg.release_trigger_threshold)
@@ -2745,6 +2748,97 @@ class BookshelfEnv(BookshelfEnvV5):
             self.extras["log"]["release_readiness_mean"] = readiness[insert].mean() if torch.any(insert) else readiness.mean() * 0.0
             self.extras["log"]["release_decision_reward_mean"] = decision_reward.mean()
             self.extras["log"]["never_release_timeout_penalty_mean"] = timeout_penalty.mean()
+
+        m = self._step_metrics or self._compute_task_metrics()
+        insert_mask = (self._mode_start == _MODE_INSERT).float()
+        agg_transitions = int(self.common_step_counter) * int(self.num_envs)
+        ramp = osr.ramp_fraction(
+            agg_transitions,
+            getattr(self.cfg, 'insert_variant_ramp_transitions', 0),
+        )
+
+        variant_penalty = torch.zeros_like(rew)
+
+        # J4 quadratic INSERT lateral (NO ramp). lat_err is metres.
+        if bool(getattr(self.cfg, 'insert_lat_penalty_quadratic', False)):
+            coef = float(
+                getattr(self.cfg, 'insert_lat_quadratic_coef_per_m2', 0.0)
+            )
+            quad_term = osr.quadratic_lat_penalty(m['lat_err'], coef)
+            variant_penalty = variant_penalty + quad_term
+            self.extras['log']['insert_lat_penalty_quadratic_mean'] = (
+                (quad_term * insert_mask).sum()
+                / insert_mask.sum().clamp(min=1.0)
+            )
+
+        # J2 / J7 wall-margin (RAMPED). Per-env inner_half from clearances.
+        if bool(getattr(self.cfg, 'insert_wall_margin_penalty_enable', False)):
+            inner_half_env = 0.5 * (
+                self._neighbor_thick_y + self._slot_lateral_clearance_env
+            )
+            wall = osr.wall_margin_penalty(
+                m['lat_extent'],
+                inner_half_env,
+                float(self.cfg.insert_wall_margin_m),
+                float(self.cfg.insert_wall_margin_penalty_scale_per_m),
+            )
+            if bool(
+                getattr(self.cfg, 'insert_wall_margin_depth_gate_enable', False)
+            ):
+                front_x = float(self.cfg.slot_x_back) - m['front_to_back']
+                d = float(self._geom_mouth_x) - front_x
+                gate = osr.wall_depth_gate(
+                    d,
+                    float(self.cfg.insert_wall_depth_gate_range_m),
+                    float(self.cfg.insert_wall_depth_gate_floor),
+                )
+                wall = wall * gate
+            ramped_wall = ramp * wall
+            variant_penalty = variant_penalty + ramped_wall
+            self.extras['log']['insert_wall_margin_penalty_mean'] = (
+                (ramped_wall * insert_mask).sum()
+                / insert_mask.sum().clamp(min=1.0)
+            )
+
+        # J6 saturation on PRE-CLAMP motion actions 0..4 (dim 5 EXCLUDED).
+        if bool(
+            getattr(self.cfg, 'insert_action_saturation_penalty_enable', False)
+        ):
+            raw = (
+                self._raw_actions
+                if self._raw_actions is not None
+                else self.actions
+            )
+            sat = osr.saturation_penalty(
+                raw[:, :5], float(self.cfg.insert_action_saturation_coef)
+            )
+            ramped_sat = ramp * sat
+            variant_penalty = variant_penalty + ramped_sat
+            self.extras['log']['insert_action_saturation_penalty_mean'] = (
+                (ramped_sat * insert_mask).sum()
+                / insert_mask.sum().clamp(min=1.0)
+            )
+
+        # Ensure penalties are strictly INSERT-only (identically 0 in PUSH/SCRIPTED)
+        rew = rew - insert_mask * variant_penalty
+        if (
+            bool(getattr(self.cfg, 'insert_lat_penalty_quadratic', False))
+            or bool(
+                getattr(self.cfg, 'insert_wall_margin_penalty_enable', False)
+            )
+            or bool(
+                getattr(
+                    self.cfg, 'insert_action_saturation_penalty_enable', False
+                )
+            )
+        ):
+            self.extras['log']['insert_variant_ramp_frac'] = torch.tensor(
+                float(ramp), device=self.device
+            )
+            self.extras['log']['insert_variant_penalty_mean'] = (
+                (variant_penalty * insert_mask).sum()
+                / insert_mask.sum().clamp(min=1.0)
+            )
 
         weight = float(getattr(self.cfg, "residual_action_l2_weight", 0.0))
         if weight <= 0.0:
